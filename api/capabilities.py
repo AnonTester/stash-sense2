@@ -10,16 +10,17 @@ from pathlib import Path
 
 # Face data files (shipped via database import)
 _FACE_DATA_FILES = [
-    "face_facenet.voy",
-    "face_arcface.voy",
+    "face_embeddings.usearch",
     "faces.json",
     "performers.json",
 ]
 
-# Face recognition ONNX models
+# Face recognition ONNX models (buffalo_l, downloaded by insightface's own
+# model zoo mechanism into a buffalo_l/ subfolder under models_dir -- not
+# the flat single-file layout the old FaceNet512/ArcFace models used)
 _FACE_MODEL_FILES = [
-    "facenet512.onnx",
-    "arcface.onnx",
+    "models/buffalo_l/det_10g.onnx",
+    "models/buffalo_l/w600k_r50.onnx",
 ]
 
 # Tattoo detection ONNX models

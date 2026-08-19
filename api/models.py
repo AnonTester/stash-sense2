@@ -109,9 +109,8 @@ class DatabaseManifest:
     sources: list[str]  # e.g., ["stashdb.org", "boobpedia.com"]
 
     # Model info for compatibility checking
-    facenet_dim: int = 512
-    arcface_dim: int = 512
-    detector: str = "yolov8"
+    embedding_dim: int = 512
+    detector: str = "scrfd_10gf_buffalo_l"
 
     # File checksums
     checksums: dict[str, str] = field(default_factory=dict)
