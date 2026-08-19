@@ -1,0 +1,131 @@
+# syntax=docker/dockerfile:1
+#
+# AMD ROCm GPU variant -- the one actually run and tested on this
+# deployment (AMD Radeon 780M / gfx1103). Recipe proven live in
+# /opt/face-pipeline-bench/Dockerfile.gpu and stash-sense2-data-gen's own
+# Dockerfile.rocm; ported here rather than re-derived. See those files'
+# comments for the full story on each package choice.
+
+# Stage 0: Static ffmpeg (latest release, GPU-capable)
+FROM mwader/static-ffmpeg:latest AS ffmpeg-static
+
+# Stage 1: Build dependencies
+FROM python:3.11-slim AS build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    libgles2 \
+    libegl1 \
+    gnupg \
+    wget \
+    && wget -qO - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/debian jammy main" \
+       > /etc/apt/sources.list.d/rocm.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    hip-runtime-amd \
+    hipblas \
+    hipfft \
+    miopen-hip \
+    rocm-smi-lib \
+    roctracer \
+    # gfx1103 has no precompiled MIOpen kernel cache (unsupported target) --
+    # these are needed for MIOpen's hiprtc JIT-compile fallback at first use.
+    hip-dev \
+    hipcc \
+    miopen-hip-dev \
+    rocm-device-libs-17 \
+    && echo "/opt/rocm-7.2.4/lib" > /etc/ld.so.conf.d/rocm.conf \
+    && ldconfig \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+RUN python -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+COPY requirements.docker.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.docker.txt
+
+# onnxruntime-rocm and insightface installed as separate, ordered steps:
+# onnxruntime-rocm first (after uninstalling the plain CPU build
+# insightface pulled in above), then insightface reinstalled --no-deps so
+# a future pip resolve of its own onnxruntime requirement can't silently
+# overwrite onnxruntime-rocm's pybind extension with a CPU-only one.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall -y onnxruntime && pip install "onnxruntime-rocm>=1.22.2"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps --force-reinstall "insightface>=0.7.3"
+
+# Stage 2: Runtime
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libgles2 \
+    libegl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    curl \
+    gnupg \
+    wget \
+    # System ffmpeg (dynamically linked). Used by FFMPEG_HWACCEL=vaapi: the
+    # static mwader build is fully static and cannot dlopen the libva
+    # backend plugins VAAPI requires at runtime.
+    ffmpeg \
+    libva2 \
+    libva-drm2 \
+    mesa-va-drivers \
+    && wget -qO - https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor -o /etc/apt/keyrings/rocm.gpg \
+    && echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/debian jammy main" \
+       > /etc/apt/sources.list.d/rocm.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    hip-runtime-amd \
+    hipblas \
+    hipfft \
+    miopen-hip \
+    rocm-smi-lib \
+    roctracer \
+    && echo "/opt/rocm-7.2.4/lib" > /etc/ld.so.conf.d/rocm.conf \
+    && ldconfig \
+    && rm -rf /var/lib/apt/lists/*
+
+# gfx1103 isn't on ROCm's officially-supported target list -- without this,
+# onnxruntime-rocm's ROCM execution provider segfaults (confirmed live,
+# SIGSEGV inside libamdhip64) before running a single inference.
+ENV HSA_OVERRIDE_GFX_VERSION=11.0.0
+
+# Static ffmpeg at /usr/local/bin/ffmpeg (takes PATH precedence over system
+# ffmpeg). VAAPI mode explicitly uses /usr/bin/ffmpeg (system package)
+# instead.
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-static /ffprobe /usr/local/bin/ffprobe
+
+# MediaPipe runtime dependency check (required by mp.Image)
+RUN ldconfig -p | grep -q "libGLESv2.so.2"
+
+WORKDIR /app
+
+COPY --from=build /app/venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+COPY api/ ./
+
+RUN mkdir -p /data
+
+ENV DATA_DIR=/data
+ENV PYTHONUNBUFFERED=1
+ENV ENABLE_TATTOO_SIGNAL=auto
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+STOPSIGNAL SIGTERM
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]

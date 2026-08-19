@@ -13,7 +13,7 @@ torchvision>=0.20.0
 deepface>=0.0.93
 insightface>=0.7.0,<1  # RetinaFace detection (GPU via ONNX Runtime)
 onnxruntime-gpu>=1.15.0,<2  # GPU support for InsightFace
-voyager>=2.0.0,<3
+usearch>=2.16.0,<3
 
 # Body pose estimation
 mediapipe>=0.10.9

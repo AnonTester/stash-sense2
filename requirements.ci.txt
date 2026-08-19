@@ -1,5 +1,5 @@
 # CI test dependencies - lightweight, no ML/GPU packages
-# Excludes: onnxruntime-gpu, insightface, voyager, mediapipe, torch, deepface, cv2
+# Excludes: onnxruntime-gpu, onnxruntime-rocm, insightface, usearch, mediapipe, torch, deepface, cv2
 
 # Runtime
 fastapi>=0.100.0,<1

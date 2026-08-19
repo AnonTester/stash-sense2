@@ -1,0 +1,119 @@
+# syntax=docker/dockerfile:1
+#
+# NVIDIA CUDA GPU variant. Offered on a best-effort basis for users with
+# NVIDIA hardware -- UNVERIFIED on this deployment. stash-sense2 is
+# developed and tested on an AMD Radeon 780M (see Dockerfile.rocm, the
+# variant actually run here); this file only received the buffalo_l/
+# usearch dependency swap, not a real GPU test pass. If you hit a CUDA-
+# specific issue, please open one -- there's no NVIDIA card on the
+# reference deployment to reproduce it against.
+
+# Stage 0: Static ffmpeg (latest release, GPU-capable)
+FROM mwader/static-ffmpeg:latest AS ffmpeg-static
+
+# Stage 1: Build dependencies
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    build-essential \
+    libgl1-mesa-glx \
+    libgles2 \
+    libegl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+WORKDIR /app
+
+# Create venv and install dependencies
+RUN python -m venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+COPY requirements.docker.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.docker.txt
+
+# onnxruntime-gpu (NVIDIA CUDA build) installed as a separate, ordered step
+# after the main requirements -- insightface's own declared onnxruntime
+# dependency (pulled in above) would otherwise coexist ambiguously with a
+# GPU-specific build. Uninstall the plain CPU onnxruntime pulled in above,
+# then install onnxruntime-gpu, then reinstall insightface --no-deps so a
+# future pip resolve of its own onnxruntime requirement can't silently pull
+# the CPU build back in. Mirrors Dockerfile.rocm's proven pattern.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall -y onnxruntime && pip install "onnxruntime-gpu>=1.17.0,<2"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps --force-reinstall "insightface>=0.7.3"
+
+# Stage 2: Runtime
+FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    libgl1-mesa-glx \
+    libgles2 \
+    libegl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    curl \
+    # System ffmpeg (Ubuntu 22.04 package, dynamically linked).
+    # Used by FFMPEG_HWACCEL=vaapi: the static mwader build is fully static
+    # and cannot dlopen the libva backend plugins that VAAPI requires at
+    # runtime. The system package at /usr/bin/ffmpeg dynamically links
+    # libva and correctly loads the Mesa driver (mesa-va-drivers).
+    ffmpeg \
+    libva2 \
+    libva-drm2 \
+    mesa-va-drivers \
+    && rm -rf /var/lib/apt/lists/*
+
+# Static ffmpeg at /usr/local/bin/ffmpeg (takes PATH precedence over system
+# ffmpeg). Used for CPU and CUDA modes -- newer, better HEVC/10-bit support.
+# VAAPI mode explicitly uses /usr/bin/ffmpeg (system package) instead.
+COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
+COPY --from=ffmpeg-static /ffprobe /usr/local/bin/ffprobe
+
+# MediaPipe runtime dependency check (required by mp.Image)
+RUN ldconfig -p | grep -q "libGLESv2.so.2"
+
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
+WORKDIR /app
+
+# Copy venv from build stage
+COPY --from=build /app/venv /app/venv
+ENV PATH="/app/venv/bin:$PATH"
+
+# Copy application code
+COPY api/ ./
+
+# Create data directory mount point
+RUN mkdir -p /data
+
+# Environment defaults
+ENV DATA_DIR=/data
+ENV PYTHONUNBUFFERED=1
+ENV ENABLE_TATTOO_SIGNAL=auto
+
+EXPOSE 5000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+STOPSIGNAL SIGTERM
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]

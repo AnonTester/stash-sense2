@@ -1,32 +1,25 @@
 # syntax=docker/dockerfile:1
+#
+# CPU-only variant (default/fallback for either GPU vendor). See
+# Dockerfile.rocm (AMD, tested on this deployment) and Dockerfile.cuda
+# (NVIDIA, best-effort/unverified) for GPU acceleration.
 
-# Stage 0: Static ffmpeg (latest release, GPU-capable)
+# Stage 0: Static ffmpeg (latest release)
 FROM mwader/static-ffmpeg:latest AS ffmpeg-static
 
 # Stage 1: Build dependencies
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04 AS build
+FROM python:3.11-slim AS build
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-# Install Python and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3-pip \
     build-essential \
-    libgl1-mesa-glx \
+    libgl1 \
+    libglib2.0-0 \
     libgles2 \
     libegl1 \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 WORKDIR /app
 
-# Create venv and install dependencies
 RUN python -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 
@@ -34,14 +27,18 @@ COPY requirements.docker.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.docker.txt
 
-# Stage 2: Runtime
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# Plain CPU onnxruntime -- insightface's own declared onnxruntime
+# dependency (pulled in above) already resolves to this, so no ordering
+# trick is needed here (only the GPU variants need one, since a
+# vendor-specific build would otherwise get silently clobbered).
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install "onnxruntime>=1.17.0,<2"
 
-ENV DEBIAN_FRONTEND=noninteractive
+# Stage 2: Runtime
+FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    libgl1-mesa-glx \
+    libgl1 \
     libgles2 \
     libegl1 \
     libglib2.0-0 \
@@ -49,11 +46,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     libxrender-dev \
     curl \
-    # System ffmpeg (Ubuntu 22.04 package, dynamically linked).
-    # Used by FFMPEG_HWACCEL=vaapi: the static mwader build is fully static
-    # and cannot dlopen the libva backend plugins that VAAPI requires at
-    # runtime. The system package at /usr/bin/ffmpeg dynamically links
-    # libva and correctly loads the Mesa driver (mesa-va-drivers).
+    # System ffmpeg (dynamically linked). Used by FFMPEG_HWACCEL=vaapi: the
+    # static mwader build is fully static and cannot dlopen the libva
+    # backend plugins VAAPI requires at runtime.
     ffmpeg \
     libva2 \
     libva-drm2 \
@@ -61,33 +56,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Static ffmpeg at /usr/local/bin/ffmpeg (takes PATH precedence over system
-# ffmpeg). Used for CPU and CUDA modes — newer, better HEVC/10-bit support.
-# VAAPI mode explicitly uses /usr/bin/ffmpeg (system package) instead.
+# ffmpeg). Used for CPU mode -- newer, better HEVC/10-bit support. VAAPI
+# mode explicitly uses /usr/bin/ffmpeg (system package) instead.
 COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-static /ffprobe /usr/local/bin/ffprobe
 
 # MediaPipe runtime dependency check (required by mp.Image)
 RUN ldconfig -p | grep -q "libGLESv2.so.2"
 
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
-    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
-
 WORKDIR /app
 
-# Copy venv from build stage
 COPY --from=build /app/venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 
-# Copy bundled model manifest
-COPY api/models.json ./models.json
-
-# Copy application code
 COPY api/ ./
 
-# Create data directory mount point
 RUN mkdir -p /data
 
-# Environment defaults
 ENV DATA_DIR=/data
 ENV PYTHONUNBUFFERED=1
 ENV ENABLE_TATTOO_SIGNAL=auto

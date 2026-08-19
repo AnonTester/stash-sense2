@@ -3,7 +3,7 @@
 *.env
 api/.env
 api/*.env
-docker-stashsense.yml
+docker-stashsense*.yml
 
 # Python
 __pycache__/
