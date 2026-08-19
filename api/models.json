@@ -3,20 +3,6 @@
   "repo": "carrotwaxr/stash-sense",
   "release_tag": "models",
   "models": {
-    "facenet512": {
-      "file": "facenet512.onnx",
-      "size": 93985006,
-      "sha256": "4b6fcd19d0355d532d25007989d62cdfb5f86d761e52c6287aac9d821011a9e6",
-      "group": "face_recognition",
-      "description": "FaceNet512 face embedding model"
-    },
-    "arcface": {
-      "file": "arcface.onnx",
-      "size": 136564309,
-      "sha256": "2eff37a187485caef7ffb3bbb3a542132d195bbdc02e071f20e80614477b735c",
-      "group": "face_recognition",
-      "description": "ArcFace face embedding model"
-    },
     "tattoo_yolov5s": {
       "file": "tattoo_yolov5s.onnx",
       "size": 83882182,
