@@ -1,20 +1,20 @@
-"""Robust face matching with multi-model fusion.
+"""Face matching against the performer database.
 
-Implements intelligent matching that:
-1. Queries both FaceNet and ArcFace indices
-2. Detects when a model produces degenerate output
-3. Uses adaptive weighted fusion based on model reliability
-4. Returns matches with confidence scores
+buffalo_l migration: the legacy pipeline queried two separate models
+(FaceNet512 + ArcFace) and needed adaptive health detection to handle
+ArcFace's occasional degenerate output (near-identical distances across
+unrelated performers) -- see git history for that logic if it's ever
+needed again. buffalo_l produces one embedding per face, so there's only
+one index to query and nothing to fuse or arbitrate between; this module
+is correspondingly a plain single-index nearest-neighbor lookup +
+threshold filter.
 """
 import logging
 from dataclasses import dataclass
-from enum import Enum
 from typing import Optional
 import numpy as np
 
-from voyager import Index
-
-import face_config
+from usearch.index import Index
 
 logger = logging.getLogger(__name__)
 
@@ -28,23 +28,11 @@ class MatchingConfig:
     """Configuration for face matching. All values are tunable."""
 
     # Query parameters
-    query_k: int = 100  # Number of candidates to fetch from each index
-
-    # Fusion weights (when both models are healthy) - from face_config.py
-    facenet_weight: float = face_config.FACENET_WEIGHT
-    arcface_weight: float = face_config.ARCFACE_WEIGHT
-
-    # Model health detection thresholds
-    # Degenerate outputs have very low variance (all distances nearly identical)
-    # Normal FaceNet: variance ~0.002-0.01, Degenerate ArcFace: variance ~0.0001
-    min_distance_variance: float = 0.001  # Min variance in top-k distances
-    max_suspicious_min_distance: float = 0.10  # If min distance < this AND low variance, suspicious
-    health_check_k: int = 20  # How many results to check for health
-    min_distance_range: float = 0.05  # Min range (max-min) in top-k distances
+    query_k: int = 100  # Number of candidates to fetch from the index
 
     # Output filtering
     max_results: int = 10
-    max_distance: float = 0.8  # Maximum combined distance to return
+    max_distance: float = 0.8  # Maximum distance to return
 
 
 DEFAULT_CONFIG = MatchingConfig()
@@ -54,188 +42,60 @@ DEFAULT_CONFIG = MatchingConfig()
 # DATA STRUCTURES
 # =============================================================================
 
-class ModelHealth(Enum):
-    """Health status of a model's output for a given query."""
-    HEALTHY = "healthy"
-    DEGENERATE = "degenerate"  # Low variance, suspicious distances
-    NO_RESULTS = "no_results"
-
-
 @dataclass
-class ModelQueryResult:
-    """Result from querying a single model's index."""
+class IndexQueryResult:
+    """Result from querying the embedding index."""
     neighbors: np.ndarray  # Face indices
     distances: np.ndarray  # Distances to neighbors
-    health: ModelHealth
-    health_reason: str = ""
-
-    # Statistics for debugging
-    min_distance: float = 0.0
-    max_distance: float = 0.0
-    distance_variance: float = 0.0
 
 
 @dataclass
 class CandidateMatch:
-    """A candidate match from the fusion process."""
+    """A candidate match."""
     face_index: int
     universal_id: str
     name: str
 
-    # Per-model scores (None if not in that model's results)
-    facenet_distance: Optional[float] = None
-    arcface_distance: Optional[float] = None
-
-    # Combined score
-    combined_distance: float = 0.0
+    distance: float = 0.0
+    combined_distance: float = 0.0  # kept as the field name every caller (recognizer.py,
+                                     # local_performer_index dedup, plugin JS) already reads
     confidence: float = 0.0  # 0-1, higher is better
-
-    # Which models contributed
-    in_facenet: bool = False
-    in_arcface: bool = False
-
-    # For debugging
-    facenet_rank: Optional[int] = None
-    arcface_rank: Optional[int] = None
+    rank: Optional[int] = None
 
 
 @dataclass
 class MatchingResult:
     """Complete result from the matching process."""
     matches: list[CandidateMatch]
-
-    # Model health info
-    facenet_health: ModelHealth = ModelHealth.HEALTHY
-    arcface_health: ModelHealth = ModelHealth.HEALTHY
-    facenet_health_reason: str = ""
-    arcface_health_reason: str = ""
-    fusion_strategy: str = "weighted"  # "weighted", "facenet_only", "arcface_only"
-
-    # Statistics
-    facenet_candidates: int = 0
-    arcface_candidates: int = 0
-    candidates_in_both: int = 0
-
-
-# =============================================================================
-# HEALTH DETECTION
-# =============================================================================
-
-def check_model_health(
-    distances: np.ndarray,
-    config: MatchingConfig = DEFAULT_CONFIG,
-) -> tuple[ModelHealth, str]:
-    """
-    Check if a model's output appears healthy or degenerate.
-
-    The key insight from testing:
-    - FaceNet healthy: min_dist typically 0.25-0.40, even with low variance
-    - ArcFace degenerate: min_dist typically < 0.15, with suspiciously uniform distances
-
-    Degenerate outputs are detected by:
-    1. Suspiciously low minimum distance (< 0.15) - the primary indicator
-    2. Combined with low variance or narrow range
-
-    Returns:
-        (health_status, reason_string)
-    """
-    if len(distances) == 0:
-        return ModelHealth.NO_RESULTS, "No results returned"
-
-    check_distances = distances[:config.health_check_k]
-
-    min_dist = float(np.min(check_distances))
-    max_dist = float(np.max(check_distances))
-    variance = float(np.var(check_distances))
-    dist_range = max_dist - min_dist
-
-    # Primary check: minimum distance
-    # If min_dist >= 0.20, it's almost certainly healthy (normal face recognition range)
-    if min_dist >= 0.20:
-        return ModelHealth.HEALTHY, f"min={min_dist:.3f}, range={dist_range:.3f}, var={variance:.5f}"
-
-    # If min_dist < 0.15 AND distances are tightly clustered, it's degenerate
-    # This is the pathological case where ArcFace outputs a "generic" embedding
-    if min_dist < config.max_suspicious_min_distance:
-        if variance < 0.002 or dist_range < 0.05:
-            return ModelHealth.DEGENERATE, f"Suspicious min_dist={min_dist:.3f} with tight clustering (var={variance:.5f}, range={dist_range:.3f})"
-
-    # Edge case: moderate min_dist (0.15-0.20) but very tight clustering
-    if dist_range < 0.03 and variance < 0.001:
-        return ModelHealth.DEGENERATE, f"Very tight clustering (range={dist_range:.4f}, var={variance:.6f})"
-
-    return ModelHealth.HEALTHY, f"min={min_dist:.3f}, range={dist_range:.3f}, var={variance:.5f}"
+    candidate_count: int = 0
 
 
 # =============================================================================
 # MATCHING LOGIC
 # =============================================================================
 
-def query_model(
+def query_index(
     embedding: np.ndarray,
     index: Index,
     config: MatchingConfig = DEFAULT_CONFIG,
-) -> ModelQueryResult:
-    """Query a single model's index and assess health."""
-    neighbors, distances = index.query(embedding, k=config.query_k)
-
-    health, reason = check_model_health(distances, config)
-
-    return ModelQueryResult(
-        neighbors=neighbors,
-        distances=distances,
-        health=health,
-        health_reason=reason,
-        min_distance=float(np.min(distances)) if len(distances) > 0 else 0.0,
-        max_distance=float(np.max(distances[:20])) if len(distances) >= 20 else float(np.max(distances)),
-        distance_variance=float(np.var(distances[:20])) if len(distances) >= 20 else float(np.var(distances)),
-    )
+) -> IndexQueryResult:
+    """Query the embedding index for nearest neighbors."""
+    matches = index.search(embedding, config.query_k)
+    return IndexQueryResult(neighbors=matches.keys, distances=matches.distances)
 
 
-def fuse_results(
-    facenet_result: ModelQueryResult,
-    arcface_result: ModelQueryResult,
+def build_matches(
+    query_result: IndexQueryResult,
     faces_mapping: list[str],  # index -> universal_id
     performers: dict[str, dict],  # universal_id -> performer info
     config: MatchingConfig = DEFAULT_CONFIG,
 ) -> MatchingResult:
-    """
-    Fuse results from both models using adaptive weighting.
-
-    Strategy:
-    - If both healthy: weighted combination
-    - If only FaceNet healthy: use FaceNet only
-    - If only ArcFace healthy: use ArcFace only
-    - If neither healthy: use FaceNet with lower confidence
-    """
-    # Determine fusion strategy based on health
-    fn_healthy = facenet_result.health == ModelHealth.HEALTHY
-    af_healthy = arcface_result.health == ModelHealth.HEALTHY
-
-    if fn_healthy and af_healthy:
-        strategy = "weighted"
-        fn_weight = config.facenet_weight
-        af_weight = config.arcface_weight
-    elif fn_healthy:
-        strategy = "facenet_only"
-        fn_weight = 1.0
-        af_weight = 0.0
-    elif af_healthy:
-        strategy = "arcface_only"
-        fn_weight = 0.0
-        af_weight = 1.0
-    else:
-        # Neither healthy - fall back to FaceNet (typically more stable)
-        strategy = "facenet_fallback"
-        fn_weight = 1.0
-        af_weight = 0.0
-
-    # Build candidate map
+    """Build sorted, threshold-filtered CandidateMatch objects from one
+    index query's results."""
     candidates: dict[int, CandidateMatch] = {}
     faces_count = len(faces_mapping)
 
-    # Process FaceNet results
-    for rank, (idx, dist) in enumerate(zip(facenet_result.neighbors, facenet_result.distances)):
+    for rank, (idx, dist) in enumerate(zip(query_result.neighbors, query_result.distances)):
         idx = int(idx)
         # Skip if index is out of bounds (can happen with index/metadata mismatch)
         if idx < 0 or idx >= faces_count:
@@ -244,83 +104,23 @@ def fuse_results(
         # Skip null entries (gaps from deleted faces or missing stashbox IDs)
         if uid is None:
             continue
-        if idx not in candidates:
-            info = performers.get(uid, {})
-            candidates[idx] = CandidateMatch(
-                face_index=idx,
-                universal_id=uid,
-                name=info.get("name", "Unknown"),
-            )
-        candidates[idx].facenet_distance = float(dist)
-        candidates[idx].facenet_rank = rank + 1
-        candidates[idx].in_facenet = True
-
-    # Process ArcFace results (only if healthy or we're using it)
-    if af_weight > 0:
-        for rank, (idx, dist) in enumerate(zip(arcface_result.neighbors, arcface_result.distances)):
-            idx = int(idx)
-            # Skip if index is out of bounds (can happen with index/metadata mismatch)
-            if idx < 0 or idx >= faces_count:
-                continue
-            uid = faces_mapping[idx]
-            # Skip null entries (gaps from deleted faces or missing stashbox IDs)
-            if uid is None:
-                continue
-            if idx not in candidates:
-                info = performers.get(uid, {})
-                candidates[idx] = CandidateMatch(
-                    face_index=idx,
-                    universal_id=uid,
-                    name=info.get("name", "Unknown"),
-                )
-            candidates[idx].arcface_distance = float(dist)
-            candidates[idx].arcface_rank = rank + 1
-            candidates[idx].in_arcface = True
-
-    # Calculate combined scores
-    for candidate in candidates.values():
-        fn_dist = candidate.facenet_distance
-        af_dist = candidate.arcface_distance
-
-        if fn_dist is not None and af_dist is not None:
-            # Both models have this candidate
-            candidate.combined_distance = fn_dist * fn_weight + af_dist * af_weight
-        elif fn_dist is not None:
-            # Only FaceNet
-            if strategy == "weighted":
-                # Penalize for missing in ArcFace (use median-ish distance)
-                candidate.combined_distance = fn_dist * fn_weight + 0.5 * af_weight
-            else:
-                candidate.combined_distance = fn_dist
-        elif af_dist is not None:
-            # Only ArcFace
-            if strategy == "weighted":
-                candidate.combined_distance = 0.5 * fn_weight + af_dist * af_weight
-            else:
-                candidate.combined_distance = af_dist
-
-        # Convert distance to confidence (0-1, higher is better)
+        info = performers.get(uid, {})
+        candidate = CandidateMatch(
+            face_index=idx, universal_id=uid, name=info.get("name", "Unknown"),
+            distance=float(dist), combined_distance=float(dist), rank=rank + 1,
+        )
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
+        # A face can appear more than once in a performer's faces (multiple
+        # source images) but only the closest match to any one of them
+        # should count for that performer -- keep_
+        existing = candidates.get(idx)
+        if existing is None or candidate.combined_distance < existing.combined_distance:
+            candidates[idx] = candidate
 
-    # Sort by combined distance and filter
     sorted_candidates = sorted(candidates.values(), key=lambda c: c.combined_distance)
     filtered = [c for c in sorted_candidates if c.combined_distance <= config.max_distance]
-    final = filtered[:config.max_results]
 
-    # Count statistics
-    in_both = sum(1 for c in candidates.values() if c.in_facenet and c.in_arcface)
-
-    return MatchingResult(
-        matches=final,
-        facenet_health=facenet_result.health,
-        arcface_health=arcface_result.health,
-        facenet_health_reason=facenet_result.health_reason,
-        arcface_health_reason=arcface_result.health_reason,
-        fusion_strategy=strategy,
-        facenet_candidates=len([c for c in candidates.values() if c.in_facenet]),
-        arcface_candidates=len([c for c in candidates.values() if c.in_arcface]),
-        candidates_in_both=in_both,
-    )
+    return MatchingResult(matches=filtered[:config.max_results], candidate_count=len(candidates))
 
 
 # Score multiplier applied to local-index matches' combined_distance before
@@ -333,75 +133,37 @@ LOCAL_MATCH_BOOST = 0.85
 
 
 def fuse_local_results(
-    facenet_result: ModelQueryResult,
-    arcface_result: ModelQueryResult,
+    query_result: IndexQueryResult,
     local_performers_mapping: dict[str, dict],  # str(performer_id) -> {name, stashdb_id, image_url, ...}
     config: MatchingConfig = DEFAULT_CONFIG,
 ) -> list[CandidateMatch]:
-    """Fuse local-performer-index query results into CandidateMatch objects.
+    """Build CandidateMatch objects from a local-performer-index query.
 
-    Mirrors fuse_results()'s per-model merge, but against a completely
-    separate id space (Stash performer id, not a shared face index shared
-    with the main database) -- it can't be merged into the same candidates
-    dict as fuse_results(), and doesn't need the adaptive
-    healthy/degenerate model-health fallback that exists there (that
-    complexity was needed for the large main index; the local index is a
-    small supplementary boost signal, not the primary match source).
-    Every candidate gets tagged with a "local:" universal_id prefix
-    (mirroring the existing "stashdb.org:" convention -- see
-    stashbox_utils._extract_endpoint, which will naturally read this as
-    endpoint "local") and scored down by LOCAL_MATCH_BOOST.
-
-    Requires BOTH models to have ranked a candidate before trusting it --
-    unlike fuse_results()'s "weighted" strategy, which treats a
-    single-model candidate as reasonably trustworthy with a 0.5 penalty
-    for the missing model (calibrated for the main index's ~450k
-    candidates, where being outside one model's query_k neighbors doesn't
-    say much). Confirmed live: with the local index's much smaller
-    candidate pool (~1-2k), a candidate landing in only one model's top-K
-    is common and weak evidence on its own -- trusting it directly (this
-    function's original behavior) let a single model's coincidental
-    agreement get boosted into an artificially high-confidence wrong
-    match (e.g. a video frame face with a low ArcFace distance to a given
-    local performer but no FaceNet signal for them at all was scored
-    using ArcFace alone, then boosted further by LOCAL_MATCH_BOOST).
+    Against a completely separate id space (Stash performer id, not a
+    shared face index with the main database) -- can't be merged into the
+    same candidates dict build_matches() uses, so it's built separately
+    and combined by merge_local_candidates() below. Every candidate gets
+    tagged with a "local:" universal_id prefix (mirroring the existing
+    "stashdb.org:" convention -- see stashbox_utils._extract_endpoint,
+    which will naturally read this as endpoint "local") and scored down by
+    LOCAL_MATCH_BOOST.
     """
     candidates: dict[str, CandidateMatch] = {}
-
-    def _process(result: ModelQueryResult, is_facenet: bool) -> None:
-        for rank, (pid, dist) in enumerate(zip(result.neighbors, result.distances)):
-            pid_str = str(int(pid))
-            info = local_performers_mapping.get(pid_str)
-            if info is None:
-                continue  # stale entry (deleted since the index was last saved)
-            uid = f"local:{pid_str}"
-            if uid not in candidates:
-                candidates[uid] = CandidateMatch(
-                    face_index=int(pid), universal_id=uid, name=info.get("name", "Unknown"),
-                )
-            if is_facenet:
-                candidates[uid].facenet_distance = float(dist)
-                candidates[uid].facenet_rank = rank + 1
-                candidates[uid].in_facenet = True
-            else:
-                candidates[uid].arcface_distance = float(dist)
-                candidates[uid].arcface_rank = rank + 1
-                candidates[uid].in_arcface = True
-
-    _process(facenet_result, True)
-    _process(arcface_result, False)
-
-    corroborated = {
-        uid: c for uid, c in candidates.items()
-        if c.facenet_distance is not None and c.arcface_distance is not None
-    }
-    for candidate in corroborated.values():
-        combined = (candidate.facenet_distance * config.facenet_weight
-                    + candidate.arcface_distance * config.arcface_weight)
-        candidate.combined_distance = combined * LOCAL_MATCH_BOOST
+    for rank, (pid, dist) in enumerate(zip(query_result.neighbors, query_result.distances)):
+        pid_str = str(int(pid))
+        info = local_performers_mapping.get(pid_str)
+        if info is None:
+            continue  # stale entry (deleted since the index was last saved)
+        uid = f"local:{pid_str}"
+        candidate = CandidateMatch(
+            face_index=int(pid), universal_id=uid, name=info.get("name", "Unknown"),
+            distance=float(dist), rank=rank + 1,
+        )
+        candidate.combined_distance = candidate.distance * LOCAL_MATCH_BOOST
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
-
-    return list(corroborated.values())
+        existing = candidates.get(uid)
+        if existing is None or candidate.combined_distance < existing.combined_distance:
+            candidates[uid] = candidate
 
     return list(candidates.values())
 
@@ -462,61 +224,47 @@ def merge_local_candidates(
 
 
 def match_face(
-    facenet_embedding: np.ndarray,
-    arcface_embedding: np.ndarray,
-    facenet_index: Index,
-    arcface_index: Index,
+    embedding: np.ndarray,
+    index: Index,
     faces_mapping: list[str],
     performers: dict[str, dict],
     config: MatchingConfig = DEFAULT_CONFIG,
-    local_facenet_index: Optional[Index] = None,
-    local_arcface_index: Optional[Index] = None,
+    local_index: Optional[Index] = None,
     local_performers_mapping: Optional[dict[str, dict]] = None,
 ) -> MatchingResult:
     """
-    Match a face against the database using both models.
+    Match a face against the database.
 
     This is the main entry point for face matching.
 
     Args:
-        facenet_embedding: FaceNet512 embedding vector
-        arcface_embedding: ArcFace embedding vector
-        facenet_index: Voyager index for FaceNet
-        arcface_index: Voyager index for ArcFace
+        embedding: buffalo_l embedding vector (512-dim)
+        index: usearch index for the main database
         faces_mapping: List mapping face index to universal_id
         performers: Dict mapping universal_id to performer info
         config: Matching configuration
-        local_facenet_index: Optional secondary index built from this Stash
+        local_index: Optional secondary index built from this Stash
             instance's own performer cover images (local_performer_index.py)
-        local_arcface_index: Same, ArcFace model
         local_performers_mapping: str(performer_id) -> {name, stashdb_id,
-            image_url, ...} for the local index. Required alongside the two
-            local indices above for local matching to run.
+            image_url, ...} for the local index. Required alongside
+            local_index above for local matching to run.
 
     Returns:
-        MatchingResult with candidates and diagnostics
+        MatchingResult with candidates
     """
-    # Query both indices
-    fn_result = query_model(facenet_embedding, facenet_index, config)
-    af_result = query_model(arcface_embedding, arcface_index, config)
-
-    # Fuse results
-    result = fuse_results(fn_result, af_result, faces_mapping, performers, config)
+    query_result = query_index(embedding, index, config)
+    result = build_matches(query_result, faces_mapping, performers, config)
 
     # Optionally merge in local-performer-index matches (see fuse_local_results).
     # A handful of local performers is common (especially right after the
-    # first sync), so index.query()'s k can exceed the index size -- guard
+    # first sync), so index.search()'s k can exceed the index size -- guard
     # with try/except the same way the tattoo matcher does for its own
     # small supplementary index, rather than requiring every caller to
     # pre-check size.
-    if (local_facenet_index is not None and local_arcface_index is not None
-            and local_performers_mapping and len(local_facenet_index) > 0):
+    if local_index is not None and local_performers_mapping and len(local_index) > 0:
         try:
-            local_fn_result = query_model(facenet_embedding, local_facenet_index, config)
-            local_af_result = query_model(arcface_embedding, local_arcface_index, config)
-            local_candidates = fuse_local_results(
-                local_fn_result, local_af_result, local_performers_mapping, config,
-            )
+            local_query_result = query_index(embedding, local_index, config)
+            local_candidates = fuse_local_results(local_query_result, local_performers_mapping, config)
             merged = merge_local_candidates(result.matches, local_candidates, local_performers_mapping)
             merged.sort(key=lambda c: c.combined_distance)
             result.matches = [c for c in merged if c.combined_distance <= config.max_distance][:config.max_results]
@@ -534,19 +282,13 @@ def format_matching_result(result: MatchingResult, expected_names: list[str] = N
     """Format a matching result for debugging output."""
     lines = []
 
-    lines.append(f"Strategy: {result.fusion_strategy}")
-    lines.append(f"FaceNet: {result.facenet_health.value} [{result.facenet_health_reason}] ({result.facenet_candidates} candidates)")
-    lines.append(f"ArcFace: {result.arcface_health.value} [{result.arcface_health_reason}] ({result.arcface_candidates} candidates)")
-    lines.append(f"In both: {result.candidates_in_both}")
+    lines.append(f"{result.candidate_count} candidates")
     lines.append("")
 
     expected_names = expected_names or []
 
     for i, match in enumerate(result.matches[:10]):
         marker = "★" if match.name in expected_names else " "
-        fn_str = f"fn={match.facenet_distance:.3f}@{match.facenet_rank}" if match.facenet_distance else "fn=-----"
-        af_str = f"af={match.arcface_distance:.3f}@{match.arcface_rank}" if match.arcface_distance else "af=-----"
-
-        lines.append(f"{marker} {i+1}. {match.name[:30]:<30} combined={match.combined_distance:.3f} ({fn_str}, {af_str})")
+        lines.append(f"{marker} {i+1}. {match.name[:30]:<30} distance={match.combined_distance:.3f}@{match.rank}")
 
     return "\n".join(lines)

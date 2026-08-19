@@ -56,12 +56,10 @@ PERSISTENT_CACHE_TTL = 43_200   # 12 hours — survives Docker restarts
 # Files that may appear in a release zip.
 RELEASE_FILES = {
     "performers.db",
-    "face_facenet.voy",
-    "face_arcface.voy",
+    "face_embeddings.usearch",
     "faces.json",
     "performers.json",
     "manifest.json",
-    "face_adaface.voy",
     "tattoo_embeddings.voy",
     "tattoo_embeddings.json",
 }
@@ -69,8 +67,7 @@ RELEASE_FILES = {
 # Subset of RELEASE_FILES that *must* be present for a valid release.
 REQUIRED_FILES = {
     "performers.db",
-    "face_facenet.voy",
-    "face_arcface.voy",
+    "face_embeddings.usearch",
     "faces.json",
     "performers.json",
     "manifest.json",

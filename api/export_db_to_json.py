@@ -4,7 +4,7 @@
 This script converts the SQLite database (performers.db) into the JSON files
 that the FaceRecognizer expects:
 
-  - faces.json: List where index i = universal_id of face at Voyager index i
+  - faces.json: List where index i = universal_id of face at usearch index i
   - performers.json: Dict mapping universal_id -> {name, country, image_url, face_count}
 
 Usage:
@@ -13,9 +13,9 @@ Usage:
 The script will:
 1. Read from performers.db in the data directory
 2. Generate faces.json and performers.json
-3. Validate the output matches the Voyager index sizes
+3. Validate the output matches the usearch index
 
-Run this script after copying a new performers.db from stash-sense-trainer,
+Run this script after copying a new performers.db from stash-sense2-data-gen,
 or after updating the database in any way.
 """
 import argparse
@@ -43,9 +43,9 @@ def make_universal_id(endpoint: str, stashbox_id: str) -> str:
 
 
 def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
-    """Export faces.json - list of universal IDs indexed by Voyager index.
+    """Export faces.json - list of universal IDs indexed by usearch index.
 
-    The Voyager index stores embeddings at sequential integer indices.
+    The usearch index stores embeddings at sequential integer indices.
     faces.json maps each index to the performer's universal ID.
 
     Returns the number of faces exported.
@@ -55,11 +55,11 @@ def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
     # Get all faces with their stashbox IDs in a single query
     # This avoids cursor reuse issues and is much faster
     cursor.execute("""
-        SELECT f.facenet_index, s.endpoint, s.stashbox_performer_id, p.canonical_name
+        SELECT f.embedding_index, s.endpoint, s.stashbox_performer_id, p.canonical_name
         FROM faces f
         JOIN performers p ON f.performer_id = p.id
         JOIN stashbox_ids s ON p.id = s.performer_id
-        ORDER BY f.facenet_index,
+        ORDER BY f.embedding_index,
             CASE s.endpoint
                 WHEN 'stashdb' THEN 1
                 WHEN 'theporndb' THEN 2
@@ -75,18 +75,18 @@ def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
     skipped_duplicates = 0
     gap_count = 0
 
-    for facenet_index, endpoint, stashbox_id, name in cursor:
+    for embedding_index, endpoint, stashbox_id, name in cursor:
         # Skip duplicate rows (same face, different stashbox endpoint)
         # We only want the first (highest priority) endpoint per face
-        if facenet_index == last_index:
+        if embedding_index == last_index:
             skipped_duplicates += 1
             continue
-        last_index = facenet_index
+        last_index = embedding_index
 
         universal_id = make_universal_id(endpoint, stashbox_id)
 
         # Ensure we're filling indices sequentially
-        while len(faces) < facenet_index:
+        while len(faces) < embedding_index:
             # Fill gaps with placeholder - happens when faces exist but performer
             # has no stashbox ID (data issue in trainer)
             gap_count += 1
@@ -176,22 +176,20 @@ def export_performers_json(conn: sqlite3.Connection, output_path: Path) -> int:
 
 
 def validate_export(data_dir: Path, face_count: int) -> bool:
-    """Validate the export matches the Voyager index sizes.
+    """Validate the export matches the usearch index.
 
     Returns True if validation passes.
     """
     issues = []
 
-    # Check Voyager index sizes
-    for index_name in ["face_facenet.voy", "face_arcface.voy"]:
-        index_path = data_dir / index_name
-        if index_path.exists():
-            # Voyager indices have a header, we can't easily get count without loading
-            # Just check file exists and is non-empty
-            if index_path.stat().st_size == 0:
-                issues.append(f"{index_name} is empty")
-        else:
-            issues.append(f"{index_name} not found")
+    index_path = data_dir / "face_embeddings.usearch"
+    if index_path.exists():
+        # Just check file exists and is non-empty -- getting the vector
+        # count without a full load isn't worth it here.
+        if index_path.stat().st_size == 0:
+            issues.append(f"{index_path.name} is empty")
+    else:
+        issues.append(f"{index_path.name} not found")
 
     # Check faces.json was created
     faces_path = data_dir / "faces.json"

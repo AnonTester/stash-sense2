@@ -15,10 +15,11 @@ MIN_FACE_SIZE = 40        # Minimum face dimension in pixels
 MIN_FACE_CONFIDENCE = 0.5 # Detection confidence threshold
 
 # Matching
-MAX_DISTANCE = 0.5        # Maximum match distance (tuned 2026-02-12 re-eval, plateau at 0.5)
+# MAX_DISTANCE below is the legacy (FaceNet512+ArcFace fusion) tuned value,
+# carried over unchanged as a placeholder for the buffalo_l migration --
+# NOT re-validated for the new single-embedding distance space. Needs its
+# own re-tuning pass (reuse face-pipeline-bench's sidecar-faithful
+# recognition_bench methodology) before this is treated as correct.
+MAX_DISTANCE = 0.5
 TOP_K = 3                 # Top matches per person
 CLUSTER_THRESHOLD = 0.6   # Cosine distance threshold for face clustering
-
-# Fusion weights (when both models are healthy)
-FACENET_WEIGHT = 0.5      # FaceNet contribution (tuned 2026-02-12 re-eval)
-ARCFACE_WEIGHT = 0.5      # ArcFace contribution (tuned 2026-02-12 re-eval)

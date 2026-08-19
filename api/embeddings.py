@@ -1,28 +1,42 @@
 """Face detection and embedding generation.
 
-Uses:
-- InsightFace RetinaFace for face detection (ONNX Runtime, GPU-compatible)
-- FaceNet512 + ArcFace for embeddings (ONNX Runtime, GPU-accelerated)
+buffalo_l migration: replaces the legacy RetinaFace(buffalo_sc)+FaceNet512+
+ArcFace dual pipeline with InsightFace's `buffalo_l` bundle (SCRFD-10GF
+detection + ResNet50@WebFace600K recognition), one embedding per face.
+Mirrors stash-sense2-data-gen's own embeddings.py exactly (same
+`FaceAnalysis(name="buffalo_l", allowed_modules=["detection","recognition"])`
+call, same normed_embedding output) -- the sidecar's query-time embeddings
+and the database's stored embeddings MUST come from the identical code
+path, or matching would be silently, systematically wrong. Deliberately
+NOT reimplemented as a standalone ONNX session fed a pre-cropped face image
+(the way the legacy FaceNet512/ArcFace models were): InsightFace's own
+recognition wrapper expects the *original* image + landmarks and does its
+own internal alignment/preprocessing (channel order, normalization) that
+isn't safe to reverse-engineer and re-implement by hand -- getting that
+wrong would produce embeddings that are subtly, silently incompatible with
+what the database actually contains. Detection and embedding therefore
+happen together in `detect_faces()`; `get_embeddings_batch()`/
+`get_embedding()` just read back what was already computed, on
+`DetectedFace` objects (not raw crop arrays -- every caller in this
+codebase already calls `detect_faces()` immediately before embedding the
+same image, so this isn't a behavior change for any of them, just a
+signature change: pass the DetectedFace, not `.image`).
 
-All inference runs through ONNX Runtime with CUDAExecutionProvider when
-available, falling back to CPU. No TensorFlow dependency at runtime.
+All inference runs through ONNX Runtime with GPU acceleration when
+available (CUDA or ROCm/MIGraphX, see Dockerfile.rocm/Dockerfile.cuda),
+falling back to CPU.
 """
-import io
 import os
+import io
 import warnings
-import cv2
 import numpy as np
-import onnxruntime as ort
 from PIL import Image
 from typing import Optional
 from dataclasses import dataclass
 from pathlib import Path
 
-# InsightFace for RetinaFace detection (uses ONNX Runtime with GPU)
 from insightface.app import FaceAnalysis
 
-# InsightFace currently emits this from its internal face_align helper in some
-# code paths. Keep filter narrow to this exact deprecation line.
 warnings.filterwarnings(
     "ignore",
     message=r"`estimate` is deprecated since version 0\.26 and will be removed in version 2\.2\..*",
@@ -36,84 +50,26 @@ MODELS_DIR = Path(__file__).parent / "models"
 DATA_MODELS_DIR = Path(os.environ.get("DATA_DIR", "./data")) / "models"
 
 
-# ArcFace canonical 5-point template for 112x112 aligned face crops.
-_ARCFACE_TEMPLATE_112 = np.array([
-    [38.2946, 51.6963],
-    [73.5318, 51.5014],
-    [56.0252, 71.7366],
-    [41.5493, 92.3655],
-    [70.7299, 92.2041],
-], dtype=np.float32)
-
-
-def align_face_with_similarity_transform(
-    image: np.ndarray,
-    landmarks: np.ndarray,
-    image_size: int = 112,
-) -> np.ndarray | None:
-    """Align a face using a 5-point similarity transform.
-
-    This replaces InsightFace's norm_crop call path to avoid the deprecated
-    SimilarityTransform.estimate API used upstream.
-
-    Args:
-        image: Source RGB image.
-        landmarks: Face landmarks array (expects at least 5 points with x/y).
-        image_size: Output aligned face size (square).
-
-    Returns:
-        Aligned RGB crop of shape (image_size, image_size, 3), or None if
-        transform estimation fails.
-    """
-    if image_size <= 0:
-        return None
-
-    lm = np.asarray(landmarks, dtype=np.float32)
-    if lm.ndim != 2 or lm.shape[0] < 5 or lm.shape[1] < 2:
-        return None
-
-    src = lm[:5, :2]
-    dst = _ARCFACE_TEMPLATE_112 * (float(image_size) / 112.0)
-
-    # Estimate similarity transform matrix from source landmarks to ArcFace
-    # canonical points.
-    M, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.LMEDS)
-    if M is None:
-        return None
-
-    try:
-        return cv2.warpAffine(
-            image,
-            M.astype(np.float32),
-            (image_size, image_size),
-            borderValue=0.0,
-        )
-    except Exception:
-        return None
-
-
 @dataclass
 class DetectedFace:
-    """A detected face with its bounding box and confidence."""
-    image: np.ndarray  # RGB image of the face (cropped and aligned)
+    """A detected face with its bounding box, confidence, and embedding."""
+    image: np.ndarray  # RGB aligned face crop (buffalo_l's own alignment)
     bbox: dict  # {x, y, w, h}
     confidence: float
+    embedding: np.ndarray  # 512-dim, already computed by buffalo_l's detect+embed call
     landmarks: Optional[np.ndarray] = None  # 5-point facial landmarks
     yaw: Optional[float] = None    # Estimated yaw in degrees (-90 to +90)
 
 
 @dataclass
 class FaceEmbedding:
-    """Face embeddings from multiple models."""
-    facenet: np.ndarray  # 512-dim FaceNet512 embedding
-    arcface: np.ndarray  # 512-dim ArcFace embedding
+    """A face embedding (buffalo_l: single 512-dim vector)."""
+    embedding: np.ndarray  # 512-dim
 
 
 class FaceEmbeddingGenerator:
-    """Generate face embeddings using RetinaFace detection + FaceNet512/ArcFace embeddings.
-
-    All models run through ONNX Runtime with GPU acceleration when available.
-    Supports batch inference for processing multiple faces in a single call.
+    """Generate face embeddings using buffalo_l (SCRFD-10GF detection +
+    ResNet50@WebFace600K recognition), CPU or GPU.
     """
 
     def __init__(self, device: str = None, models_dir: Path = None):
@@ -121,59 +77,56 @@ class FaceEmbeddingGenerator:
         Initialize the embedding generator.
 
         Args:
-            device: Device for inference ("cuda", "cpu", or None for auto)
-            models_dir: Directory containing facenet512.onnx and arcface.onnx.
-                If None, checks DATA_DIR/models first (Docker/production),
+            device: Device for inference ("gpu", "cpu", or None for auto)
+            models_dir: Directory buffalo_l's model bundle lives/downloads
+                under (a `buffalo_l/` subfolder gets created here). If
+                None, checks DATA_DIR/models first (Docker/production),
                 then falls back to ./models (local development).
         """
-        # Auto-detect device
         if device is None:
+            import onnxruntime as ort
             providers = ort.get_available_providers()
-            self.device = "cuda" if "CUDAExecutionProvider" in providers else "cpu"
+            gpu_providers = {"CUDAExecutionProvider", "ROCMExecutionProvider", "MIGraphXExecutionProvider"}
+            self.device = "gpu" if gpu_providers & set(providers) else "cpu"
         else:
             self.device = device
 
         # Auto-detect models directory: DATA_DIR/models first, then local ./models
         if models_dir is None:
-            if (DATA_MODELS_DIR / "facenet512.onnx").exists():
+            if (DATA_MODELS_DIR / "buffalo_l").exists():
                 models_dir = DATA_MODELS_DIR
             else:
                 models_dir = MODELS_DIR
         self._models_dir = models_dir
         self._face_analyzer = None
-        self._facenet_session = None
-        self._arcface_session = None
-
-        # ONNX model I/O names (set during lazy load)
-        self._fn_input_name = None
-        self._fn_output_name = None
-        self._af_input_name = None
-        self._af_output_name = None
 
     def _ort_providers(self) -> list[str]:
         """Get ONNX Runtime providers based on device."""
-        if self.device == "cuda":
-            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if self.device == "gpu":
+            return ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
         return ["CPUExecutionProvider"]
 
     @property
-    def face_analyzer(self):
-        """Lazy-load InsightFace face analyzer with RetinaFace."""
+    def face_analyzer(self) -> FaceAnalysis:
+        """Lazy-load InsightFace buffalo_l (detection + recognition)."""
         if self._face_analyzer is None:
-            print(f"Loading RetinaFace detector on {self.device}...")
-            # Detection-only mode avoids loading recognition heads inside
-            # InsightFace (we run our own ONNX embeddings separately).
+            print(f"Loading buffalo_l (detection+recognition) on {self.device}...")
+            # Restricted to detection+recognition -- buffalo_l's bundled
+            # age/gender/landmark models are pure overhead for identification
+            # (confirmed ~3x CPU speedup in the face-pipeline-bench evaluation).
             try:
                 self._face_analyzer = FaceAnalysis(
-                    name="buffalo_sc",
-                    allowed_modules=["detection"],
+                    name="buffalo_l",
+                    root=str(self._models_dir),
+                    allowed_modules=["detection", "recognition"],
                     providers=self._ort_providers(),
                 )
             except TypeError:
                 # Backward compatibility for older InsightFace versions without
                 # allowed_modules constructor support.
                 self._face_analyzer = FaceAnalysis(
-                    name="buffalo_sc",
+                    name="buffalo_l",
+                    root=str(self._models_dir),
                     providers=self._ort_providers(),
                 )
             # Get detection size from settings, fall back to 640
@@ -183,36 +136,10 @@ class FaceEmbeddingGenerator:
             except (RuntimeError, KeyError):
                 det_size = 640
             self._face_analyzer.prepare(
-                ctx_id=0 if self.device == "cuda" else -1,
+                ctx_id=0 if self.device == "gpu" else -1,
                 det_size=(det_size, det_size),
             )
         return self._face_analyzer
-
-    @property
-    def facenet_session(self) -> ort.InferenceSession:
-        """Lazy-load FaceNet512 ONNX model."""
-        if self._facenet_session is None:
-            model_path = str(self._models_dir / "facenet512.onnx")
-            print(f"Loading FaceNet512 ONNX model on {self.device}...")
-            self._facenet_session = ort.InferenceSession(
-                model_path, providers=self._ort_providers(),
-            )
-            self._fn_input_name = self._facenet_session.get_inputs()[0].name
-            self._fn_output_name = self._facenet_session.get_outputs()[0].name
-        return self._facenet_session
-
-    @property
-    def arcface_session(self) -> ort.InferenceSession:
-        """Lazy-load ArcFace ONNX model."""
-        if self._arcface_session is None:
-            model_path = str(self._models_dir / "arcface.onnx")
-            print(f"Loading ArcFace ONNX model on {self.device}...")
-            self._arcface_session = ort.InferenceSession(
-                model_path, providers=self._ort_providers(),
-            )
-            self._af_input_name = self._arcface_session.get_inputs()[0].name
-            self._af_output_name = self._arcface_session.get_outputs()[0].name
-        return self._arcface_session
 
     def detect_faces(
         self,
@@ -220,14 +147,14 @@ class FaceEmbeddingGenerator:
         min_confidence: float = 0.5,
     ) -> list[DetectedFace]:
         """
-        Detect faces in an image using RetinaFace.
+        Detect + align + embed every face in an image, in one buffalo_l call.
 
         Args:
             image: RGB image as numpy array
             min_confidence: Minimum detection confidence
 
         Returns:
-            List of DetectedFace objects
+            List of DetectedFace objects (embedding already populated)
         """
         results = self.face_analyzer.get(image)
 
@@ -242,28 +169,13 @@ class FaceEmbeddingGenerator:
             x1, y1, x2, y2 = bbox
             w, h = x2 - x1, y2 - y1
 
-            # Get 5-point landmarks
             kps = face.kps if hasattr(face, 'kps') else None
 
-            # Align face using 5-point similarity transform to ArcFace canonical
-            # coordinates. This keeps the same alignment intent as norm_crop
-            # without relying on deprecated upstream API paths.
-            if kps is not None and len(kps) >= 5:
-                face_img = align_face_with_similarity_transform(
-                    image,
-                    kps,
-                    image_size=112,
-                )
-            else:
-                face_img = None
-
-            if face_img is None:
-                # Fallback: raw bbox crop (shouldn't happen with RetinaFace)
-                cx1 = max(0, x1)
-                cy1 = max(0, y1)
-                cx2 = min(image.shape[1], x2)
-                cy2 = min(image.shape[0], y2)
-                face_img = image[cy1:cy2, cx1:cx2]
+            cx1 = max(0, x1)
+            cy1 = max(0, y1)
+            cx2 = min(image.shape[1], x2)
+            cy2 = min(image.shape[0], y2)
+            face_img = image[cy1:cy2, cx1:cx2]
 
             # Skip if crop is too small
             if face_img.shape[0] < 10 or face_img.shape[1] < 10:
@@ -283,136 +195,25 @@ class FaceEmbeddingGenerator:
                 image=face_img,
                 bbox={"x": int(x1), "y": int(y1), "w": int(w), "h": int(h)},
                 confidence=conf,
+                embedding=np.asarray(face.normed_embedding, dtype=np.float32),
                 landmarks=kps,
                 yaw=yaw_estimate,
             ))
 
         return faces
 
-    def _preprocess_face(
-        self,
-        face: np.ndarray,
-        target_size: tuple[int, int],
-    ) -> np.ndarray:
-        """Preprocess a face image for model inference.
-
-        Uses aspect-ratio-preserving resize with black padding,
-        matching DeepFace's preprocessing pipeline.
-
-        Returns array of shape (H, W, 3) as float32 (NOT batched).
-        """
-        target_h, target_w = target_size
-        face_h, face_w = face.shape[:2]
-
-        # Scale to fit within target while preserving aspect ratio
-        factor = min(target_h / face_h, target_w / face_w)
-        new_h = int(face_h * factor)
-        new_w = int(face_w * factor)
-
-        resized = cv2.resize(face, (new_w, new_h), interpolation=cv2.INTER_AREA)
-
-        # Create black canvas and paste centered
-        canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-        y_off = (target_h - new_h) // 2
-        x_off = (target_w - new_w) // 2
-        canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
-
-        return canvas.astype(np.float32)
-
-    def get_embedding(self, face: np.ndarray) -> FaceEmbedding:
-        """
-        Generate embeddings for a single face image.
-
-        Uses flip-averaging: generates embeddings for both the original and
-        horizontally flipped face, then averages them for more stable results.
-
-        Args:
-            face: RGB face image as numpy array (cropped face from detect_faces)
-
-        Returns:
-            FaceEmbedding with FaceNet and ArcFace embeddings
-        """
+    def get_embedding(self, face: DetectedFace) -> FaceEmbedding:
+        """Read back the embedding buffalo_l already computed for this face
+        in detect_faces() -- no re-inference."""
         return self.get_embeddings_batch([face])[0]
 
-    def get_embeddings_batch(
-        self,
-        faces: list[np.ndarray],
-        max_batch_size: Optional[int] = None,
-    ) -> list[FaceEmbedding]:
-        """
-        Generate embeddings for a batch of faces using ONNX Runtime.
-
-        Processes faces in sub-batches to avoid GPU memory exhaustion.
-        Each sub-batch runs 2 model calls (1 FaceNet + 1 ArcFace).
-
-        Args:
-            faces: List of RGB face images as numpy arrays
-            max_batch_size: Max faces per GPU inference call (limits VRAM usage).
-                           If None, reads from settings (embedding_batch_size).
-
-        Returns:
-            List of FaceEmbedding objects, one per input face
-        """
-        if not faces:
-            return []
-
-        if max_batch_size is None:
-            try:
-                from settings import get_setting
-                max_batch_size = int(get_setting("embedding_batch_size"))
-            except (RuntimeError, KeyError):
-                max_batch_size = 16
-
-        # Ensure models are loaded (triggers lazy init + prints)
-        _ = self.facenet_session
-        _ = self.arcface_session
-
-        # Process in sub-batches to limit GPU memory
-        results = []
-        for batch_start in range(0, len(faces), max_batch_size):
-            batch = faces[batch_start:batch_start + max_batch_size]
-            results.extend(self._embed_batch(batch))
-
-        return results
-
-    def _embed_batch(self, faces: list[np.ndarray]) -> list[FaceEmbedding]:
-        """Run embedding inference on a single sub-batch of faces."""
-        n = len(faces)
-
-        # Preprocess all faces: original + flipped for each model
-        fn_inputs = np.empty((n * 2, 160, 160, 3), dtype=np.float32)
-        af_inputs = np.empty((n * 2, 112, 112, 3), dtype=np.float32)
-
-        for i, face in enumerate(faces):
-            flipped = face[:, ::-1, :]
-
-            fn_orig = self._preprocess_face(face, (160, 160))
-            fn_flip = self._preprocess_face(flipped, (160, 160))
-            fn_inputs[i * 2] = (fn_orig - 127.5) / 127.5
-            fn_inputs[i * 2 + 1] = (fn_flip - 127.5) / 127.5
-
-            af_orig = self._preprocess_face(face, (112, 112))
-            af_flip = self._preprocess_face(flipped, (112, 112))
-            af_inputs[i * 2] = (af_orig - 127.5) / 128.0
-            af_inputs[i * 2 + 1] = (af_flip - 127.5) / 128.0
-
-        # Run batch inference
-        fn_embeddings = self.facenet_session.run(
-            [self._fn_output_name], {self._fn_input_name: fn_inputs}
-        )[0]
-
-        af_embeddings = self.arcface_session.run(
-            [self._af_output_name], {self._af_input_name: af_inputs}
-        )[0]
-
-        # Average original + flipped pairs for flip-averaging
-        results = []
-        for i in range(n):
-            fn_emb = (fn_embeddings[i * 2] + fn_embeddings[i * 2 + 1]) / 2.0
-            af_emb = (af_embeddings[i * 2] + af_embeddings[i * 2 + 1]) / 2.0
-            results.append(FaceEmbedding(facenet=fn_emb, arcface=af_emb))
-
-        return results
+    def get_embeddings_batch(self, faces: list[DetectedFace]) -> list[FaceEmbedding]:
+        """Read back the embeddings buffalo_l already computed in
+        detect_faces(). Takes DetectedFace objects (not raw crop arrays):
+        the embedding lives on them already, computed as part of the same
+        detect+align+embed call -- there is no separate inference pass to
+        batch here, unlike the legacy pipeline's standalone embed step."""
+        return [FaceEmbedding(embedding=f.embedding) for f in faces]
 
 
 def load_image(data: bytes) -> np.ndarray:
@@ -434,14 +235,14 @@ def load_image_from_path(path: str) -> np.ndarray:
 if __name__ == "__main__":
     import time
     import requests
+    import onnxruntime as ort
 
-    print("Testing face embedding generator (ONNX Runtime)...")
+    print("Testing face embedding generator (ONNX Runtime, buffalo_l)...")
     print(f"ONNX Runtime providers: {ort.get_available_providers()}")
 
     generator = FaceEmbeddingGenerator()
     print(f"Using device: {generator.device}")
 
-    # Download a test image
     test_url = "https://stashdb.org/images/b0aef39d-a1d6-4e58-a136-293f02b84921"
     print(f"\nDownloading test image from {test_url}...")
 
@@ -449,34 +250,15 @@ if __name__ == "__main__":
     image = load_image(response.content)
     print(f"Image shape: {image.shape}")
 
-    # Detect faces
-    print("\nDetecting faces...")
+    print("\nDetecting + embedding faces...")
+    t0 = time.time()
     faces = generator.detect_faces(image)
-    print(f"Found {len(faces)} face(s)")
+    t1 = time.time()
+    print(f"Found {len(faces)} face(s) in {(t1-t0)*1000:.1f}ms")
 
     if faces:
         face = faces[0]
         print(f"  Confidence: {face.confidence:.2f}")
         print(f"  Size: {face.bbox['w']}x{face.bbox['h']}")
-
-        # Warmup
-        print("\nWarming up models...")
-        _ = generator.get_embedding(face.image)
-
-        # Benchmark single face
-        print("Benchmarking single face...")
-        t0 = time.time()
-        embedding = generator.get_embedding(face.image)
-        t1 = time.time()
-        print(f"  Single face: {(t1-t0)*1000:.1f}ms")
-        print(f"  FaceNet shape: {embedding.facenet.shape}")
-        print(f"  ArcFace shape: {embedding.arcface.shape}")
-
-        # Benchmark batch (simulate 10 faces)
-        print("\nBenchmarking batch of 10 faces...")
-        batch_faces = [face.image] * 10
-        t0 = time.time()
-        batch_results = generator.get_embeddings_batch(batch_faces)
-        t1 = time.time()
-        print(f"  Batch of 10: {(t1-t0)*1000:.1f}ms ({(t1-t0)*100:.1f}ms/face)")
-        print(f"  Results: {len(batch_results)} embeddings")
+        print(f"  Embedding shape: {face.embedding.shape}")
+        print(f"  Embedding norm: {np.linalg.norm(face.embedding):.4f}")

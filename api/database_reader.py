@@ -64,8 +64,7 @@ class Face:
     """Face embedding metadata."""
     id: int
     performer_id: int
-    facenet_index: int
-    arcface_index: int
+    embedding_index: int
     image_url: str
     source_endpoint: str
     quality_score: Optional[float]
@@ -183,17 +182,17 @@ class PerformerDatabaseReader:
             return [Face(**dict(row)) for row in rows]
 
     def get_performer_by_face_index(
-        self, facenet_index: int
+        self, embedding_index: int
     ) -> Optional[Performer]:
-        """Get performer by Voyager face index."""
+        """Get performer by usearch face index."""
         with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT p.* FROM performers p
                 JOIN faces f ON p.id = f.performer_id
-                WHERE f.facenet_index = ?
+                WHERE f.embedding_index = ?
                 """,
-                (facenet_index,)
+                (embedding_index,)
             ).fetchone()
             if row:
                 return Performer(**dict(row))
@@ -203,7 +202,7 @@ class PerformerDatabaseReader:
         """Get the maximum face index in the database."""
         with self._connection() as conn:
             row = conn.execute(
-                "SELECT MAX(arcface_index) FROM faces"
+                "SELECT MAX(embedding_index) FROM faces"
             ).fetchone()
             return row[0] if row and row[0] is not None else None
 

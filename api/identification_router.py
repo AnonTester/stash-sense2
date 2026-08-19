@@ -126,9 +126,7 @@ class PerformerMatchResponse(BaseModel):
     stashdb_id: str = Field(description="StashDB performer UUID")
     name: str = Field(description="Performer name")
     confidence: float = Field(description="Match confidence (0-1, higher is better)")
-    distance: float = Field(description="Combined distance score (lower is better)")
-    facenet_distance: float
-    arcface_distance: float
+    distance: float = Field(description="Distance score (lower is better)")
     country: Optional[str] = None
     image_url: Optional[str] = Field(None, description="StashDB profile image URL")
     endpoint: Optional[str] = Field(None, description="StashBox endpoint domain (e.g. 'stashdb.org'), or 'local' for a local-library match")
@@ -317,8 +315,6 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         name=m.name,
         confidence=distance_to_confidence(score),
         distance=score,
-        facenet_distance=m.facenet_distance,
-        arcface_distance=m.arcface_distance,
         country=m.country,
         image_url=m.image_url,
         endpoint=_extract_endpoint(uid) or getattr(m, "endpoint", None),
@@ -818,28 +814,46 @@ async def _identify_scene_from_cache(
     """Reconstruct matching inputs from cached face/body/tattoo signals and
     rerun only the DB-dependent steps (matching, clustering, re-ranking).
 
-    Skips ffmpeg frame extraction, RetinaFace detection, FaceNet512/ArcFace
-    embedding, MediaPipe pose extraction, and YOLO tattoo detection entirely
-    -- all reused verbatim from a prior full run on this scene.
+    Skips ffmpeg frame extraction, buffalo_l detection+embedding, MediaPipe
+    pose extraction, and YOLO tattoo detection entirely -- all reused
+    verbatim from a prior full run on this scene.
+
+    TODO(buffalo_l migration): recommendations_db.py's scene_face_embeddings
+    table (and save_face_signal_cache/load_face_signal_cache in
+    recommendations_router.py) still store the legacy dual facenet_vector/
+    arcface_vector columns -- out of scope for the core matching-path
+    migration, deferred to a follow-up pass on the recommendations
+    subsystem. Every cache row was written under the old database version
+    anyway, so this code path is unreachable in practice until v2 has been
+    used to identify at least one scene AND that scene is re-identified a
+    second time -- by then this needs the real fix, not just the
+    crash-avoidance below (bbox_json/confidence/yaw are still valid; only
+    the embedding reconstruction needs the schema migration).
     """
     scene_id_int = int(request.scene_id)
 
     match_config = MatchingConfig(
         query_k=100,
-        facenet_weight=face_config.FACENET_WEIGHT,
-        arcface_weight=face_config.ARCFACE_WEIGHT,
         max_results=request.top_k * 2,
         max_distance=request.max_distance,
     )
 
     cached_faces = load_face_signal_cache(scene_id_int)
+    if not cached_faces:
+        # identify_scene() still writes scene-level cache metadata
+        # (save_scene_signal_cache -- body/tattoo signals, unrelated to
+        # buffalo_l) even though face-embedding caching is disabled for
+        # this migration (see this function's docstring), so cache_meta
+        # existing no longer implies cached face rows exist. Raise so the
+        # caller's existing try/except falls back to the real pipeline,
+        # instead of silently returning a wrong "0 faces" result.
+        raise RuntimeError(f"No cached face embeddings for scene {scene_id_int} (face cache disabled)")
     all_results: list[tuple[int, RecognitionResult]] = []
     for row in cached_faces:
         bbox = json.loads(row["bbox_json"])
-        face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"])
+        face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
         embedding = FaceEmbedding(
-            facenet=np.frombuffer(row["facenet_vector"], dtype=np.float32),
-            arcface=np.frombuffer(row["arcface_vector"], dtype=np.float32),
+            embedding=np.frombuffer(row["facenet_vector"], dtype=np.float32),
         )
         matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
         all_results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
@@ -1152,9 +1166,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
 
     # Configure matching
     match_config = MatchingConfig(
-        query_k=100,  # Get more candidates for better fusion
-        facenet_weight=face_config.FACENET_WEIGHT,
-        arcface_weight=face_config.ARCFACE_WEIGHT,
+        query_k=100,  # Get more candidates before threshold-filtering
         max_results=request.top_k * 2,
         max_distance=request.max_distance,
     )
@@ -1181,11 +1193,10 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     filtered_faces = len(detected_faces)
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Detection: {t_detect_total:.1f}s | {total_faces} detected, {filtered_faces} after filter")
 
-    # Phase 2: Batch generate embeddings for ALL faces (2 model calls total)
+    # Phase 2: read back embeddings buffalo_l already computed during detection
     t_embed = time.time()
     if detected_faces:
-        face_images = [face.image for _, face in detected_faces]
-        embeddings = _recognizer.generator.get_embeddings_batch(face_images)
+        embeddings = _recognizer.generator.get_embeddings_batch([face for _, face in detected_faces])
     else:
         embeddings = []
     t_embed_total = time.time() - t_embed
@@ -1195,10 +1206,8 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     all_results: list[tuple[int, RecognitionResult]] = []
     t_recognize_total = 0.0
 
-    # Cache-ready rows for every face embedded so far -- expensive/DB-independent,
-    # persisted below (before matching-mode logic) so a future DB update can
-    # skip straight to re-matching without redoing detection+embedding.
-    face_cache_rows: list[dict] = []
+    # NOTE: face_cache_rows/save_face_signal_cache removed for this
+    # migration -- see the comment where rows used to be appended, below.
 
     for (frame_idx, face), embedding in zip(detected_faces, embeddings):
         t_rec = time.time()
@@ -1207,14 +1216,14 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
 
         result = RecognitionResult(face=face, matches=matches, embedding=embedding)
         all_results.append((frame_idx, result))
-        face_cache_rows.append({
-            "frame_index": frame_idx,
-            "bbox": face.bbox,
-            "confidence": face.confidence,
-            "yaw": face.yaw,
-            "facenet_vector": embedding.facenet.astype(np.float32).tobytes(),
-            "arcface_vector": embedding.arcface.astype(np.float32).tobytes(),
-        })
+        # face_cache_rows collection removed -- recommendations_db.py's
+        # scene_face_embeddings table still has the legacy NOT NULL dual
+        # facenet_vector/arcface_vector columns (deferred to a follow-up
+        # migration of the recommendations subsystem, out of scope here).
+        # Until that lands, the scene-fingerprint cache is a no-op: every
+        # identify_scene call does full detection+embedding+matching, same
+        # as a cache miss always did -- slower on repeat identification of
+        # the same scene, but correct.
 
     t_face_loop_total = time.time() - t_face_loop
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching: {t_recognize_total:.1f}s | Total face pipeline: {t_face_loop_total:.1f}s")
@@ -1250,19 +1259,11 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
                     ss_faces = [f for f in screenshot_detected
                                 if f.bbox["w"] >= request.min_face_size and f.bbox["h"] >= request.min_face_size]
                     if ss_faces:
-                        ss_embeddings = _recognizer.generator.get_embeddings_batch([f.image for f in ss_faces])
+                        ss_embeddings = _recognizer.generator.get_embeddings_batch(ss_faces)
                         for face, emb in zip(ss_faces, ss_embeddings):
                             matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb)
                             result = RecognitionResult(face=face, matches=matches, embedding=emb)
                             all_results.append((-1, result))
-                            face_cache_rows.append({
-                                "frame_index": -1,
-                                "bbox": face.bbox,
-                                "confidence": face.confidence,
-                                "yaw": face.yaw,
-                                "facenet_vector": emb.facenet.astype(np.float32).tobytes(),
-                                "arcface_vector": emb.arcface.astype(np.float32).tobytes(),
-                            })
                             screenshot_faces += 1
                             top_match = matches[0].name if matches else "no match"
                             print(f"[identify_scene] [{time.time()-t_start:.1f}s] Screenshot face: {face.bbox['w']}x{face.bbox['h']}px -> {top_match}")
@@ -1270,7 +1271,8 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         except Exception as e:
             print(f"[identify_scene] Screenshot processing failed: {e}")
 
-    save_face_signal_cache(scene_id_int, face_cache_rows)
+    # save_face_signal_cache() call removed -- see the earlier comment
+    # where face_cache_rows used to be collected.
 
     # Fetch missing images from StashBox for all detected matches
     scene_all_matches = [m for _, r in all_results for m in r.matches]

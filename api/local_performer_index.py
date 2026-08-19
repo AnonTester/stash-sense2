@@ -3,10 +3,10 @@ performer cover images, kept alongside the main StashDB-derived index.
 
 Unlike the main index (many faces per performer, ids allocated sequentially
 and tracked separately in performers.db), each local performer contributes
-at most one vector per model, keyed directly by their Stash performer ID --
-no separate id-allocation bookkeeping needed. Mirrors the Voyager usage
-pattern in stash-identify's build/voyager_index.py (same library, same
-Space.Cosine/512-dim setup), just invoked in-process instead of offline.
+at most one vector, keyed directly by their Stash performer ID -- no
+separate id-allocation bookkeeping needed. Mirrors the usearch usage
+pattern in stash-sense2-data-gen's build/usearch_index.py (same library,
+same cosine/512-dim setup), just invoked in-process instead of offline.
 """
 
 import hashlib
@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import numpy as np
-from voyager import Index, Space
+from usearch.index import Index
 
 logger = logging.getLogger(__name__)
 
@@ -27,24 +27,22 @@ STASHDB_ENDPOINT = "https://stashdb.org/graphql"
 
 
 class LocalPerformerIndex:
-    """Wraps a pair of Voyager indices (facenet + arcface) for local Stash
-    performers, plus a JSON sidecar mapping performer_id -> metadata.
+    """Wraps a usearch index for local Stash performers, plus a JSON
+    sidecar mapping performer_id -> metadata.
     """
 
-    def __init__(self, facenet_path: Path, arcface_path: Path, mapping_path: Path):
-        self.facenet_path = Path(facenet_path)
-        self.arcface_path = Path(arcface_path)
+    def __init__(self, index_path: Path, mapping_path: Path):
+        self.index_path = Path(index_path)
         self.mapping_path = Path(mapping_path)
-        self.facenet_index = self._load_or_create(self.facenet_path)
-        self.arcface_index = self._load_or_create(self.arcface_path)
+        self.index = self._load_or_create(self.index_path)
         self.mapping: dict[str, dict] = self._load_mapping()
 
     @staticmethod
     def _load_or_create(path: Path) -> Index:
+        index = Index(ndim=DIMENSIONS, metric="cos", connectivity=16)
         if path.exists():
-            with open(path, "rb") as f:
-                return Index.load(f)
-        return Index(Space.Cosine, num_dimensions=DIMENSIONS, M=16, ef_construction=200)
+            index.load(str(path))
+        return index
 
     def _load_mapping(self) -> dict:
         if self.mapping_path.exists():
@@ -53,45 +51,29 @@ class LocalPerformerIndex:
         return {}
 
     def save(self) -> None:
-        self.facenet_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.facenet_path, "wb") as f:
-            self.facenet_index.save(f)
-        with open(self.arcface_path, "wb") as f:
-            self.arcface_index.save(f)
+        self.index_path.parent.mkdir(parents=True, exist_ok=True)
+        self.index.save(str(self.index_path))
         with open(self.mapping_path, "w") as f:
             json.dump(self.mapping, f)
 
     def upsert(
         self, performer_id: int, name: str, stashdb_id: Optional[str],
-        image_hash: str, image_url: Optional[str],
-        facenet_vector: np.ndarray, arcface_vector: np.ndarray,
+        image_hash: str, image_url: Optional[str], embedding: np.ndarray,
     ) -> None:
-        """Add or replace this performer's embedding (delete-then-add, since
-        Voyager has no in-place update)."""
+        """Add or replace this performer's embedding (delete-then-add for
+        clarity/consistency with the main build pipeline's convention,
+        though usearch's own `add()` would also happily overwrite a key
+        in place)."""
         self.remove(performer_id)
-        self.facenet_index.add_item(facenet_vector.astype(np.float32), performer_id)
-        self.arcface_index.add_item(arcface_vector.astype(np.float32), performer_id)
+        self.index.add(performer_id, embedding.astype(np.float32))
         self.mapping[str(performer_id)] = {
             "name": name, "stashdb_id": stashdb_id,
             "image_hash": image_hash, "image_url": image_url,
         }
 
     def remove(self, performer_id: int) -> None:
-        for idx in (self.facenet_index, self.arcface_index):
-            if performer_id in idx:
-                try:
-                    del idx[performer_id]  # Index.__delitem__ == mark_deleted
-                except RuntimeError:
-                    # Voyager can raise "already deleted" here even right
-                    # after `in` reported the id present -- confirmed live,
-                    # apparently a tombstone-state inconsistency introduced
-                    # by a save()/load() round-trip. Either way the end
-                    # state (id absent) is already what remove() wants, so
-                    # treat it as a no-op rather than letting a 500 through
-                    # to the hook caller and permanently stuck a retry-cache
-                    # entry (nothing about retrying this exact call would
-                    # ever succeed).
-                    pass
+        if performer_id in self.index:
+            self.index.remove(performer_id)
         self.mapping.pop(str(performer_id), None)
 
     def get_image_hash(self, performer_id: int) -> Optional[str]:
@@ -189,7 +171,7 @@ async def sync_one_performer(
         return "removed" if was_present else "skipped_no_image"
 
     best_face = max(faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
-    embedding = generator.get_embedding(best_face.image)
+    embedding = generator.get_embedding(best_face)
 
     stashdb_id = next(
         (sid["stash_id"] for sid in performer.get("stash_ids", [])
@@ -203,7 +185,6 @@ async def sync_one_performer(
         stashdb_id=stashdb_id,
         image_hash=fingerprint,
         image_url=_relative_image_url(image_path),
-        facenet_vector=embedding.facenet,
-        arcface_vector=embedding.arcface,
+        embedding=embedding.embedding,
     )
     return "updated" if was_present else "added"

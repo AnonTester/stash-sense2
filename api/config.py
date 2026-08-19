@@ -61,10 +61,9 @@ class DatabaseConfig:
     """Configuration for the face recognition database files."""
     data_dir: Path
 
-    # Index files
-    facenet_index_path: Path = None
-    arcface_index_path: Path = None
-    adaface_index_path: Path = None
+    # Index file (single usearch index -- buffalo_l produces one embedding
+    # per face, replacing the old dual Voyager facenet/arcface pair)
+    embedding_index_path: Path = None
 
     # Tattoo embedding index
     tattoo_index_path: Path = None
@@ -73,8 +72,7 @@ class DatabaseConfig:
     # Local performer index (built from this Stash instance's own performer
     # cover images, kept alongside the main StashDB-derived index -- see
     # local_performer_index.py). Optional, same as the tattoo index above.
-    local_facenet_index_path: Path = None
-    local_arcface_index_path: Path = None
+    local_embedding_index_path: Path = None
     local_faces_json_path: Path = None
 
     # Metadata files (SQLite is primary, JSON kept for compatibility)
@@ -87,13 +85,10 @@ class DatabaseConfig:
         self.data_dir = Path(self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.facenet_index_path = self.facenet_index_path or self.data_dir / "face_facenet.voy"
-        self.arcface_index_path = self.arcface_index_path or self.data_dir / "face_arcface.voy"
-        self.adaface_index_path = self.adaface_index_path or self.data_dir / "face_adaface.voy"
+        self.embedding_index_path = self.embedding_index_path or self.data_dir / "face_embeddings.usearch"
         self.tattoo_index_path = self.tattoo_index_path or self.data_dir / "tattoo_embeddings.voy"
         self.tattoo_json_path = self.tattoo_json_path or self.data_dir / "tattoo_embeddings.json"
-        self.local_facenet_index_path = self.local_facenet_index_path or self.data_dir / "local_facenet.voy"
-        self.local_arcface_index_path = self.local_arcface_index_path or self.data_dir / "local_arcface.voy"
+        self.local_embedding_index_path = self.local_embedding_index_path or self.data_dir / "local_embeddings.usearch"
         self.local_faces_json_path = self.local_faces_json_path or self.data_dir / "local_faces.json"
         self.sqlite_db_path = self.sqlite_db_path or self.data_dir / "performers.db"
         self.faces_json_path = self.faces_json_path or self.data_dir / "faces.json"
@@ -131,8 +126,7 @@ class MultiSignalConfig:
 
 
 # Embedding dimensions
-FACENET_DIM = 512
-ARCFACE_DIM = 512
+EMBEDDING_DIM = 512
 
 # Default thresholds
 DEFAULT_CONFIDENCE_THRESHOLD = 0.5

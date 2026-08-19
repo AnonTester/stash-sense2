@@ -1,6 +1,6 @@
 """Local performer index sync as a queue job.
 
-Builds/updates a Voyager index from this Stash instance's own performer
+Builds/updates a usearch index from this Stash instance's own performer
 cover images (see local_performer_index.py), diffed against the index's
 own persisted JSON mapping -- no separate SQL tracking table needed, the
 mapping file already records each performer's last-synced image content
@@ -67,8 +67,7 @@ class LocalPerformerSyncJob(BaseJob):
         stash = get_stash_client()
         db_config = DatabaseConfig(data_dir=Path(DATA_DIR))
         index = LocalPerformerIndex(
-            db_config.local_facenet_index_path,
-            db_config.local_arcface_index_path,
+            db_config.local_embedding_index_path,
             db_config.local_faces_json_path,
         )
         generator = FaceEmbeddingGenerator()

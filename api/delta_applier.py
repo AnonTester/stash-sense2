@@ -1,10 +1,10 @@
 """Delta update application — the small-download alternative to
 database_updater.py's full-zip swap.
 
-A delta package (built by stash-identify's build/export_delta.py) is a
-lean SQLite file (`delta.db`) listing exactly what changed since some
+A delta package (built by stash-sense2-data-gen's build/export_delta.py) is
+a lean SQLite file (`delta.db`) listing exactly what changed since some
 prior release: performer upserts/removals, new face vectors (already
-tagged with the *server-assigned* Voyager index — we reuse it verbatim,
+tagged with the *server-assigned* usearch index — we reuse it verbatim,
 never recompute), and a `removed_faces` table of exactly which indices to
 drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
@@ -40,18 +40,18 @@ from typing import Any, Callable, Optional
 
 import httpx
 import numpy as np
-from voyager import Index
+from usearch.index import Index
 
 from export_db_to_json import export_faces_json, export_performers_json
 
 logger = logging.getLogger(__name__)
 
-_DELTA_ASSET_RE = re.compile(r"^stash-sense-delta-(?P<from_version>.+)-to-(?P<to_version>.+)\.zip$")
+_DELTA_ASSET_RE = re.compile(r"^stash-sense2-delta-(?P<from_version>.+)-to-(?P<to_version>.+)\.zip$")
 _CHUNK_SIZE = 65_536
 
 # Same set database_updater.py backs up/restores — kept identical so a
 # rollback here is indistinguishable from a rollback of the full-zip path.
-BACKED_UP_FILES = ("performers.db", "face_facenet.voy", "face_arcface.voy", "faces.json", "performers.json", "manifest.json")
+BACKED_UP_FILES = ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "manifest.json")
 
 
 # ---------------------------------------------------------------------------
@@ -220,17 +220,17 @@ def _sync_face_count(conn: sqlite3.Connection, performer_id: int) -> None:
 
 
 def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
-    """Apply one delta.db onto the live performers.db + Voyager indices in
+    """Apply one delta.db onto the live performers.db + usearch index in
     `data_dir`. Does not touch faces.json/performers.json/manifest.json —
     the caller regenerates those once after the whole chain is applied.
     """
     conn = sqlite3.connect(data_dir / "performers.db")
     conn.execute("PRAGMA foreign_keys = ON")
 
-    with open(data_dir / "face_facenet.voy", "rb") as f:
-        fn_index = Index.load(f)
-    with open(data_dir / "face_arcface.voy", "rb") as f:
-        af_index = Index.load(f)
+    index = Index(ndim=512, metric="cos")
+    index_path = data_dir / "face_embeddings.usearch"
+    if index_path.exists():
+        index.load(str(index_path))
 
     delta_conn = sqlite3.connect(f"file:{delta_db_path}?mode=ro", uri=True)
     delta_conn.row_factory = sqlite3.Row
@@ -254,30 +254,26 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
         if performer_id is None:
             logger.warning("Delta face for unknown performer %s:%s — skipping", f["endpoint"], f["stashbox_id"])
             continue
-        fn_vec = np.frombuffer(f["facenet_vector"], dtype=np.float32)
-        af_vec = np.frombuffer(f["arcface_vector"], dtype=np.float32)
-        fn_index.add_item(fn_vec, f["facenet_index"])
-        af_index.add_item(af_vec, f["facenet_index"])
+        vec = np.frombuffer(f["embedding"], dtype=np.float32)
+        index.add(f["embedding_index"], vec)
         conn.execute(
             """
-            INSERT INTO faces (performer_id, facenet_index, arcface_index, image_url,
+            INSERT INTO faces (performer_id, embedding_index, image_url,
                                 source_endpoint, quality_score, yaw)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (performer_id, f["facenet_index"], f["facenet_index"], f["image_url"],
+            (performer_id, f["embedding_index"], f["image_url"],
              f["endpoint"], f["quality_score"], f["yaw"]),
         )
         touched_performers.add(performer_id)
         faces_added += 1
 
     for r in delta_conn.execute("SELECT * FROM removed_faces"):
-        idx = r["facenet_index"]
-        row = conn.execute("SELECT performer_id FROM faces WHERE facenet_index = ?", (idx,)).fetchone()
-        if idx in fn_index:
-            del fn_index[idx]
-        if idx in af_index:
-            del af_index[idx]
-        conn.execute("DELETE FROM faces WHERE facenet_index = ?", (idx,))
+        idx = r["embedding_index"]
+        row = conn.execute("SELECT performer_id FROM faces WHERE embedding_index = ?", (idx,)).fetchone()
+        if idx in index:
+            index.remove(idx)
+        conn.execute("DELETE FROM faces WHERE embedding_index = ?", (idx,))
         if row is not None:
             touched_performers.add(row[0])
         faces_removed += 1
@@ -285,10 +281,7 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
     for pid in touched_performers:
         _sync_face_count(conn, pid)
 
-    with open(data_dir / "face_facenet.voy", "wb") as f:
-        fn_index.save(f)
-    with open(data_dir / "face_arcface.voy", "wb") as f:
-        af_index.save(f)
+    index.save(str(index_path))
 
     conn.commit()
     conn.close()
@@ -394,7 +387,7 @@ async def apply_delta_chain(
             "face_count": face_count,
             "checksums": {
                 fname: f"sha256:{_sha256(data_dir / fname)}"
-                for fname in ("performers.db", "face_facenet.voy", "face_arcface.voy", "faces.json", "performers.json")
+                for fname in ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json")
             },
         }
         (data_dir / "manifest.json").write_text(json.dumps(new_manifest, indent=2))
