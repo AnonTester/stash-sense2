@@ -60,7 +60,7 @@ RELEASE_FILES = {
     "faces.json",
     "performers.json",
     "manifest.json",
-    "tattoo_embeddings.voy",
+    "tattoo_embeddings.usearch",
     "tattoo_embeddings.json",
 }
 

@@ -49,7 +49,15 @@ class DownloadStatus(str, Enum):
 class ModelInfo:
     """Model metadata from the manifest."""
     name: str
-    file: str
+    file: str       # local destination path, relative to models_dir -- may
+                     # include subdirectories (e.g. buffalo_l's
+                     # "models/buffalo_l/det_10g.onnx", matching insightface's
+                     # own expected layout)
+    asset: str       # GitHub release asset filename -- always flat, since
+                     # `gh release create`/GitHub itself has no concept of a
+                     # nested asset path. Distinct from `file` because the
+                     # two can legitimately differ (see buffalo_l above);
+                     # defaults to file's basename when the two coincide.
     size: int
     sha256: str
     group: str
@@ -103,9 +111,11 @@ class ModelManager:
         self._release_tag = data["release_tag"]
 
         for name, info in data["models"].items():
+            file = info["file"]
             self._models[name] = ModelInfo(
                 name=name,
-                file=info["file"],
+                file=file,
+                asset=info.get("asset") or Path(file).name,
                 size=info["size"],
                 sha256=info["sha256"],
                 group=info["group"],
@@ -170,7 +180,7 @@ class ModelManager:
         """Get GitHub Release download URL for a model.
 
         Args:
-            model_name: Name of the model (e.g. "facenet512").
+            model_name: Name of the model (e.g. "buffalo_l_detection").
 
         Returns:
             URL string, or None if model name is unknown.
@@ -181,7 +191,7 @@ class ModelManager:
 
         return (
             f"https://github.com/{self._repo}/releases/download/"
-            f"{self._release_tag}/{model.file}"
+            f"{self._release_tag}/{model.asset}"
         )
 
     async def download_model(self, model_name: str) -> Path:

@@ -86,7 +86,7 @@ class DatabaseConfig:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.embedding_index_path = self.embedding_index_path or self.data_dir / "face_embeddings.usearch"
-        self.tattoo_index_path = self.tattoo_index_path or self.data_dir / "tattoo_embeddings.voy"
+        self.tattoo_index_path = self.tattoo_index_path or self.data_dir / "tattoo_embeddings.usearch"
         self.tattoo_json_path = self.tattoo_json_path or self.data_dir / "tattoo_embeddings.json"
         self.local_embedding_index_path = self.local_embedding_index_path or self.data_dir / "local_embeddings.usearch"
         self.local_faces_json_path = self.local_faces_json_path or self.data_dir / "local_faces.json"

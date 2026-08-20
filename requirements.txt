@@ -4,14 +4,17 @@ requests>=2.28.0,<3
 tqdm>=4.65.0,<5
 
 # ML - PyTorch with CUDA 12.8 (for Blackwell GPUs)
-# Only used in dev for tattoo detection; Docker image uses ONNX Runtime instead
+# Only used in dev for model conversion (convert_models_to_onnx.py) and
+# tattoo detection; the Docker image uses ONNX Runtime at runtime instead.
+# deepface (TensorFlow-based FaceNet512/ArcFace conversion) was removed
+# with the buffalo_l migration -- no longer needed for anything.
 --extra-index-url https://download.pytorch.org/whl/nightly/cu128
 torch>=2.5.0
 torchvision>=0.20.0
+open-clip-torch>=2.24.0  # CLIP ViT-B/32 conversion for tattoo embedding
 
 # Face recognition
-deepface>=0.0.93
-insightface>=0.7.0,<1  # RetinaFace detection (GPU via ONNX Runtime)
+insightface>=0.7.3,<1  # buffalo_l detection+recognition (GPU via ONNX Runtime)
 onnxruntime-gpu>=1.15.0,<2  # GPU support for InsightFace
 usearch>=2.16.0,<3
 

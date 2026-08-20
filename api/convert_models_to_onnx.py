@@ -1,21 +1,23 @@
 """Convert models to ONNX format for GPU-accelerated inference via ONNX Runtime.
 
 One-time conversion script. Converts:
-- FaceNet512 and ArcFace (TensorFlow -> ONNX) for face recognition
 - YOLOv5s tattoo detector (PyTorch -> ONNX) for tattoo detection
-- EfficientNet-B0 tattoo embedder (PyTorch -> ONNX) for tattoo matching
+- CLIP ViT-B/32 image encoder (PyTorch -> ONNX) for tattoo embedding/matching
+
+FaceNet512/ArcFace conversion (TensorFlow -> ONNX) was removed with the
+buffalo_l migration -- face recognition no longer uses these models at
+all, insightface's own FaceAnalysis(name="buffalo_l") replaces them
+entirely (see embeddings.py).
 
 Usage:
     cd api
     python convert_models_to_onnx.py                  # Convert all models
     python convert_models_to_onnx.py --yolov5          # Convert YOLOv5 only
-    python convert_models_to_onnx.py --efficientnet    # Convert EfficientNet only
+    python convert_models_to_onnx.py --clip            # Convert CLIP only
 
 Output:
-    models/facenet512.onnx
-    models/arcface.onnx
     models/tattoo_yolov5s.onnx
-    models/tattoo_efficientnet_b0.onnx
+    models/tattoo_clip_vitb32.onnx
 """
 import os
 import sys
@@ -24,148 +26,6 @@ from pathlib import Path
 
 
 MODELS_DIR = Path(__file__).parent / "models"
-
-
-def _init_tensorflow():
-    """Initialize TensorFlow with GPU disabled (CPU-only for conversion)."""
-    os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-    import tensorflow as tf
-    tf.config.set_visible_devices([], 'GPU')
-
-
-def convert_facenet512():
-    """Convert FaceNet512 to ONNX."""
-    _init_tensorflow()
-    import tf2onnx
-    import tensorflow as tf
-    from deepface.modules import modeling
-
-    print("Loading FaceNet512 from DeepFace...")
-    model_wrapper = modeling.build_model(
-        task="facial_recognition",
-        model_name="Facenet512"
-    )
-    keras_model = model_wrapper.model
-
-    input_shape = model_wrapper.input_shape  # (160, 160)
-    print(f"  Input shape: {input_shape}")
-    print(f"  Keras model input: {keras_model.input_shape}")
-    print(f"  Keras model output: {keras_model.output_shape}")
-
-    output_path = str(MODELS_DIR / "facenet512.onnx")
-    print("  Converting to ONNX...")
-
-    # Create input spec with dynamic batch dimension
-    input_spec = (tf.TensorSpec((None, input_shape[0], input_shape[1], 3), tf.float32, name="input"),)
-
-    model_proto, _ = tf2onnx.convert.from_keras(
-        keras_model,
-        input_signature=input_spec,
-        opset=17,
-        output_path=output_path,
-    )
-
-    print(f"  Saved to {output_path}")
-    return output_path, input_shape
-
-
-def convert_arcface():
-    """Convert ArcFace to ONNX."""
-    _init_tensorflow()
-    import tf2onnx
-    import tensorflow as tf
-    from deepface.modules import modeling
-
-    print("Loading ArcFace from DeepFace...")
-    model_wrapper = modeling.build_model(
-        task="facial_recognition",
-        model_name="ArcFace"
-    )
-    keras_model = model_wrapper.model
-
-    input_shape = model_wrapper.input_shape  # (112, 112)
-    print(f"  Input shape: {input_shape}")
-    print(f"  Keras model input: {keras_model.input_shape}")
-    print(f"  Keras model output: {keras_model.output_shape}")
-
-    output_path = str(MODELS_DIR / "arcface.onnx")
-    print("  Converting to ONNX...")
-
-    # Create input spec with dynamic batch dimension
-    input_spec = (tf.TensorSpec((None, input_shape[0], input_shape[1], 3), tf.float32, name="input"),)
-
-    model_proto, _ = tf2onnx.convert.from_keras(
-        keras_model,
-        input_signature=input_spec,
-        opset=17,
-        output_path=output_path,
-    )
-
-    print(f"  Saved to {output_path}")
-    return output_path, input_shape
-
-
-def verify_equivalence(facenet_onnx_path, arcface_onnx_path):
-    """Verify ONNX models produce same embeddings as TF models."""
-    import onnxruntime as ort
-    from deepface.modules import modeling
-
-    print("\nVerifying numerical equivalence...")
-
-    # Load TF models
-    facenet_tf = modeling.build_model(task="facial_recognition", model_name="Facenet512")
-    arcface_tf = modeling.build_model(task="facial_recognition", model_name="ArcFace")
-
-    # Load ONNX models
-    facenet_onnx = ort.InferenceSession(facenet_onnx_path, providers=["CPUExecutionProvider"])
-    arcface_onnx = ort.InferenceSession(arcface_onnx_path, providers=["CPUExecutionProvider"])
-
-    # Get ONNX input/output names
-    fn_input_name = facenet_onnx.get_inputs()[0].name
-    fn_output_name = facenet_onnx.get_outputs()[0].name
-    af_input_name = arcface_onnx.get_inputs()[0].name
-    af_output_name = arcface_onnx.get_outputs()[0].name
-
-    print(f"  FaceNet ONNX input: {fn_input_name}, output: {fn_output_name}")
-    print(f"  ArcFace ONNX input: {af_input_name}, output: {af_output_name}")
-
-    # Test with random inputs
-    np.random.seed(42)
-
-    # FaceNet512: (1, 160, 160, 3), normalized to [-1, 1]
-    fn_input = np.random.randn(1, 160, 160, 3).astype(np.float32) * 0.5
-    tf_fn_out = facenet_tf.model(fn_input, training=False).numpy()
-    onnx_fn_out = facenet_onnx.run([fn_output_name], {fn_input_name: fn_input})[0]
-
-    fn_max_diff = np.max(np.abs(tf_fn_out - onnx_fn_out))
-    fn_cos_sim = np.dot(tf_fn_out[0], onnx_fn_out[0]) / (np.linalg.norm(tf_fn_out[0]) * np.linalg.norm(onnx_fn_out[0]))
-    print(f"  FaceNet512: max_diff={fn_max_diff:.2e}, cosine_sim={fn_cos_sim:.8f}")
-
-    # ArcFace: (1, 112, 112, 3), normalized to [-1, 1]
-    af_input = np.random.randn(1, 112, 112, 3).astype(np.float32) * 0.5
-    tf_af_out = arcface_tf.model(af_input, training=False).numpy()
-    onnx_af_out = arcface_onnx.run([af_output_name], {af_input_name: af_input})[0]
-
-    af_max_diff = np.max(np.abs(tf_af_out - onnx_af_out))
-    af_cos_sim = np.dot(tf_af_out[0], onnx_af_out[0]) / (np.linalg.norm(tf_af_out[0]) * np.linalg.norm(onnx_af_out[0]))
-    print(f"  ArcFace:    max_diff={af_max_diff:.2e}, cosine_sim={af_cos_sim:.8f}")
-
-    # Test batch inference (dynamic batch size)
-    fn_batch = np.random.randn(4, 160, 160, 3).astype(np.float32) * 0.5
-    onnx_fn_batch = facenet_onnx.run([fn_output_name], {fn_input_name: fn_batch})[0]
-    print(f"  FaceNet batch (4): output shape = {onnx_fn_batch.shape}")
-
-    af_batch = np.random.randn(4, 112, 112, 3).astype(np.float32) * 0.5
-    onnx_af_batch = arcface_onnx.run([af_output_name], {af_input_name: af_batch})[0]
-    print(f"  ArcFace batch (4): output shape = {onnx_af_batch.shape}")
-
-    # Check tolerances
-    assert fn_max_diff < 1e-4, f"FaceNet diff too large: {fn_max_diff}"
-    assert af_max_diff < 1e-4, f"ArcFace diff too large: {af_max_diff}"
-    assert fn_cos_sim > 0.9999, f"FaceNet cosine sim too low: {fn_cos_sim}"
-    assert af_cos_sim > 0.9999, f"ArcFace cosine sim too low: {af_cos_sim}"
-
-    print("\n  All equivalence checks PASSED!")
 
 
 def convert_yolov5_tattoo():
@@ -317,36 +177,81 @@ def verify_yolov5_equivalence(onnx_path):
     print("\n  YOLOv5 equivalence checks PASSED!")
 
 
-def convert_efficientnet_tattoo():
-    """Convert EfficientNet-B0 tattoo embedder from PyTorch to ONNX.
+class _ClipImageEncoder:
+    """Wraps just CLIP's visual tower for export/inference.
 
-    Exports the model with the classification head replaced by nn.Identity(),
-    producing 1280-dim feature vectors for tattoo similarity matching.
+    open_clip's full CLIP model expects (image, text) and returns
+    (image_features, text_features, logit_scale) -- tattoo matching only
+    ever needs the image side, so this strips the export down to exactly
+    that (avoids exporting/loading the text tower and tokenizer at all).
+    """
+    def __new__(cls, clip_model):
+        import torch
 
-    Input:  (batch, 3, 224, 224) float32, ImageNet-normalized
-    Output: (batch, 1280) float32
+        class _Wrapper(torch.nn.Module):
+            def __init__(self, visual):
+                super().__init__()
+                self.visual = visual
+
+            def forward(self, x):
+                return self.visual(x)
+
+        return _Wrapper(clip_model.visual)
+
+
+def convert_clip_tattoo():
+    """Convert CLIP ViT-B/32's image encoder from PyTorch to ONNX.
+
+    Replaces the frozen EfficientNet-B0 embedder (a plain ImageNet
+    classifier with its head stripped -- never trained on tattoo data at
+    all) with CLIP's image encoder. CLIP is trained contrastively (make
+    similar images close in embedding space, dissimilar ones far), which
+    is directly the property a similarity-matching embedder needs, unlike
+    a classifier's incidental features. This is also what TattooTrace (the
+    source of tattoo_yolov5s.onnx) itself pairs with YOLOv5 for its own
+    "recognition/clustering" stage, per its README.
+
+    Uses OpenAI's original CLIP ViT-B/32 weights via open_clip (512-dim
+    output, ~151M params) -- the smallest standard CLIP variant, chosen to
+    keep throughput reasonable over a large corpus while still getting
+    CLIP's embedding-space quality. Needs `open-clip-torch` installed
+    (dev/conversion-time only, same as torch/torchvision/tf2onnx above --
+    never a runtime dependency of the sidecar itself).
+
+    Input:  (batch, 3, 224, 224) float32, CLIP-normalized -- NOT
+            ImageNet mean/std, CLIP uses its own normalization constants
+            (see tattoo_matcher.py's _TattooEmbeddingGenerator).
+    Output: (batch, 512) float32, not yet L2-normalized (matches
+            EfficientNet-B0's old raw-output convention; normalization
+            happens at inference time in tattoo_matcher.py, unchanged).
     """
     import torch
-    from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+    import open_clip
 
-    output_path = str(MODELS_DIR / "tattoo_efficientnet_b0.onnx")
+    output_path = str(MODELS_DIR / "tattoo_clip_vitb32.onnx")
 
-    print("Loading EfficientNet-B0 with ImageNet weights...")
-    weights = EfficientNet_B0_Weights.DEFAULT
-    model = efficientnet_b0(weights=weights)
-    model.classifier = torch.nn.Identity()  # Strip classification head, expose 1280-dim features
+    print("Loading CLIP ViT-B/32 (OpenAI weights) via open_clip...")
+    # "-quickgelu" variant, not plain "ViT-B-32": OpenAI's original CLIP
+    # weights use the QuickGELU activation (x * sigmoid(1.702x)), but
+    # open_clip's default "ViT-B-32" config uses standard GELU. Loading
+    # the "openai" pretrained weights onto the wrong activation function
+    # doesn't error -- it silently produces a model that's subtly wrong
+    # relative to genuine OpenAI CLIP (confirmed live: open_clip itself
+    # warns "QuickGELU mismatch" when this is gotten wrong).
+    clip_model, _, _ = open_clip.create_model_and_transforms("ViT-B-32-quickgelu", pretrained="openai")
+    clip_model.eval()
+
+    model = _ClipImageEncoder(clip_model)
     model.eval()
 
-    # Input: (batch, 3, 224, 224), float32, ImageNet-normalized
     input_shape = (1, 3, 224, 224)
     dummy_input = torch.randn(*input_shape)
 
     print(f"  Input shape: {input_shape}")
 
-    # Verify forward pass works before export
     with torch.no_grad():
         test_output = model(dummy_input)
-    print(f"  PyTorch output shape: {test_output.shape}")  # (1, 1280)
+    print(f"  PyTorch output shape: {test_output.shape}")  # (1, 512)
 
     print("  Exporting to ONNX...")
     torch.onnx.export(
@@ -367,8 +272,8 @@ def convert_efficientnet_tattoo():
     return output_path
 
 
-def verify_efficientnet_equivalence(onnx_path):
-    """Verify ONNX EfficientNet-B0 produces same embeddings as PyTorch.
+def verify_clip_equivalence(onnx_path):
+    """Verify ONNX CLIP image encoder produces same embeddings as PyTorch.
 
     Compares using:
     - Max absolute difference (must be < 1e-4)
@@ -377,37 +282,38 @@ def verify_efficientnet_equivalence(onnx_path):
     """
     import torch
     import onnxruntime as ort
-    from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+    import open_clip
 
-    print("\nVerifying EfficientNet-B0 numerical equivalence...")
+    print("\nVerifying CLIP ViT-B/32 numerical equivalence...")
 
-    # Load PyTorch model
-    weights = EfficientNet_B0_Weights.DEFAULT
-    pt_model = efficientnet_b0(weights=weights)
-    pt_model.classifier = torch.nn.Identity()
+    # "-quickgelu" variant, not plain "ViT-B-32": OpenAI's original CLIP
+    # weights use the QuickGELU activation (x * sigmoid(1.702x)), but
+    # open_clip's default "ViT-B-32" config uses standard GELU. Loading
+    # the "openai" pretrained weights onto the wrong activation function
+    # doesn't error -- it silently produces a model that's subtly wrong
+    # relative to genuine OpenAI CLIP (confirmed live: open_clip itself
+    # warns "QuickGELU mismatch" when this is gotten wrong).
+    clip_model, _, _ = open_clip.create_model_and_transforms("ViT-B-32-quickgelu", pretrained="openai")
+    clip_model.eval()
+    pt_model = _ClipImageEncoder(clip_model)
     pt_model.eval()
 
-    # Load ONNX model
     onnx_session = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     onnx_input_name = onnx_session.get_inputs()[0].name
     onnx_output_name = onnx_session.get_outputs()[0].name
     print(f"  ONNX input: {onnx_input_name}, output: {onnx_output_name}")
 
-    # Test with deterministic input (ImageNet-normalized range)
     np.random.seed(42)
     test_input = np.random.randn(1, 3, 224, 224).astype(np.float32)
 
-    # PyTorch inference
     with torch.no_grad():
         pt_output = pt_model(torch.from_numpy(test_input)).numpy()
 
-    # ONNX inference
     onnx_output = onnx_session.run([onnx_output_name], {onnx_input_name: test_input})[0]
 
     print(f"  PyTorch output shape: {pt_output.shape}")
     print(f"  ONNX output shape:    {onnx_output.shape}")
 
-    # Numerical comparison (single sample)
     max_diff = np.max(np.abs(pt_output - onnx_output))
     cos_sim = np.dot(pt_output[0], onnx_output[0]) / (
         np.linalg.norm(pt_output[0]) * np.linalg.norm(onnx_output[0])
@@ -416,14 +322,10 @@ def verify_efficientnet_equivalence(onnx_path):
     print(f"  Max absolute diff: {max_diff:.2e}")
     print(f"  Cosine similarity: {cos_sim:.8f}")
 
-    # Verify output dimensions
-    assert onnx_output.shape == (1, 1280), f"Expected (1, 1280), got {onnx_output.shape}"
-
-    # Check tolerances
+    assert onnx_output.shape == (1, 512), f"Expected (1, 512), got {onnx_output.shape}"
     assert max_diff < 1e-4, f"Max diff too large: {max_diff:.2e}"
     assert cos_sim > 0.9999, f"Cosine similarity too low: {cos_sim:.8f}"
 
-    # Test batch inference (batch=4)
     batch_input = np.random.randn(4, 3, 224, 224).astype(np.float32)
 
     with torch.no_grad():
@@ -431,10 +333,9 @@ def verify_efficientnet_equivalence(onnx_path):
     onnx_batch = onnx_session.run([onnx_output_name], {onnx_input_name: batch_input})[0]
 
     print(f"  Batch (4) output shape: {onnx_batch.shape}")
-    assert onnx_batch.shape == (4, 1280), f"Batch shape mismatch: {onnx_batch.shape}"
+    assert onnx_batch.shape == (4, 512), f"Batch shape mismatch: {onnx_batch.shape}"
 
     batch_max_diff = np.max(np.abs(pt_batch - onnx_batch))
-    # Per-sample cosine similarities
     for i in range(4):
         sample_cos = np.dot(pt_batch[i], onnx_batch[i]) / (
             np.linalg.norm(pt_batch[i]) * np.linalg.norm(onnx_batch[i])
@@ -444,14 +345,14 @@ def verify_efficientnet_equivalence(onnx_path):
     print(f"  Batch max absolute diff: {batch_max_diff:.2e}")
     assert batch_max_diff < 1e-4, f"Batch max diff too large: {batch_max_diff:.2e}"
 
-    print("\n  EfficientNet-B0 equivalence checks PASSED!")
+    print("\n  CLIP ViT-B/32 equivalence checks PASSED!")
 
 
 if __name__ == "__main__":
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     yolov5_only = "--yolov5" in sys.argv
-    efficientnet_only = "--efficientnet" in sys.argv
+    clip_only = "--clip" in sys.argv
 
     if yolov5_only:
         # Convert only YOLOv5 tattoo detector
@@ -462,35 +363,27 @@ if __name__ == "__main__":
         print("\nModel sizes:")
         print(f"  YOLOv5s tattoo: {yolo_size:.1f} MB")
 
-    elif efficientnet_only:
-        # Convert only EfficientNet-B0 tattoo embedder
-        eff_path = convert_efficientnet_tattoo()
-        verify_efficientnet_equivalence(eff_path)
+    elif clip_only:
+        # Convert only CLIP tattoo embedder
+        clip_path = convert_clip_tattoo()
+        verify_clip_equivalence(clip_path)
 
-        eff_size = os.path.getsize(eff_path) / (1024 * 1024)
+        clip_size = os.path.getsize(clip_path) / (1024 * 1024)
         print("\nModel sizes:")
-        print(f"  EfficientNet-B0 tattoo: {eff_size:.1f} MB")
+        print(f"  CLIP ViT-B/32 tattoo: {clip_size:.1f} MB")
 
     else:
         # Convert all models
-        facenet_path, _ = convert_facenet512()
-        arcface_path, _ = convert_arcface()
-        verify_equivalence(facenet_path, arcface_path)
-
         yolo_path = convert_yolov5_tattoo()
         verify_yolov5_equivalence(yolo_path)
 
-        eff_path = convert_efficientnet_tattoo()
-        verify_efficientnet_equivalence(eff_path)
+        clip_path = convert_clip_tattoo()
+        verify_clip_equivalence(clip_path)
 
-        fn_size = os.path.getsize(facenet_path) / (1024 * 1024)
-        af_size = os.path.getsize(arcface_path) / (1024 * 1024)
         yolo_size = os.path.getsize(yolo_path) / (1024 * 1024)
-        eff_size = os.path.getsize(eff_path) / (1024 * 1024)
+        clip_size = os.path.getsize(clip_path) / (1024 * 1024)
         print("\nModel sizes:")
-        print(f"  FaceNet512:             {fn_size:.1f} MB")
-        print(f"  ArcFace:                {af_size:.1f} MB")
-        print(f"  YOLOv5s tattoo:         {yolo_size:.1f} MB")
-        print(f"  EfficientNet-B0 tattoo: {eff_size:.1f} MB")
+        print(f"  YOLOv5s tattoo:       {yolo_size:.1f} MB")
+        print(f"  CLIP ViT-B/32 tattoo: {clip_size:.1f} MB")
 
     print("\nDone! Models saved to api/models/")

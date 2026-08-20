@@ -1,12 +1,23 @@
 """
-Tattoo embedding matcher using EfficientNet-B0 (ONNX) + Voyager kNN search.
+Tattoo embedding matcher using CLIP ViT-B/32 (ONNX) + usearch kNN search.
 
-Takes YOLO tattoo detection crops, generates EfficientNet-B0 embeddings
-via ONNX Runtime, and queries the pre-built tattoo_embeddings.voy index
-to find performers with visually similar tattoos.
+Takes YOLO tattoo detection crops, generates CLIP image-encoder embeddings
+via ONNX Runtime, and queries the pre-built tattoo_embeddings.usearch
+index to find performers with visually similar tattoos.
 
-Replaces the old binary has/doesn't-have tattoo signal with visual
-similarity matching against 230k+ tattoo embeddings.
+CLIP replaces the earlier frozen EfficientNet-B0 embedder (a plain
+ImageNet classifier with its head stripped, never trained on tattoo data)
+-- CLIP is trained contrastively, which is directly the property a
+similarity-matching embedder needs, and is what TattooTrace (the source of
+tattoo_yolov5s.onnx) itself pairs with YOLOv5 for this exact
+"recognition/clustering" stage.
+
+Tattoo matching is a helper/secondary signal, not a primary identifier --
+even a dedicated research pipeline (Kobec et al. 2024, YOLOv5 + cosine
+similarity on the deMSI dataset) reports an F-score of only ~0.52 for
+trusting the single best cosine match, recommending a broad low-threshold
+recall net instead of confident top-1 matching. Keep that in mind when
+weighting this signal in a fused score -- it corroborates, it doesn't lead.
 """
 
 import logging
@@ -21,20 +32,20 @@ import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
-TATTOO_EMBEDDING_DIM = 1280
+TATTOO_EMBEDDING_DIM = 512
 
 # Model search paths: DATA_DIR/models first, then ./models (relative to this file)
-ONNX_MODEL_FILENAME = "tattoo_efficientnet_b0.onnx"
+ONNX_MODEL_FILENAME = "tattoo_clip_vitb32.onnx"
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 LOCAL_MODELS_DIR = Path(__file__).parent / "models"
 
 
 def _find_embedder_model_path() -> Path:
-    """Find the EfficientNet-B0 ONNX model for tattoo embedding.
+    """Find the CLIP ViT-B/32 ONNX model for tattoo embedding.
 
     Search order:
-    1. {DATA_DIR}/models/tattoo_efficientnet_b0.onnx (Docker / production)
-    2. ./models/tattoo_efficientnet_b0.onnx (local development, relative to this file)
+    1. {DATA_DIR}/models/tattoo_clip_vitb32.onnx (Docker / production)
+    2. ./models/tattoo_clip_vitb32.onnx (local development, relative to this file)
 
     Returns:
         Path to the ONNX model file.
@@ -53,7 +64,7 @@ def _find_embedder_model_path() -> Path:
     raise FileNotFoundError(
         f"Tattoo embedder ONNX model not found. "
         f"Searched: {data_models_path}, {local_path}. "
-        f"Run convert_models_to_onnx.py --efficientnet to generate the model."
+        f"Run convert_models_to_onnx.py --clip to generate the model."
     )
 
 
@@ -70,9 +81,9 @@ class TattooMatcher:
         Initialize the tattoo matcher.
 
         Args:
-            tattoo_index: Voyager Index (1280-dim cosine) loaded from tattoo_embeddings.voy
-            tattoo_mapping: List mapping voyager_index -> universal_id
-            embedder_model_path: Optional path to EfficientNet-B0 ONNX model.
+            tattoo_index: usearch Index (512-dim cosine) loaded from tattoo_embeddings.usearch
+            tattoo_mapping: List mapping usearch key -> universal_id
+            embedder_model_path: Optional path to CLIP ViT-B/32 ONNX model.
                 If None, searches DATA_DIR/models then ./models.
         """
         self.tattoo_index = tattoo_index
@@ -82,7 +93,7 @@ class TattooMatcher:
 
     @property
     def generator(self):
-        """Lazy-load EfficientNet-B0 ONNX embedding generator."""
+        """Lazy-load CLIP ONNX embedding generator."""
         if self._generator is None:
             self._generator = _TattooEmbeddingGenerator(
                 model_path=self._embedder_model_path,
@@ -182,12 +193,12 @@ class TattooMatcher:
 
         for embedding in embeddings:
             try:
-                neighbors, distances = self.tattoo_index.query(embedding, k=k)
+                matches = self.tattoo_index.search(embedding, k)
             except Exception as e:
                 logger.warning(f"Tattoo index query failed: {e}")
                 continue
 
-            for idx, dist in zip(neighbors, distances):
+            for idx, dist in zip(matches.keys, matches.distances):
                 if idx < 0 or idx >= mapping_size:
                     continue
 
@@ -231,26 +242,32 @@ class TattooMatcher:
 
 
 class _TattooEmbeddingGenerator:
-    """Generate EfficientNet-B0 embeddings from tattoo image crops using ONNX Runtime.
+    """Generate CLIP ViT-B/32 embeddings from tattoo image crops using ONNX Runtime.
 
-    Preprocessing replicates the torchvision EfficientNet_B0_Weights.DEFAULT transforms:
-    1. Resize shortest side to 256 (bilinear interpolation)
+    Preprocessing replicates OpenAI CLIP's standard preprocessing (same as
+    open_clip's `create_model_and_transforms(..., pretrained="openai")`
+    returns):
+    1. Resize shortest side to 224 (bicubic interpolation)
     2. Center crop to 224x224
     3. Convert to float32 [0, 1]
-    4. Normalize with ImageNet mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+    4. Normalize with CLIP's own mean/std -- NOT ImageNet's; reusing the
+       ImageNet constants here would silently produce wrong embeddings
+       (the exact class of mistake this docstring exists to prevent, see
+       convert_models_to_onnx.py's convert_clip_tattoo()).
     5. HWC -> CHW layout, add batch dimension
     """
 
-    # ImageNet normalization constants
-    IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+    # CLIP normalization constants (OpenAI CLIP, all standard variants) --
+    # deliberately not ImageNet's [0.485,0.456,0.406]/[0.229,0.224,0.225].
+    CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
+    CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
 
     def __init__(self, model_path: Optional[str] = None):
         """Initialize the embedding generator.
 
         Args:
-            model_path: Path to EfficientNet-B0 ONNX model. If None, searches
-                DATA_DIR/models then ./models for tattoo_efficientnet_b0.onnx.
+            model_path: Path to CLIP ViT-B/32 ONNX model. If None, searches
+                DATA_DIR/models then ./models for tattoo_clip_vitb32.onnx.
         """
         self._model_path = model_path
         self._session = None
@@ -272,8 +289,9 @@ class _TattooEmbeddingGenerator:
 
             # Use GPU if available, fall back to CPU
             providers = ort.get_available_providers()
-            if "CUDAExecutionProvider" in providers:
-                ort_providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            gpu_providers = {"CUDAExecutionProvider", "ROCMExecutionProvider", "MIGraphXExecutionProvider"}
+            if gpu_providers & set(providers):
+                ort_providers = ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
             else:
                 ort_providers = ["CPUExecutionProvider"]
 
@@ -288,10 +306,10 @@ class _TattooEmbeddingGenerator:
         return self._session
 
     def _preprocess(self, image: np.ndarray) -> np.ndarray:
-        """Preprocess an image for EfficientNet-B0 inference.
+        """Preprocess an image for CLIP ViT-B/32 inference.
 
-        Replicates torchvision EfficientNet_B0_Weights.DEFAULT transforms:
-        Resize(256) -> CenterCrop(224) -> ToTensor -> Normalize(ImageNet)
+        Replicates OpenAI CLIP's standard preprocessing:
+        Resize(224, bicubic) -> CenterCrop(224) -> ToTensor -> Normalize(CLIP)
 
         Args:
             image: RGB image as numpy array (H, W, 3), uint8
@@ -301,14 +319,15 @@ class _TattooEmbeddingGenerator:
         """
         h, w = image.shape[:2]
 
-        # Step 1: Resize shortest side to 256, preserve aspect ratio (bilinear)
+        # Step 1: Resize shortest side to 224, preserve aspect ratio (bicubic --
+        # CLIP's own preprocessing uses bicubic, not bilinear)
         if h < w:
-            new_h = 256
-            new_w = int(round(w * 256 / h))
+            new_h = 224
+            new_w = int(round(w * 224 / h))
         else:
-            new_w = 256
-            new_h = int(round(h * 256 / w))
-        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            new_w = 224
+            new_h = int(round(h * 224 / w))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_CUBIC)
 
         # Step 2: Center crop to 224x224
         crop_h, crop_w = 224, 224
@@ -319,8 +338,8 @@ class _TattooEmbeddingGenerator:
         # Step 3: Convert to float32 [0, 1]
         img_float = cropped.astype(np.float32) / 255.0
 
-        # Step 4: Normalize with ImageNet mean and std
-        img_float = (img_float - self.IMAGENET_MEAN) / self.IMAGENET_STD
+        # Step 4: Normalize with CLIP mean and std
+        img_float = (img_float - self.CLIP_MEAN) / self.CLIP_STD
 
         # Step 5: HWC -> CHW, add batch dimension
         img_chw = np.transpose(img_float, (2, 0, 1))
@@ -333,7 +352,7 @@ class _TattooEmbeddingGenerator:
             image: RGB image as numpy array (H, W, 3), uint8
 
         Returns:
-            L2-normalized float32 array of shape (1280,)
+            L2-normalized float32 array of shape (512,)
         """
         input_tensor = self._preprocess(image)
 

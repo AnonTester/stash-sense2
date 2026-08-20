@@ -88,15 +88,23 @@ def _load_face_recognition(data_dir: Path) -> dict:
         with open(db_config.manifest_json_path) as f:
             db_manifest = json.load(f)
 
-    # Determine models directory from model manager
+    # Determine models directory from model manager. buffalo_l_detection's
+    # file path is "models/buffalo_l/det_10g.onnx" (insightface's own
+    # nested layout convention, see embeddings.py) -- three .parent calls
+    # walks back up to the root FaceEmbeddingGenerator(models_dir=...)
+    # expects, matching what it'd pass as root= to FaceAnalysis.
     mgr = get_model_manager()
-    facenet_path = mgr.get_model_path("facenet512")
-    arcface_path = mgr.get_model_path("arcface")
+    buffalo_det_path = mgr.get_model_path("buffalo_l_detection")
+    buffalo_rec_path = mgr.get_model_path("buffalo_l_recognition")
 
-    if facenet_path and arcface_path:
-        models_dir = facenet_path.parent
+    if buffalo_det_path and buffalo_rec_path:
+        models_dir = buffalo_det_path.parent.parent.parent
     else:
-        models_dir = None  # let embeddings.py auto-detect
+        # Not downloaded via the Settings UI -- embeddings.py's own
+        # auto-detect (DATA_DIR/models, then ./models) still works,
+        # falling back to insightface's own on-first-use download if
+        # neither has the files yet either.
+        models_dir = None
 
     recognizer = FaceRecognizer(db_config, models_dir=models_dir)
     print("Face database loaded successfully!")
@@ -123,7 +131,7 @@ def _load_face_recognition(data_dir: Path) -> dict:
     if tattoo_enabled:
         # Use model manager paths for tattoo models
         tattoo_det_path = mgr.get_model_path("tattoo_yolov5s")
-        tattoo_emb_path = mgr.get_model_path("tattoo_efficientnet_b0")
+        tattoo_emb_path = mgr.get_model_path("tattoo_clip_vitb32")
 
         print("Initializing tattoo detector...")
         tattoo_detector = TattooDetector(

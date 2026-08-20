@@ -80,10 +80,9 @@ class FaceRecognizer:
         self.tattoo_mapping = None
         if (db_config.tattoo_index_path and db_config.tattoo_index_path.exists()
                 and db_config.tattoo_json_path and db_config.tattoo_json_path.exists()):
-            from voyager import Index as VoyagerIndex
             print(f"Loading tattoo embedding index from {db_config.tattoo_index_path}...")
-            with open(db_config.tattoo_index_path, "rb") as f:
-                self.tattoo_index = VoyagerIndex.load(f)
+            self.tattoo_index = Index(ndim=512, metric="cos")
+            self.tattoo_index.load(str(db_config.tattoo_index_path))
             with open(db_config.tattoo_json_path) as f:
                 self.tattoo_mapping = json.load(f)  # index -> universal_id
             print(f"Tattoo embeddings loaded: {len(self.tattoo_index)} vectors, "

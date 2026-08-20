@@ -23,15 +23,15 @@ _FACE_MODEL_FILES = [
     "models/buffalo_l/w600k_r50.onnx",
 ]
 
-# Tattoo detection ONNX models
+# Tattoo detection + embedding ONNX models
 _TATTOO_MODEL_FILES = [
     "tattoo_yolov5s.onnx",
-    "tattoo_efficientnet_b0.onnx",
+    "tattoo_clip_vitb32.onnx",
 ]
 
 # Tattoo embedding data
 _TATTOO_DATA_FILES = [
-    "tattoo_embeddings.voy",
+    "tattoo_embeddings.usearch",
 ]
 
 
