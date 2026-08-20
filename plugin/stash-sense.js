@@ -90,8 +90,11 @@
         }
       },
 
-      // Call the face recognition API via Python backend
-      async identifyScene(sceneId, onProgress) {
+      // Call the face recognition API via Python backend. extraOptions can
+      // carry use_sprite/skip_frame_extraction/use_cache for the "Identify
+      // full video" flow (see handleIdentifyFullVideo) -- omitted entirely
+      // for a plain call, matching prior behavior exactly.
+      async identifyScene(sceneId, onProgress, extraOptions = {}) {
         const settings = await SS.getSettings();
         onProgress?.('Connecting to Stash Sense...');
 
@@ -114,6 +117,7 @@
             top_k: settings.maxResults,
             scene_performer_stashdb_ids: stashdbIds,
             // Omitted params (num_frames, max_distance, min_face_size) default from sidecar face_config.py
+            ...extraOptions,
           });
 
           if (result.error) {
@@ -122,6 +126,31 @@
 
           // Attach scene performers for UI rendering
           result._scenePerformers = scenePerformers;
+
+          return result;
+        } finally {
+          stopPolling();
+        }
+      },
+
+      // Call the face recognition API for a captured video frame or crop
+      // (base64 JPEG) -- used by "Identify current frame" and "Select to
+      // identify". Mirrors identifyImage but hits the generic /identify
+      // endpoint (no Stash entity involved).
+      async identifyFrame(imageBase64, onProgress) {
+        const settings = await SS.getSettings();
+        onProgress?.('Connecting to Stash Sense...');
+
+        const stopPolling = pollModelLoading(settings.sidecarUrl, onProgress);
+        try {
+          const result = await SS.runPluginOperation('identify_frame', {
+            image_base64: imageBase64,
+            sidecar_url: settings.sidecarUrl,
+          });
+
+          if (result.error) {
+            throw new Error(result.error);
+          }
 
           return result;
         } finally {
@@ -1073,28 +1102,358 @@
         errorDiv.style.display = 'block';
       },
 
-      async handleIdentify() {
+      // Locate the scene page's actual <video> element. No existing plugin
+      // code touches Stash's real player (only unrelated hover-preview
+      // clips elsewhere), so this tries a few likely selectors in order --
+      // the bare 'video' fallback is safe on a scene page since the main
+      // player is the only <video> present there.
+      getVideoElement() {
+        const selectors = ['.video-js video', '#VideoJsPlayer video', '.scene-player video', 'video'];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) return el;
+        }
+        return null;
+      },
+
+      // Draw a frame (or just cropRect, in native source-pixel coordinates)
+      // from a <video> or <img> source to an offscreen canvas and return
+      // base64 JPEG (no data: URL prefix) for the /identify image_base64
+      // field. sourceWidth/sourceHeight are the source's own native pixel
+      // dimensions (video.videoWidth/Height, or an image's natural size) --
+      // passed explicitly since an <img> source doesn't have videoWidth.
+      captureVideoFrameBase64(source, sourceWidth, sourceHeight, cropRect) {
+        const canvas = document.createElement('canvas');
+        let sx = 0, sy = 0, sw = sourceWidth, sh = sourceHeight;
+        if (cropRect) {
+          sx = Math.max(0, Math.round(cropRect.x));
+          sy = Math.max(0, Math.round(cropRect.y));
+          sw = Math.max(1, Math.round(cropRect.width));
+          sh = Math.max(1, Math.round(cropRect.height));
+        }
+        canvas.width = sw;
+        canvas.height = sh;
+        canvas.getContext('2d').drawImage(source, sx, sy, sw, sh, 0, 0, sw, sh);
+        return canvas.toDataURL('image/jpeg', 0.92).split(',')[1];
+      },
+
+      // Resolve something drawable for the scene player: the <video>
+      // element itself once it has decoded a frame (videoWidth > 0), or --
+      // before playback has started, when only the poster/cover image is
+      // showing -- an <img> loaded from that same poster URL instead.
+      // Returns { source, width, height, isVideo } or null if neither is
+      // available (e.g. no video element, or no poster set either).
+      async getFrameSource(video) {
+        if (video.videoWidth > 0) {
+          return { source: video, width: video.videoWidth, height: video.videoHeight, isVideo: true };
+        }
+        if (!video.poster) return null;
+        const img = new Image();
+        img.src = video.poster;
+        await new Promise((resolve, reject) => {
+          if (img.complete && img.naturalWidth > 0) return resolve();
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error('Failed to load cover image'));
+        }).catch(() => null);
+        if (!img.naturalWidth) return null;
+        return { source: img, width: img.naturalWidth, height: img.naturalHeight, isVideo: false };
+      },
+
+      async handleIdentifyCurrentFrame() {
         const route = SS.getRoute();
-        if (route.type !== 'scene') {
-          alert('Could not determine scene ID');
+        if (route.type !== 'scene') return;
+        const sceneId = route.id;
+
+        const video = this.getVideoElement();
+        const frameSource = video ? await this.getFrameSource(video) : null;
+        if (!frameSource) {
+          alert('Could not find a video frame or cover image to identify.');
           return;
         }
 
-        const sceneId = route.id;
+        const imageBase64 = this.captureVideoFrameBase64(frameSource.source, frameSource.width, frameSource.height);
         const modal = this.createModal();
-
         try {
-          this.updateLoading(modal, 'Fetching scene sprites...', 'This may take a moment');
-
-          const results = await this.identifyScene(sceneId, (stage) => {
+          this.updateLoading(modal, 'Analyzing current frame...', 'Detecting faces');
+          const results = await this.identifyFrame(imageBase64, (stage) => {
             this.updateLoading(modal, stage);
           });
-
           this.updateLoading(modal, 'Processing results...');
-          await this.renderResults(modal, results, sceneId);
+          await this.renderFrameResults(modal, results, sceneId);
         } catch (error) {
-          console.error(`[${SS.PLUGIN_NAME}] Analysis failed:`, error);
+          console.error(`[${SS.PLUGIN_NAME}] Frame analysis failed:`, error);
           this.showError(modal, error.message);
+        }
+      },
+
+      async handleSelectToIdentify() {
+        const route = SS.getRoute();
+        if (route.type !== 'scene') return;
+        const sceneId = route.id;
+
+        const video = this.getVideoElement();
+        const frameSource = video ? await this.getFrameSource(video) : null;
+        if (!frameSource) {
+          alert('Could not find a video frame or cover image to identify.');
+          return;
+        }
+
+        const wasPaused = video.paused;
+        if (frameSource.isVideo) video.pause();
+
+        const rect = video.getBoundingClientRect();
+        const overlay = SS.createElement('div', {
+          className: 'ss-select-overlay',
+          attrs: { style: `position:fixed;top:${rect.top}px;left:${rect.left}px;width:${rect.width}px;height:${rect.height}px;z-index:9999;cursor:crosshair;background:rgba(0,0,0,0.15);` },
+        });
+        const box = SS.createElement('div', { className: 'ss-select-box' });
+        const toolbar = SS.createElement('div', { className: 'ss-select-toolbar' });
+        const confirmBtn = SS.createElement('button', { className: 'ss-btn ss-btn-primary ss-btn-sm', textContent: 'Identify Selection' });
+        const cancelBtn = SS.createElement('button', { className: 'ss-btn ss-btn-sm', textContent: 'Cancel' });
+        toolbar.appendChild(confirmBtn);
+        toolbar.appendChild(cancelBtn);
+        overlay.appendChild(box);
+        overlay.appendChild(toolbar);
+        document.body.appendChild(overlay);
+
+        let startX = 0, startY = 0, selRect = null, dragging = false;
+
+        const cleanup = () => {
+          overlay.remove();
+          if (frameSource.isVideo && !wasPaused) video.play().catch(() => {});
+        };
+
+        // The toolbar is a child of overlay (positioned on top of the
+        // video), so a mousedown/mousemove/mouseup on its buttons would
+        // otherwise bubble up into overlay's own drag-tracking listeners
+        // below -- restarting a zero-size drag and immediately re-hiding
+        // the toolbar mid-click, which silently ate clicks on "Identify
+        // Selection"/"Cancel" (confirmed live). Stop it at the source.
+        toolbar.addEventListener('mousedown', (e) => e.stopPropagation());
+        toolbar.addEventListener('mousemove', (e) => e.stopPropagation());
+        toolbar.addEventListener('mouseup', (e) => e.stopPropagation());
+
+        overlay.addEventListener('mousedown', (e) => {
+          dragging = true;
+          startX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+          startY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+          Object.assign(box.style, { left: `${startX}px`, top: `${startY}px`, width: '0px', height: '0px', display: 'block' });
+          toolbar.style.display = 'none';
+        });
+        overlay.addEventListener('mousemove', (e) => {
+          if (!dragging) return;
+          const curX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+          const curY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+          const x = Math.min(startX, curX);
+          const y = Math.min(startY, curY);
+          const w = Math.abs(curX - startX);
+          const h = Math.abs(curY - startY);
+          Object.assign(box.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+          selRect = { x, y, w, h };
+        });
+        overlay.addEventListener('mouseup', () => {
+          dragging = false;
+          if (!selRect || selRect.w < 10 || selRect.h < 10) return;
+          toolbar.style.left = `${Math.min(selRect.x, Math.max(0, rect.width - 180))}px`;
+          toolbar.style.top = `${Math.max(0, selRect.y - 36)}px`;
+          toolbar.style.display = 'flex';
+        });
+
+        cancelBtn.addEventListener('click', cleanup);
+
+        confirmBtn.addEventListener('click', async () => {
+          if (!selRect || selRect.w < 10 || selRect.h < 10) return;
+          // Scale from displayed CSS pixels to native source pixel coordinates
+          const scaleX = frameSource.width / rect.width;
+          const scaleY = frameSource.height / rect.height;
+          const cropRect = {
+            x: selRect.x * scaleX,
+            y: selRect.y * scaleY,
+            width: selRect.w * scaleX,
+            height: selRect.h * scaleY,
+          };
+          const imageBase64 = this.captureVideoFrameBase64(frameSource.source, frameSource.width, frameSource.height, cropRect);
+          cleanup();
+
+          const modal = this.createModal();
+          try {
+            this.updateLoading(modal, 'Analyzing selection...', 'Detecting faces');
+            const results = await this.identifyFrame(imageBase64, (stage) => {
+              this.updateLoading(modal, stage);
+            });
+            this.updateLoading(modal, 'Processing results...');
+            await this.renderFrameResults(modal, results, sceneId);
+          } catch (error) {
+            console.error(`[${SS.PLUGIN_NAME}] Selection analysis failed:`, error);
+            this.showError(modal, error.message);
+          }
+        });
+      },
+
+      // ---- "Identify full video" (fingerprint data + sprite) ----
+
+      // Coarse, best-effort step lists shown while /identify/scene runs,
+      // matched against the sidecar's _set_stage() calls via polling
+      // (identify_scene_progress). Not every stage a call could report is
+      // listed for every flow -- unlisted/unmatched stages are just
+      // ignored by updateStepList, so this stays robust to the backend
+      // skipping a step (e.g. sprite already cached).
+      FULL_VIDEO_STEPS: {
+        fingerprinting: [
+          ['extracting_frames', 'Extracting frames from video'],
+          ['analyzing_frames', 'Analyzing frames'],
+          ['analyzing_screenshot', 'Analyzing scene screenshot'],
+          ['analyzing_sprite', 'Analyzing sprite thumbnails'],
+          ['checking_signals', 'Checking tattoos & body signals'],
+          ['matching_performers', 'Matching against performer database'],
+          ['saving_fingerprint', 'Saving fingerprint'],
+        ],
+        cached: [
+          ['cache_check', 'Loading cached video data'],
+          ['analyzing_sprite', 'Analyzing sprite thumbnails'],
+          ['matching_performers', 'Matching against performer database'],
+          ['saving_fingerprint', 'Saving fingerprint'],
+        ],
+        spriteOnly: [
+          ['analyzing_sprite', 'Analyzing sprite thumbnails'],
+          ['matching_performers', 'Matching against performer database'],
+        ],
+      },
+
+      createStepList(steps) {
+        const container = SS.createElement('div', { className: 'ss-step-list' });
+        for (const [key, label] of steps) {
+          const item = SS.createElement('div', {
+            className: 'ss-step-item ss-step-pending',
+            innerHTML: `<span class="ss-step-marker"></span><span class="ss-step-label">${SS.escapeHtml(label)}</span>`,
+          });
+          item.dataset.stage = key;
+          container.appendChild(item);
+        }
+        return container;
+      },
+
+      updateStepList(container, currentStage) {
+        const items = Array.from(container.querySelectorAll('.ss-step-item'));
+        const idx = items.findIndex((el) => el.dataset.stage === currentStage);
+        if (idx === -1) return;
+        items.forEach((el, i) => {
+          el.classList.remove('ss-step-pending', 'ss-step-active', 'ss-step-done');
+          el.classList.add(i < idx ? 'ss-step-done' : i === idx ? 'ss-step-active' : 'ss-step-pending');
+        });
+      },
+
+      // Poll the sidecar for which stage this scene's in-flight
+      // /identify/scene call is currently on, updating the step list.
+      // Best-effort/ephemeral -- poll errors are silently ignored.
+      pollSceneIdentifyProgress(sceneId, sidecarUrl, stepListEl) {
+        let stopped = false;
+        const poll = async () => {
+          if (stopped) return;
+          try {
+            const progress = await SS.runPluginOperation('identify_scene_progress', {
+              scene_id: sceneId, sidecar_url: sidecarUrl,
+            });
+            if (!stopped && progress && progress.stage) {
+              this.updateStepList(stepListEl, progress.stage);
+            }
+          } catch (e) {
+            // best-effort UI feedback only
+          }
+        };
+        poll();
+        const interval = setInterval(poll, 700);
+        return () => { stopped = true; clearInterval(interval); };
+      },
+
+      async handleIdentifyFullVideo() {
+        const route = SS.getRoute();
+        if (route.type !== 'scene') return;
+        const sceneId = route.id;
+
+        const modal = this.createModal();
+        this.updateLoading(modal, 'Checking fingerprint status...');
+
+        try {
+          const settings = await SS.getSettings();
+          const fpStatus = await SS.runPluginOperation('fingerprint_check_scene', {
+            scene_id: sceneId, sidecar_url: settings.sidecarUrl,
+          });
+          if (fpStatus && fpStatus.error) {
+            throw new Error(fpStatus.error);
+          }
+
+          if (fpStatus && fpStatus.exists) {
+            await this._runFullVideoIdentify(
+              modal, sceneId, settings,
+              { use_sprite: true, skip_frame_extraction: false },
+              this.FULL_VIDEO_STEPS.cached,
+            );
+            return;
+          }
+
+          this._showFingerprintPrompt(modal, async (fingerprintNow) => {
+            try {
+              if (fingerprintNow) {
+                await this._runFullVideoIdentify(
+                  modal, sceneId, settings,
+                  { use_sprite: true, skip_frame_extraction: false },
+                  this.FULL_VIDEO_STEPS.fingerprinting,
+                );
+              } else {
+                await this._runFullVideoIdentify(
+                  modal, sceneId, settings,
+                  { use_sprite: true, skip_frame_extraction: true },
+                  this.FULL_VIDEO_STEPS.spriteOnly,
+                );
+              }
+            } catch (error) {
+              console.error(`[${SS.PLUGIN_NAME}] Full video analysis failed:`, error);
+              this.showError(modal, error.message);
+            }
+          });
+        } catch (error) {
+          console.error(`[${SS.PLUGIN_NAME}] Full video analysis failed:`, error);
+          this.showError(modal, error.message);
+        }
+      },
+
+      _showFingerprintPrompt(modal, onChoice) {
+        const loading = modal.querySelector('.ss-loading');
+        loading.innerHTML = `
+          <p class="ss-loading-text">This scene hasn't been fingerprinted yet</p>
+          <p class="ss-loading-detail">
+            Fingerprinting analyzes full video frames for the most accurate results, but can take
+            a while for long scenes. You can skip it and identify from the sprite thumbnails only
+            instead.
+          </p>
+          <div class="ss-fp-prompt-actions">
+            <button class="ss-btn ss-btn-primary ss-fp-prompt-yes">Fingerprint now</button>
+            <button class="ss-btn ss-fp-prompt-no">Skip (sprite only)</button>
+          </div>
+        `;
+        loading.querySelector('.ss-fp-prompt-yes').addEventListener('click', () => onChoice(true));
+        loading.querySelector('.ss-fp-prompt-no').addEventListener('click', () => onChoice(false));
+      },
+
+      async _runFullVideoIdentify(modal, sceneId, settings, flags, steps) {
+        const loading = modal.querySelector('.ss-loading');
+        loading.innerHTML = `
+          <div class="ss-spinner"></div>
+          <p class="ss-loading-text">Identifying performers...</p>
+          <p class="ss-loading-detail"></p>
+        `;
+        loading.appendChild(this.createStepList(steps));
+        const stepListEl = loading.querySelector('.ss-step-list');
+
+        const stopStepPolling = this.pollSceneIdentifyProgress(sceneId, settings.sidecarUrl, stepListEl);
+        try {
+          const results = await this.identifyScene(sceneId, (stage) => {
+            this.updateLoading(modal, stage);
+          }, flags);
+          await this.renderResults(modal, results, sceneId);
+        } finally {
+          stopStepPolling();
         }
       },
 
@@ -1286,9 +1645,193 @@
         resultsDiv.style.display = 'block';
       },
 
+      // Same shape as renderImageResults (both consume the generic
+      // /identify {faces: [{box, matches}]} response) but wired to the
+      // scene, not an image -- "Add to Scene" via addPerformerToScene /
+      // scene-form staging. Used by "Identify current frame" and "Select
+      // to identify".
+      async renderFrameResults(modal, results, sceneId) {
+        const loading = modal.querySelector('.ss-loading');
+        const resultsDiv = modal.querySelector('.ss-results');
+        const errorDiv = modal.querySelector('.ss-error');
+
+        loading.style.display = 'none';
+
+        if (!results.faces || results.faces.length === 0) {
+          errorDiv.innerHTML = `
+            <div class="ss-error-icon">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48" fill="currentColor">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2zm0 8h2v2h-2z"/>
+              </svg>
+            </div>
+            <p class="ss-error-title">No faces detected</p>
+            <p class="ss-error-hint">The captured frame may not contain clear face shots.</p>
+          `;
+          errorDiv.style.display = 'block';
+          return;
+        }
+
+        resultsDiv.innerHTML = `
+          <p class="ss-summary">
+            Detected <strong>${results.face_count}</strong> face(s) in frame.
+          </p>
+          <div class="ss-persons"></div>
+        `;
+
+        const personsDiv = resultsDiv.querySelector('.ss-persons');
+
+        for (let i = 0; i < results.faces.length; i++) {
+          const face = results.faces[i];
+          const personDiv = document.createElement('div');
+          personDiv.className = 'ss-person';
+
+          if (!face.matches || face.matches.length === 0) {
+            personDiv.innerHTML = `
+              <div class="ss-person-header">
+                <span class="ss-person-label">Face ${i + 1}</span>
+              </div>
+              <p class="ss-no-match">No match found in database</p>
+            `;
+          } else {
+            const match = face.matches[0];
+            const confidence = this.distanceToConfidence(match.distance);
+            const confidenceClass = SS.getConfidenceClass(confidence);
+            const imgEndpoint = match.endpoint || 'stashdb.org';
+            const imgStashboxUrl = this._stashboxPerformerUrl(imgEndpoint, match.stashdb_id);
+            const imgGraphqlUrl = this._stashboxGraphqlUrl(imgEndpoint);
+            const localPerformer = await this._resolveLibraryPerformer(match, imgGraphqlUrl);
+
+            personDiv.innerHTML = `
+              <div class="ss-person-header">
+                <span class="ss-person-label">Face ${i + 1}</span>
+              </div>
+              <div class="ss-match">
+                <div class="ss-match-image">
+                  ${match.image_url ? `<img src="${match.image_url}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                </div>
+                <div class="ss-match-info">
+                  <h4>${match.name}</h4>
+                  <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
+                  ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
+                  <div class="ss-links">
+                    ${this._matchLinksHtml(match, imgStashboxUrl, imgEndpoint)}
+                  </div>
+                  <div class="ss-actions">
+                    ${localPerformer
+                      ? `<button class="ss-btn ss-btn-add"
+                                 data-performer-id="${localPerformer.id}"
+                                 data-performer-name="${SS.escapeHtml ? SS.escapeHtml(localPerformer.name) : localPerformer.name}"
+                                 data-stashdb-id="${match.stashdb_id || ''}"
+                                 data-scene-id="${sceneId}">
+                           Add to Scene
+                         </button>
+                         <span class="ss-local-status">In library as: ${localPerformer.name}</span>`
+                      : `<span class="ss-local-status ss-not-in-library">Not in library</span>`
+                    }
+                  </div>
+                </div>
+              </div>
+            `;
+
+            // Build alt matches with endpoint-aware links
+            if (face.matches.length > 1) {
+              const details = document.createElement('details');
+              details.className = 'ss-other-matches';
+              details.innerHTML = `<summary>Other possible matches (${face.matches.length - 1})</summary>`;
+              const ul = document.createElement('ul');
+              for (const m of face.matches.slice(1)) {
+                const altConf = this.distanceToConfidence(m.distance);
+                const altConfClass = SS.getConfidenceClass(altConf);
+                const altEp = m.endpoint || 'stashdb.org';
+                const altUrl = this._stashboxPerformerUrl(altEp, m.stashdb_id);
+                const altGraphqlUrl = this._stashboxGraphqlUrl(altEp);
+                const altLocalPerformer = await this._resolveLibraryPerformer(m, altGraphqlUrl);
+                const li = document.createElement('li');
+                li.className = 'ss-alt-match-item';
+                li.innerHTML = `
+                  <div class="ss-match">
+                    <div class="ss-match-image">
+                      ${m.image_url ? `<img src="${m.image_url}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                    </div>
+                    <div class="ss-match-info">
+                      <h4>${m.name}</h4>
+                      <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
+                      ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
+                      <div class="ss-links">
+                        ${this._matchLinksHtml(m, altUrl, altEp)}
+                      </div>
+                      <div class="ss-actions ss-alt-match-actions">
+                        ${altLocalPerformer
+                          ? `<button class="ss-btn ss-btn-add ss-btn-sm"
+                                     data-performer-id="${altLocalPerformer.id}"
+                                     data-performer-name="${SS.escapeHtml ? SS.escapeHtml(altLocalPerformer.name) : altLocalPerformer.name}"
+                                     data-stashdb-id="${m.stashdb_id || ''}"
+                                     data-scene-id="${sceneId}">
+                               Add to Scene
+                             </button>
+                             <span class="ss-local-status">In library as: ${altLocalPerformer.name}</span>`
+                          : `<span class="ss-local-status ss-not-in-library">Not in library</span>`
+                        }
+                      </div>
+                    </div>
+                  </div>
+                `;
+                ul.appendChild(li);
+              }
+              details.appendChild(ul);
+              personDiv.appendChild(details);
+            }
+          }
+
+          personsDiv.appendChild(personDiv);
+        }
+
+        // Add click handlers for "Add to Scene" buttons
+        resultsDiv.querySelectorAll('.ss-btn-add').forEach(btn => {
+          btn.addEventListener('click', async (e) => {
+            const performerId = btn.dataset.performerId;
+            const performerName = btn.dataset.performerName;
+            const stashdbId = btn.dataset.stashdbId;
+            const targetSceneId = btn.dataset.sceneId;
+            btn.disabled = true;
+            btn.textContent = 'Adding...';
+
+            const staged = !!this._findSaveButton();
+            const success = staged
+              ? await this._selectPerformerInPendingForm(performerId, { name: performerName, stashdbId })
+              : await this.addPerformerToScene(targetSceneId, performerId);
+
+            if (success) {
+              btn.textContent = staged ? 'Added to form' : 'Added!';
+              btn.classList.add('ss-btn-success');
+              await this._finishMutation(modal, { staged });
+            } else {
+              btn.textContent = staged ? 'Could not add automatically' : 'Failed';
+              btn.classList.add('ss-btn-error');
+              btn.disabled = false;
+            }
+          });
+        });
+
+        resultsDiv.style.display = 'block';
+      },
+
+      // Scene toolbar entry point: a dropdown (not a plain button) offering
+      // "Select to identify" / "Identify current frame" / "Identify full
+      // video". Follows the same hand-rolled toggle+menu+outside-click-
+      // dismiss pattern already used repeatedly in
+      // stash-sense-recommendations.js, rather than a UI library. The
+      // toggle keeps the .ss-identify-btn class so the existing
+      // `document.querySelector('.ss-identify-btn')` idempotency guards in
+      // injectButton/updateButtonStatus keep working unchanged.
       createButton() {
         const status = SS.getSidecarStatus();
-        const btn = SS.createElement('button', {
+        const wrapper = SS.createElement('div', {
+          className: 'ss-identify-dropdown',
+          attrs: { style: 'position:relative;display:inline-block;' },
+        });
+
+        const toggle = SS.createElement('button', {
           className: 'ss-identify-btn btn btn-secondary',
           attrs: {
             title: status === false ? 'Stash Sense: Not connected' : 'Identify performers using face recognition',
@@ -1299,10 +1842,55 @@
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
               </svg>
             </span>
+            <span class="ss-dropdown-caret">▾</span>
           `,
         });
-        btn.addEventListener('click', () => this.handleIdentify());
-        return btn;
+
+        const menu = SS.createElement('div', { className: 'ss-identify-menu' });
+        const items = [
+          { label: 'Select to identify', handler: () => this.handleSelectToIdentify() },
+          { label: 'Identify current frame', handler: () => this.handleIdentifyCurrentFrame() },
+          { label: 'Identify full video', handler: () => this.handleIdentifyFullVideo() },
+        ];
+        for (const item of items) {
+          const itemBtn = SS.createElement('button', {
+            className: 'ss-identify-menu-item',
+            textContent: item.label,
+          });
+          itemBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            menu.classList.remove('ss-open');
+            item.handler();
+          });
+          menu.appendChild(itemBtn);
+        }
+
+        toggle.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const opening = !menu.classList.contains('ss-open');
+          if (opening) {
+            // Flip the menu above the toggle when it wouldn't fit below in
+            // the viewport, same as Stash's own hamburger menu. The menu
+            // stays measurable even while closed (visibility:hidden, not
+            // display:none -- see CSS) so offsetHeight is accurate here.
+            const toggleRect = toggle.getBoundingClientRect();
+            const spaceBelow = window.innerHeight - toggleRect.bottom;
+            menu.classList.toggle('ss-menu-up', spaceBelow < menu.offsetHeight);
+          }
+          menu.classList.toggle('ss-open');
+        });
+        document.addEventListener('click', function closeMenu(e) {
+          if (!wrapper.contains(e.target)) {
+            menu.classList.remove('ss-open');
+          }
+          if (!document.contains(wrapper)) {
+            document.removeEventListener('click', closeMenu);
+          }
+        });
+
+        wrapper.appendChild(toggle);
+        wrapper.appendChild(menu);
+        return wrapper;
       },
 
       updateButtonStatus(connected) {

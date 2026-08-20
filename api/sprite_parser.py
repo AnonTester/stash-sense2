@@ -181,17 +181,22 @@ def load_sprite_sheet(
 
 
 async def fetch_sprite_from_stash(
-    stash_url: str,
-    scene_id: str,
+    sprite_url: str,
+    vtt_url: str,
     api_key: str,
     max_frames: int = 20,
 ) -> list[SpriteFrame]:
     """
-    Fetch sprite sheet and VTT from a Stash instance.
+    Fetch a sprite sheet and its VTT cue file from a Stash instance.
 
     Args:
-        stash_url: Base URL of Stash instance
-        scene_id: Scene ID
+        sprite_url: Absolute sprite image URL -- from a scene's own
+            `paths.sprite` (GraphQL). Stash's REST route for this is keyed
+            by the file checksum (e.g. `/scene/<checksum>_sprite.jpg`), not
+            the numeric scene ID, so this must come from `paths.sprite`
+            rather than being constructed from `scene_id`.
+        vtt_url: Absolute VTT cue file URL -- from the same scene's
+            `paths.vtt`, for the same reason.
         api_key: Stash API key
         max_frames: Maximum frames to extract
 
@@ -202,17 +207,12 @@ async def fetch_sprite_from_stash(
     from io import BytesIO
 
     headers = {"ApiKey": api_key}
-    base_url = stash_url.rstrip("/")
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        # Fetch sprite image
-        sprite_url = f"{base_url}/scene/{scene_id}/sprite"
         sprite_response = await client.get(sprite_url, headers=headers)
         sprite_response.raise_for_status()
         sprite_image = Image.open(BytesIO(sprite_response.content))
 
-        # Fetch VTT file
-        vtt_url = f"{base_url}/scene/{scene_id}/vtt/sprite"
         vtt_response = await client.get(vtt_url, headers=headers)
         vtt_response.raise_for_status()
         vtt_content = vtt_response.text

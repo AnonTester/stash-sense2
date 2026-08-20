@@ -80,6 +80,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mesa-va-drivers \
     && rm -rf /var/lib/apt/lists/*
 
+# The build stage's toolchain (gcc/g++ via build-essential) is fetched live
+# from Ubuntu's apt mirrors on every build, while this runtime stage's
+# libstdc++6 is whatever shipped in the base CUDA image at the time it was
+# published -- these drift apart over time. When the build stage's compiler
+# gets ahead, native extensions compiled against it (e.g. insightface's
+# bundled face3d cython module) can require a newer GLIBCXX symbol version
+# than this stage's libstdc++6 provides, failing at import with
+# "GLIBCXX_3.4.3x not found". Pulling libstdc++6 from the same toolchain PPA
+# keeps this stage's C++ runtime at least as new as what the build stage
+# can produce. Ported from v1's stash-sense (same failure mode, same
+# NVIDIA CUDA base image family) -- unverified here since this Dockerfile
+# variant can't be tested on homeserver (no NVIDIA hardware), but the same
+# defensive fix applies regardless.
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
+    && apt-get update && apt-get install -y --only-upgrade libstdc++6 \
+    && apt-get purge -y software-properties-common \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/*
+
 # Static ffmpeg at /usr/local/bin/ffmpeg (takes PATH precedence over system
 # ffmpeg). Used for CPU and CUDA modes -- newer, better HEVC/10-bit support.
 # VAAPI mode explicitly uses /usr/bin/ffmpeg (system package) instead.

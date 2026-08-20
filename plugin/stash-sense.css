@@ -4017,3 +4017,153 @@ a.ss-detail-entity-link:hover {
 .ss-toast-error {
   border-left: 3px solid #e03131;
 }
+
+/* Identify dropdown (scene toolbar) */
+.ss-identify-btn {
+  gap: 4px;
+}
+
+.ss-dropdown-caret {
+  font-size: 10px;
+  line-height: 1;
+  opacity: 0.8;
+}
+
+.ss-identify-menu {
+  /* visibility (not display:none) so offsetHeight stays measurable while
+     closed -- the toggle click handler needs a real height up front to
+     decide whether the menu should flip above instead of below. */
+  visibility: hidden;
+  pointer-events: none;
+  opacity: 0;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bs-body-bg, #1a1a1a);
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 6px;
+  padding: 4px 0;
+  min-width: 200px;
+  z-index: 1000;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.ss-identify-menu.ss-open {
+  visibility: visible;
+  pointer-events: auto;
+  opacity: 1;
+}
+
+/* Flip above the toggle when there isn't room below, same as Stash's own
+   hamburger menu. */
+.ss-identify-menu.ss-menu-up {
+  top: auto;
+  bottom: 100%;
+  margin-top: 0;
+  margin-bottom: 4px;
+}
+
+.ss-identify-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 14px;
+  background: none;
+  border: none;
+  color: var(--bs-body-color, #eee);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.ss-identify-menu-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Select-to-identify drag overlay */
+.ss-select-box {
+  position: absolute;
+  display: none;
+  border: 2px solid #4dabf7;
+  background: rgba(77, 171, 247, 0.15);
+  pointer-events: none;
+}
+
+.ss-select-toolbar {
+  position: absolute;
+  display: none;
+  gap: 6px;
+  padding: 4px;
+  background: rgba(20, 20, 20, 0.9);
+  border-radius: 6px;
+  z-index: 10000;
+}
+
+/* "Identify full video" step list */
+.ss-step-list {
+  margin-top: 16px;
+  text-align: left;
+  width: 100%;
+  max-width: 320px;
+}
+
+.ss-step-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--bs-secondary-color, #888);
+}
+
+.ss-step-marker {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--bs-border-color, #444);
+  position: relative;
+}
+
+.ss-step-item.ss-step-active .ss-step-marker {
+  border-color: var(--bs-primary, #0d6efd);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25);
+  animation: ss-step-pulse 1.2s ease-in-out infinite;
+}
+
+.ss-step-item.ss-step-done .ss-step-marker {
+  border-color: #198754;
+  background: #198754;
+}
+
+.ss-step-item.ss-step-done .ss-step-marker::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--bs-body-bg, #1a1a1a);
+}
+
+.ss-step-item.ss-step-active {
+  color: var(--bs-body-color, #fff);
+}
+
+.ss-step-item.ss-step-done {
+  color: var(--bs-secondary-color, #888);
+}
+
+@keyframes ss-step-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.25); }
+  50% { box-shadow: 0 0 0 5px rgba(13, 110, 253, 0.12); }
+}
+
+/* Fingerprint prompt (Identify full video, unfingerprinted scene) */
+.ss-fp-prompt-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 12px;
+}

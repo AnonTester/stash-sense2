@@ -1,6 +1,6 @@
 name: Stash Sense
 description: ML-powered performer identification and library curation for Stash
-version: 0.12.24
+version: 0.13.0
 url: https://github.com/carrotwaxr/stash-sense
 
 ui:

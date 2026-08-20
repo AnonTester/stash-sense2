@@ -43,6 +43,9 @@ def main():
             max_distance=args.get("max_distance"),
             min_face_size=args.get("min_face_size"),
             scene_performer_stashdb_ids=args.get("scene_performer_stashdb_ids", []),
+            use_cache=args.get("use_cache"),
+            use_sprite=args.get("use_sprite"),
+            skip_frame_extraction=args.get("skip_frame_extraction"),
         )
     elif mode == "identify_image":
         image_id = args.get("image_id")
@@ -50,6 +53,18 @@ def main():
     elif mode == "identify_gallery":
         gallery_id = args.get("gallery_id")
         result = identify_gallery(sidecar_url, gallery_id)
+    elif mode == "identify_frame":
+        result = identify_frame(
+            sidecar_url, args.get("image_base64", ""),
+            top_k=args.get("top_k"),
+            max_distance=args.get("max_distance"),
+        )
+    elif mode == "fingerprint_check_scene":
+        scene_id = args.get("scene_id")
+        result = sidecar_get(sidecar_url, f"/recommendations/fingerprints/scene/{scene_id}")
+    elif mode == "identify_scene_progress":
+        scene_id = args.get("scene_id")
+        result = sidecar_get(sidecar_url, f"/identify/scene/{scene_id}/progress", timeout=10)
     elif mode == "database_info":
         result = database_info(sidecar_url)
     elif mode == "db_check_update":
@@ -296,7 +311,8 @@ def database_info(sidecar_url):
 
 
 def identify_scene(sidecar_url, scene_id, num_frames=None, top_k=None, max_distance=None,
-                    min_face_size=None, scene_performer_stashdb_ids=None):
+                    min_face_size=None, scene_performer_stashdb_ids=None,
+                    use_cache=None, use_sprite=None, skip_frame_extraction=None):
     """Identify performers in a scene. Params default to sidecar's face_config when omitted."""
     if not scene_id:
         return {"error": "No scene_id provided"}
@@ -313,6 +329,12 @@ def identify_scene(sidecar_url, scene_id, num_frames=None, top_k=None, max_dista
             payload["min_face_size"] = int(min_face_size)
         if scene_performer_stashdb_ids:
             payload["scene_performer_stashdb_ids"] = scene_performer_stashdb_ids
+        if use_cache is not None:
+            payload["use_cache"] = bool(use_cache)
+        if use_sprite is not None:
+            payload["use_sprite"] = bool(use_sprite)
+        if skip_frame_extraction is not None:
+            payload["skip_frame_extraction"] = bool(skip_frame_extraction)
 
         log(f"Identifying scene {scene_id}")
 
@@ -339,6 +361,50 @@ def identify_scene(sidecar_url, scene_id, num_frames=None, top_k=None, max_dista
         return {"error": "Connection refused - is Stash Sense running?"}
     except requests.Timeout:
         return {"error": "Request timed out - scene may be too long or sidecar is overloaded"}
+    except requests.RequestException as e:
+        return {"error": f"Request failed: {e}"}
+
+
+def identify_frame(sidecar_url, image_base64, top_k=None, max_distance=None):
+    """Identify performers in a captured video frame or crop (base64 JPEG).
+
+    Used by the scene page's "Identify current frame" and "Select to
+    identify" options -- hits the generic /identify endpoint (no Stash
+    entity involved), unlike identify_scene/identify_image/identify_gallery.
+    """
+    if not image_base64:
+        return {"error": "No image data provided"}
+
+    try:
+        payload = {"image_base64": image_base64}
+        if top_k is not None:
+            payload["top_k"] = int(top_k)
+        if max_distance is not None:
+            payload["max_distance"] = float(max_distance)
+
+        log("Identifying captured frame")
+
+        response = requests.post(
+            f"{sidecar_url}/identify",
+            json=payload,
+            timeout=30,
+        )
+
+        if response.ok:
+            result = response.json()
+            log(f"Frame: {result.get('face_count', 0)} faces")
+            return result
+
+        try:
+            error_detail = response.json().get("detail", response.text)
+        except Exception:
+            error_detail = response.text or f"HTTP {response.status_code}"
+        return {"error": f"Identification failed: {error_detail}"}
+
+    except requests.ConnectionError:
+        return {"error": "Connection refused - is Stash Sense running?"}
+    except requests.Timeout:
+        return {"error": "Request timed out"}
     except requests.RequestException as e:
         return {"error": f"Request failed: {e}"}
 

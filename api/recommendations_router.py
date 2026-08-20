@@ -1514,6 +1514,36 @@ async def get_fingerprint_status():
     )
 
 
+class SceneFingerprintCheckResponse(BaseModel):
+    """Response for the per-scene fingerprint existence check."""
+    exists: bool
+    status: Optional[str] = None
+    frames_analyzed: Optional[int] = None
+    total_faces: Optional[int] = None
+    db_version: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+@router.get("/fingerprints/scene/{scene_id}", response_model=SceneFingerprintCheckResponse)
+async def get_scene_fingerprint_status(scene_id: int):
+    """Check whether a single scene has been fingerprinted yet -- used by
+    the scene page's "Identify full video" flow to decide whether to
+    prompt the user to fingerprint before identifying."""
+    db = get_rec_db()
+    fp = db.get_scene_fingerprint(scene_id)
+    if not fp:
+        return SceneFingerprintCheckResponse(exists=False)
+
+    return SceneFingerprintCheckResponse(
+        exists=True,
+        status=fp.get("fingerprint_status"),
+        frames_analyzed=fp.get("frames_analyzed"),
+        total_faces=fp.get("total_faces"),
+        db_version=fp.get("db_version"),
+        updated_at=fp.get("updated_at"),
+    )
+
+
 @router.post("/fingerprints/generate")
 async def start_fingerprint_generation(request: FingerprintGenerateRequest):
     """Start fingerprint generation. Now delegates to the job queue."""

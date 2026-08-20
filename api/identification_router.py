@@ -40,6 +40,7 @@ from scene_matcher import (
     hybrid_matching,
 )
 from stashbox_utils import _get_stashbox_client, _extract_endpoint
+from sprite_parser import fetch_sprite_from_stash
 from recommendations_router import (
     save_scene_fingerprint,
     save_image_fingerprint,
@@ -59,6 +60,18 @@ router = APIRouter(tags=["identification"])
 
 # Image URL cache keyed by universal_id
 _image_cache: dict[str, Optional[str]] = {}
+
+# Best-effort, in-memory "what stage is this scene's /identify/scene call
+# doing right now" tracker for the scene-page progress UI. Ephemeral and
+# process-local (not persisted, not multi-worker safe) -- this is a coarse
+# stage indicator for a single synchronous request, not a job/queue
+# progress system. Keyed by scene_id since only one identify call per scene
+# is expected at a time from the UI.
+_scene_progress: dict[str, dict] = {}
+
+
+def _set_stage(scene_id: str, stage: str) -> None:
+    _scene_progress[scene_id] = {"stage": stage, "updated_at": time.time()}
 
 # Module-level globals set by init
 _recognizer = None
@@ -237,6 +250,10 @@ class SceneIdentifyRequest(BaseModel):
 
     # Cache settings
     use_cache: bool = Field(True, description="Reuse cached face/body/tattoo signals from a prior extraction on this scene when detection params match, skipping ffmpeg/detection/embedding and only redoing matching")
+
+    # Sprite-sheet settings
+    use_sprite: bool = Field(False, description="Additionally detect and match faces from the scene's sprite/thumbnail sheet (Stash's scrubber-bar preview tiles), merged in alongside video-frame results")
+    skip_frame_extraction: bool = Field(False, description="Skip ffmpeg video-frame extraction entirely -- identify from sprite tiles only. No fingerprint is saved when this is set, since no video frames were analyzed.")
 
 
 class PersonResult(BaseModel):
@@ -806,10 +823,141 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
     )
 
 
+def _cluster_and_match(
+    all_results: list[tuple[int, RecognitionResult]], request: "SceneIdentifyRequest",
+) -> list["PersonResult"]:
+    """Run the configured matching_mode (hybrid/frequency/cluster) over
+    already-detected+embedded+matched results. Shared by the cache
+    fast-path, the full ffmpeg pipeline, and sprite-only identification --
+    factored out so all three stay in sync instead of duplicating this
+    dispatch/dedup logic three times."""
+    if request.matching_mode == "hybrid":
+        return hybrid_matching(
+            all_results, _recognizer,
+            cluster_threshold=request.cluster_threshold,
+            top_k=request.top_k * 2, max_distance=request.max_distance,
+        )
+    elif request.matching_mode == "frequency":
+        return clustered_frequency_matching(
+            all_results, _recognizer,
+            cluster_threshold=request.cluster_threshold,
+            top_k=request.top_k, max_distance=request.max_distance,
+            scene_performer_stashdb_ids=request.scene_performer_stashdb_ids,
+        )
+
+    clusters = cluster_faces_by_person(all_results, _recognizer, distance_threshold=request.cluster_threshold)
+    clusters = merge_clusters_by_match(clusters)
+    persons = []
+    used_performers: set[str] = set()
+    all_persons = []
+    for person_id, cluster in enumerate(clusters):
+        aggregated_matches = aggregate_matches(cluster, top_k=request.top_k)
+        all_persons.append((len(cluster), PersonResult(
+            person_id=person_id, frame_count=len(cluster),
+            best_match=aggregated_matches[0] if aggregated_matches else None,
+            all_matches=aggregated_matches,
+        )))
+    all_persons.sort(key=lambda x: x[0], reverse=True)
+    for _, person in all_persons:
+        if person.best_match:
+            if person.best_match.stashdb_id in used_performers:
+                for alt_match in person.all_matches[1:]:
+                    if alt_match.stashdb_id not in used_performers:
+                        person.best_match = alt_match
+                        used_performers.add(alt_match.stashdb_id)
+                        break
+                else:
+                    person.best_match = None
+            else:
+                used_performers.add(person.best_match.stashdb_id)
+        person.all_matches = [m for m in person.all_matches if m.stashdb_id not in used_performers or m.stashdb_id == (person.best_match.stashdb_id if person.best_match else None)]
+        persons.append(person)
+    for i, person in enumerate(persons):
+        person.person_id = i
+    return persons
+
+
+async def _process_sprite_frames(
+    base_url: str, scene_id: str, api_key: str,
+    min_face_size: int, min_face_confidence: float, match_config: "MatchingConfig",
+    t_start: float,
+) -> list[tuple[int, RecognitionResult]]:
+    """Fetch the scene's sprite/VTT sheet, crop each tile, and run the same
+    detect -> batch-embed -> match pipeline used for ffmpeg frames and the
+    screenshot. Tagged with frame_index=-2 (mirroring the -1 sentinel used
+    for screenshot faces), though -- unlike v1's implementation of this
+    feature -- nothing here persists into recommendations_db.py's
+    scene_face_embeddings cache: that table's write path is already
+    disabled for the buffalo_l migration (see _identify_scene_from_cache's
+    docstring), so sprite results are recomputed on every call rather than
+    cached, consistent with video-frame results' current (also uncached)
+    behavior in v2.
+
+    Detection runs per-tile, not once on the whole composite sheet: the
+    detector resizes its input to a fixed internal resolution, so stitching
+    many small tiles into one large image would shrink each already-small
+    face (a sprite tile is ~160x90px) well below what's reliably
+    detectable.
+
+    Returns an empty list if the sheet couldn't be fetched (e.g. Stash
+    hasn't generated one for this scene yet) or no usable faces were found.
+    """
+    try:
+        # Stash's REST route for sprite/vtt files is keyed by the file
+        # checksum (e.g. /scene/<checksum>_sprite.jpg), not the numeric
+        # scene ID -- these absolute URLs must come from the scene's own
+        # paths, not be constructed from scene_id.
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            gql_query = {
+                "query": f'{{ findScene(id: "{scene_id}") {{ paths {{ sprite vtt }} }} }}'
+            }
+            headers = {"ApiKey": api_key, "Content-Type": "application/json"}
+            response = await client.post(f"{base_url}/graphql", json=gql_query, headers=headers)
+            response.raise_for_status()
+            paths = response.json().get("data", {}).get("findScene", {}).get("paths") or {}
+            sprite_url = paths.get("sprite")
+            vtt_url = paths.get("vtt")
+
+        if not sprite_url or not vtt_url:
+            print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite: scene has no sprite/vtt paths yet")
+            return []
+
+        sprite_frames = await fetch_sprite_from_stash(
+            sprite_url, vtt_url, api_key, max_frames=face_config.SPRITE_MAX_FRAMES,
+        )
+    except Exception as e:
+        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite fetch failed (scene may have no sprite generated yet): {e}")
+        return []
+
+    if not sprite_frames:
+        return []
+
+    detected: list[tuple[float, "DetectedFace"]] = []
+    for sf in sprite_frames:
+        faces = _recognizer.generator.detect_faces(sf.image, min_confidence=min_face_confidence)
+        for face in faces:
+            if face.bbox["w"] >= min_face_size and face.bbox["h"] >= min_face_size:
+                detected.append((sf.timestamp, face))
+
+    print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite: {len(sprite_frames)} tiles, {len(detected)} usable faces")
+    if not detected:
+        return []
+
+    embeddings = _recognizer.generator.get_embeddings_batch([face for _, face in detected])
+
+    extra_results: list[tuple[int, RecognitionResult]] = []
+    for (_, face), embedding in zip(detected, embeddings):
+        matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
+        extra_results.append((-2, RecognitionResult(face=face, matches=matches, embedding=embedding)))
+
+    return extra_results
+
+
 async def _identify_scene_from_cache(
     request: "SceneIdentifyRequest",
     cache_meta: dict,
     t_start: float,
+    extra_results: Optional[list[tuple[int, RecognitionResult]]] = None,
 ) -> "SceneIdentifyResponse":
     """Reconstruct matching inputs from cached face/body/tattoo signals and
     rerun only the DB-dependent steps (matching, clustering, re-ranking).
@@ -829,6 +977,11 @@ async def _identify_scene_from_cache(
     second time -- by then this needs the real fix, not just the
     crash-avoidance below (bbox_json/confidence/yaw are still valid; only
     the embedding reconstruction needs the schema migration).
+
+    `extra_results` (optional) are results computed by the caller outside
+    the cache -- currently just freshly-fetched sprite results, since
+    sprite detection isn't cached at all in v2 (see _process_sprite_frames)
+    -- concatenated in before clustering runs.
     """
     scene_id_int = int(request.scene_id)
 
@@ -838,6 +991,7 @@ async def _identify_scene_from_cache(
         max_distance=request.max_distance,
     )
 
+    _set_stage(request.scene_id, "cache_check")
     cached_faces = load_face_signal_cache(scene_id_int)
     if not cached_faces:
         # identify_scene() still writes scene-level cache metadata
@@ -857,6 +1011,8 @@ async def _identify_scene_from_cache(
         )
         matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
         all_results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
+    if extra_results:
+        all_results.extend(extra_results)
 
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
@@ -914,49 +1070,8 @@ async def _identify_scene_from_cache(
         ms_used = len(scene_signals_used) > 1
 
     t_match = time.time()
-    if request.matching_mode == "hybrid":
-        persons = hybrid_matching(
-            all_results, _recognizer,
-            cluster_threshold=request.cluster_threshold,
-            top_k=request.top_k * 2, max_distance=request.max_distance,
-        )
-    elif request.matching_mode == "frequency":
-        persons = clustered_frequency_matching(
-            all_results, _recognizer,
-            cluster_threshold=request.cluster_threshold,
-            top_k=request.top_k, max_distance=request.max_distance,
-            scene_performer_stashdb_ids=request.scene_performer_stashdb_ids,
-        )
-    else:
-        clusters = cluster_faces_by_person(all_results, _recognizer, distance_threshold=request.cluster_threshold)
-        clusters = merge_clusters_by_match(clusters)
-        persons = []
-        used_performers: set[str] = set()
-        all_persons = []
-        for person_id, cluster in enumerate(clusters):
-            aggregated_matches = aggregate_matches(cluster, top_k=request.top_k)
-            all_persons.append((len(cluster), PersonResult(
-                person_id=person_id, frame_count=len(cluster),
-                best_match=aggregated_matches[0] if aggregated_matches else None,
-                all_matches=aggregated_matches,
-            )))
-        all_persons.sort(key=lambda x: x[0], reverse=True)
-        for _, person in all_persons:
-            if person.best_match:
-                if person.best_match.stashdb_id in used_performers:
-                    for alt_match in person.all_matches[1:]:
-                        if alt_match.stashdb_id not in used_performers:
-                            person.best_match = alt_match
-                            used_performers.add(alt_match.stashdb_id)
-                            break
-                    else:
-                        person.best_match = None
-                else:
-                    used_performers.add(person.best_match.stashdb_id)
-            person.all_matches = [m for m in person.all_matches if m.stashdb_id not in used_performers or m.stashdb_id == (person.best_match.stashdb_id if person.best_match else None)]
-            persons.append(person)
-        for i, person in enumerate(persons):
-            person.person_id = i
+    _set_stage(request.scene_id, "matching_performers")
+    persons = _cluster_and_match(all_results, request)
 
     if ms_used and _multi_signal_matcher is not None:
         persons = _rerank_scene_persons(
@@ -992,6 +1107,7 @@ async def _identify_scene_from_cache(
                 "avg_confidence": avg_confidence,
             })
     current_db_version = _db_manifest.get("version")
+    _set_stage(request.scene_id, "saving_fingerprint")
     fp_id, fp_error = save_scene_fingerprint(
         scene_id=scene_id_int,
         frames_analyzed=cache_meta["frames_analyzed"],
@@ -1008,12 +1124,13 @@ async def _identify_scene_from_cache(
         "matching_ms": round((time.time() - t_match) * 1000),
     }
 
+    _set_stage(request.scene_id, "done")
     return SceneIdentifyResponse(
         scene_id=request.scene_id,
         frames_analyzed=cache_meta["frames_analyzed"],
         frames_requested=request.num_frames,
-        faces_detected=len(cached_faces),
-        faces_after_filter=len(cached_faces),
+        faces_detected=len(all_results),
+        faces_after_filter=len(all_results),
         persons=persons,
         errors=[],
         fingerprint_saved=fingerprint_saved,
@@ -1055,6 +1172,53 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
 
     scene_id_int = int(request.scene_id)
 
+    match_config = MatchingConfig(
+        query_k=100,  # Get more candidates before threshold-filtering
+        max_results=request.top_k * 2,
+        max_distance=request.max_distance,
+    )
+
+    # Sprite results are resolved once, up front, so they're available
+    # regardless of which video-frame path runs after this (cache fast-path /
+    # full pipeline / skipped entirely via skip_frame_extraction). Unlike
+    # v1's implementation of this feature, nothing here is cached (see
+    # _process_sprite_frames's docstring) -- every use_sprite=True call
+    # redoes sprite fetch+detect+embed, consistent with video-frame
+    # results' current (also uncached) behavior in v2.
+    sprite_extra_results: list[tuple[int, RecognitionResult]] = []
+    if request.use_sprite:
+        _set_stage(request.scene_id, "analyzing_sprite")
+        sprite_extra_results = await _process_sprite_frames(
+            base_url, request.scene_id, api_key,
+            min_face_size=request.min_face_size,
+            min_face_confidence=request.min_face_confidence,
+            match_config=match_config, t_start=t_start,
+        )
+
+    if request.skip_frame_extraction:
+        # User declined to fingerprint an unfingerprinted scene -- identify
+        # from sprite tiles only. No screenshot, no ffmpeg, no fingerprint
+        # write (that would misrepresent this scene as fingerprinted).
+        scene_all_matches = [m for _, r in sprite_extra_results for m in r.matches]
+        await _fetch_missing_images(scene_all_matches)
+        _set_stage(request.scene_id, "matching_performers")
+        persons = _cluster_and_match(sprite_extra_results, request)
+        _set_stage(request.scene_id, "done")
+        return SceneIdentifyResponse(
+            scene_id=request.scene_id,
+            frames_analyzed=0,
+            frames_requested=0,
+            faces_detected=len(sprite_extra_results),
+            faces_after_filter=len(sprite_extra_results),
+            persons=persons,
+            errors=[],
+            fingerprint_saved=False,
+            fingerprint_error=None,
+            timing={"total_ms": round((time.time() - t_start) * 1000)},
+            multi_signal_used=False,
+            used_cache=False,
+        )
+
     if request.use_cache:
         cache_meta = get_scene_signal_cache(scene_id_int)
         if cache_meta is not None and is_scene_cache_compatible(
@@ -1067,7 +1231,9 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         ):
             print(f"[identify_scene] === START scene_id={request.scene_id} (cache hit) ===")
             try:
-                return await _identify_scene_from_cache(request, cache_meta, t_start)
+                return await _identify_scene_from_cache(
+                    request, cache_meta, t_start, extra_results=sprite_extra_results,
+                )
             except Exception as e:
                 logger.warning(f"[identify_scene] Cache fast-path failed for scene {request.scene_id}, falling back to full pipeline: {e}")
 
@@ -1150,6 +1316,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     )
 
     # Extract frames using ffmpeg
+    _set_stage(request.scene_id, "extracting_frames")
     t_extract = time.time()
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Extracting {request.num_frames} frames...")
     extraction_result = await extract_frames_from_stash_scene(
@@ -1164,14 +1331,8 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     if extraction_result.errors:
         print(f"[identify_scene] Errors: {extraction_result.errors[:3]}")
 
-    # Configure matching
-    match_config = MatchingConfig(
-        query_k=100,  # Get more candidates before threshold-filtering
-        max_results=request.top_k * 2,
-        max_distance=request.max_distance,
-    )
-
     # Phase 1: Detect all faces from all frames
+    _set_stage(request.scene_id, "analyzing_frames")
     detected_faces: list[tuple[int, "DetectedFace"]] = []  # (frame_index, face)
     total_faces = 0
     t_detect_total = 0.0
@@ -1230,6 +1391,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
 
     # Process screenshot if available (high-quality cover image often has clear faces)
     # Stash serves thumbnails via paths.screenshot, so we scale up if needed
+    _set_stage(request.scene_id, "analyzing_screenshot")
     screenshot_faces = 0
     if screenshot_url:
         try:
@@ -1274,6 +1436,11 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     # save_face_signal_cache() call removed -- see the earlier comment
     # where face_cache_rows used to be collected.
 
+    # Merge in sprite results resolved up front (see the comment where
+    # sprite_extra_results was computed, near the top of this function).
+    if sprite_extra_results:
+        all_results.extend(sprite_extra_results)
+
     # Fetch missing images from StashBox for all detected matches
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
@@ -1285,6 +1452,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     # used for matching right now, to avoid re-fingerprinting every scene
     # if the toggle gets re-enabled later. Whether the result actually
     # influences ranking (below) is a separate decision.
+    _set_stage(request.scene_id, "checking_signals")
     scene_body_ratios = None
     scene_tattoo_result = None
     scene_tattoo_scores = None
@@ -1335,87 +1503,9 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     # Choose matching mode
     t_match_end = 0.0
     t_match = time.time()
-    if request.matching_mode == "hybrid":
-        # Hybrid matching: combine cluster and frequency approaches
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Using hybrid matching...")
-        persons = hybrid_matching(
-            all_results,
-            _recognizer,
-            cluster_threshold=request.cluster_threshold,
-            top_k=request.top_k * 2,
-            max_distance=request.max_distance,
-        )
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Hybrid matching: {len(persons)} performers in {time.time()-t_match:.1f}s")
-    elif request.matching_mode == "frequency":
-        # Clustered frequency matching: cluster faces first, then identify within clusters
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Using clustered frequency matching...")
-        persons = clustered_frequency_matching(
-            all_results,
-            _recognizer,
-            cluster_threshold=request.cluster_threshold,
-            top_k=request.top_k,
-            max_distance=request.max_distance,
-            scene_performer_stashdb_ids=request.scene_performer_stashdb_ids,
-        )
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Clustered frequency matching: {len(persons)} persons in {time.time()-t_match:.1f}s")
-    else:
-        # Cluster-based matching (original approach)
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Using cluster matching...")
-
-        # Cluster faces by person
-        clusters = cluster_faces_by_person(
-            all_results,
-            _recognizer,
-            distance_threshold=request.cluster_threshold,
-        )
-        print(f"[identify_scene] Initial clusters: {len(clusters)}")
-
-        # Merge clusters that have the same best match
-        clusters = merge_clusters_by_match(clusters)
-        print(f"[identify_scene] After merge: {len(clusters)} clusters")
-
-        # Build response with deduplication
-        persons = []
-        used_performers: set[str] = set()  # Track which performers we've assigned
-
-        # First pass: build all persons sorted by frame count
-        all_persons = []
-        for person_id, cluster in enumerate(clusters):
-            aggregated_matches = aggregate_matches(cluster, top_k=request.top_k)
-            all_persons.append((len(cluster), PersonResult(
-                person_id=person_id,
-                frame_count=len(cluster),
-                best_match=aggregated_matches[0] if aggregated_matches else None,
-                all_matches=aggregated_matches,
-            )))
-
-        # Sort by frame count (most prominent people first)
-        all_persons.sort(key=lambda x: x[0], reverse=True)
-
-        # Second pass: deduplicate - each performer can only be the best match once
-        for _, person in all_persons:
-            if person.best_match:
-                if person.best_match.stashdb_id in used_performers:
-                    # This performer already assigned to a more prominent person
-                    # Find next best match that isn't used
-                    for alt_match in person.all_matches[1:]:
-                        if alt_match.stashdb_id not in used_performers:
-                            person.best_match = alt_match
-                            used_performers.add(alt_match.stashdb_id)
-                            break
-                    else:
-                        # No unused matches, set best_match to None
-                        person.best_match = None
-                else:
-                    used_performers.add(person.best_match.stashdb_id)
-
-            # Also filter all_matches to not include already-used performers
-            person.all_matches = [m for m in person.all_matches if m.stashdb_id not in used_performers or m.stashdb_id == (person.best_match.stashdb_id if person.best_match else None)]
-            persons.append(person)
-
-        # Re-assign person IDs after sorting
-        for i, person in enumerate(persons):
-            person.person_id = i
+    _set_stage(request.scene_id, "matching_performers")
+    persons = _cluster_and_match(all_results, request)
+    print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching ({request.matching_mode}): {len(persons)} persons in {time.time()-t_match:.1f}s")
 
     # Apply multi-signal re-ranking if signals were extracted
     if ms_used and _multi_signal_matcher is not None:
@@ -1458,6 +1548,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
             })
 
     current_db_version = _db_manifest.get("version")
+    _set_stage(request.scene_id, "saving_fingerprint")
     fp_id, fp_error = save_scene_fingerprint(
         scene_id=int(request.scene_id),
         frames_analyzed=len(extraction_result.frames),
@@ -1482,6 +1573,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     }
     print(f"[identify_scene] Timing: {timing_data}")
 
+    _set_stage(request.scene_id, "done")
     return SceneIdentifyResponse(
         scene_id=request.scene_id,
         frames_analyzed=len(extraction_result.frames),
@@ -1495,3 +1587,22 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         timing=timing_data,
         multi_signal_used=ms_used,
     )
+
+
+class SceneIdentifyProgressResponse(BaseModel):
+    """Best-effort, coarse stage indicator for an in-flight /identify/scene
+    call on a given scene -- not a percentage, just "which phase is this
+    running right now" for the scene page's step-list progress UI."""
+    stage: Optional[str] = None
+    updated_at: Optional[float] = None
+
+
+@router.get("/identify/scene/{scene_id}/progress", response_model=SceneIdentifyProgressResponse)
+async def get_scene_identify_progress(scene_id: str):
+    """Poll the current stage of an in-flight /identify/scene call for this
+    scene. Ephemeral/process-local -- nothing is returned once the call
+    finishes and enough time has passed, or if no call has run yet."""
+    entry = _scene_progress.get(scene_id)
+    if not entry:
+        return SceneIdentifyProgressResponse()
+    return SceneIdentifyProgressResponse(stage=entry["stage"], updated_at=entry["updated_at"])

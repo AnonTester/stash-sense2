@@ -1,3 +1,27 @@
+## 2026-08-20
+
+### 0.13.0
+- Feature: The scene page's "Identify" button is now a dropdown with three
+  options. "Select to identify" lets you drag a rectangle over the current
+  video frame and identifies just that crop. "Identify current frame"
+  identifies the whole current frame. "Identify full video" identifies
+  using the scene's fingerprint data (same ffmpeg frame-extraction pipeline
+  as before) plus, new, the scene's sprite/thumbnail sheet (Stash's
+  scrubber-bar preview tiles) -- previously-parsed but entirely unused
+  code. If the scene hasn't been fingerprinted yet, it now asks (per-scene)
+  whether to fingerprint now or continue with sprite-only identification.
+  A step list (Extracting frames / Analyzing frames / Analyzing sprite
+  thumbnails / Matching against performer database / ...) now shows during
+  "Identify full video", polled from a new lightweight progress endpoint,
+  replacing the previous static "Fetching scene sprites..." message that
+  didn't reflect what was actually running.
+- Note: unlike a video frame, sprite results aren't cached between calls in
+  this release -- the scene fingerprint cache still stores the legacy
+  dual-embedding format from before this build's face-recognition engine
+  changed, so caching is disabled there for both video frames and sprite
+  tiles alike (a pre-existing gap, not new to this release). Every
+  "Identify full video" call re-analyzes the sprite sheet fresh.
+
 ## 2026-08-18
 
 ### 0.12.24

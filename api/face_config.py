@@ -23,3 +23,10 @@ MIN_FACE_CONFIDENCE = 0.5 # Detection confidence threshold
 MAX_DISTANCE = 0.5
 TOP_K = 3                 # Top matches per person
 CLUSTER_THRESHOLD = 0.6   # Cosine distance threshold for face clustering
+
+# Sprite-sheet identification. A sprite tile (~160x90px) is far smaller than
+# an ffmpeg-extracted frame (e.g. 1920x1080) -- ~144x fewer pixels -- and
+# costs no decode/seek, so unlike NUM_FRAMES this isn't tuned as a
+# cost/accuracy tradeoff: default to processing every tile the sheet has,
+# capped only to bound pathologically long videos with very large sheets.
+SPRITE_MAX_FRAMES = 300
