@@ -110,14 +110,26 @@ def build_matches(
             distance=float(dist), combined_distance=float(dist), rank=rank + 1,
         )
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
-        # A face can appear more than once in a performer's faces (multiple
-        # source images) but only the closest match to any one of them
-        # should count for that performer -- keep_
+        # Defensive: keep only the closer entry if the ANN index ever
+        # returns the same idx twice within one query's neighbor list
+        # (shouldn't happen in practice, but cheap to guard).
         existing = candidates.get(idx)
         if existing is None or candidate.combined_distance < existing.combined_distance:
             candidates[idx] = candidate
 
-    sorted_candidates = sorted(candidates.values(), key=lambda c: c.combined_distance)
+    # The index can hold multiple embedding entries for the same performer
+    # (e.g. several training crops), each landing as its own idx-keyed
+    # candidate above -- left alone, the same person can surface twice (or
+    # more) in the returned list at similar scores. Collapse to one
+    # candidate per resolved identity, keeping the best-scoring entry,
+    # before sorting/truncating to max_results.
+    best_by_uid: dict[str, CandidateMatch] = {}
+    for candidate in candidates.values():
+        existing = best_by_uid.get(candidate.universal_id)
+        if existing is None or candidate.combined_distance < existing.combined_distance:
+            best_by_uid[candidate.universal_id] = candidate
+
+    sorted_candidates = sorted(best_by_uid.values(), key=lambda c: c.combined_distance)
     filtered = [c for c in sorted_candidates if c.combined_distance <= config.max_distance]
 
     return MatchingResult(matches=filtered[:config.max_results], candidate_count=len(candidates))

@@ -1,3 +1,23 @@
+## 2026-08-21
+
+### 0.13.2
+- Fix: The image-identify flow now gets the same "Add to Stash + Image" /
+  "Add as..." buttons the scene flows already had -- a match not yet in
+  the local library previously showed a dead-end "Not in library" label
+  with no way to act on it. The sidecar's create-performer and
+  link-performer operations now accept an image_id alongside scene_id and
+  update the image's performer list directly.
+
+### 0.13.1
+- Fix: "Identify current frame" and "Select to identify" now get the same
+  "Add to Stash + Scene" / "Add as..." buttons "Identify full video"
+  already had -- a match not yet in the local library previously showed a
+  dead-end "Not in library" label with no way to act on it.
+- Fix: matching now dedupes candidates by resolved performer identity
+  before truncating to top-K, fixing a performer with multiple embedding
+  entries (e.g. several training crops) surfacing twice in the same
+  face's match list at similar scores.
+
 ## 2026-08-20
 
 ### 0.13.0
