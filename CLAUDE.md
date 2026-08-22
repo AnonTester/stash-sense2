@@ -55,8 +55,10 @@ ssh <stash-host> "cd /root/homeserver/stash-sense2 && sh rebuild.sh"
 
 ```bash
 # 1. Bump plugin/stash-sense.yml's version: (semver — see that repo's own
-#    CLAUDE.md for the bug-fix/feature/breaking-change convention), and the
-#    other 3 version locations in the same commit (see "Version bump" above).
+#    CLAUDE.md for the bug-fix/feature/breaking-change convention), and
+#    plugin/stash-sense-core.js's PLUGIN_VERSION to match, in the same
+#    commit (see "Version bump" above) -- the sidecar's own version pair
+#    is a separate, independent track and does not need bumping here.
 # 2. Sync the plugin/ source files into the public repo's copy, renaming
 #    the manifest to match its directory-derived id:
 cp plugin/stash-sense-core.js plugin/stash-sense.js plugin/stash-sense-operations.js \
@@ -77,7 +79,9 @@ Dev API at `http://localhost:5000`, docs at `http://localhost:5000/docs`. Requir
 
 **Hot-reload caveat:** Background analysis tasks block uvicorn `--reload` on file changes — kill and restart the process.
 
-**Version bump — 4 locations, always together, every release:** `plugin/stash-sense-core.js` (`PLUGIN_VERSION`), `api/main.py` (FastAPI `app.version`), `api/settings_router.py` (`_version`), `plugin/stash-sense.yml` (`version:`). Missing even one is a real, recurring failure mode (caught repeatedly via a stale version showing in `/system/info` or `/health` after deploy) — verify all four read the same string before rebuilding, not just the ones you remember to touch.
+**Version bump — two independent pairs, not four locked-together locations.** Sidecar: `api/main.py` (FastAPI `app.version`) + `api/settings_router.py` (`_version`) — these two must always match each other, and match the git tag when cutting a sidecar/GHCR release (`scripts/check-version.sh` enforces both). Plugin: `plugin/stash-sense-core.js` (`PLUGIN_VERSION`) + `plugin/stash-sense.yml` (`version:`) — these two must always match each other, but do **not** need to match the sidecar version. A plugin-only change (no sidecar code touched) only bumps the plugin pair and ships through `AnonTester/stash-plugin-repo`, with no git tag or GHCR image rebuild here — see 0.14.4/0.14.5 in `changelog.txt` for real examples. Missing the partner file in whichever pair you're bumping is a real, recurring failure mode (caught repeatedly via a stale version showing in `/system/info`, `/health`, or the plugin's own display — verify both files in the pair before rebuilding/publishing, not just the one you remember to touch.
+
+**`MIN_SIDECAR_VERSION` (`plugin/stash-sense-core.js`) — bump only when the plugin actually needs it.** This is the floor the dashboard/Identify-button "outdated sidecar" warnings check against (`compareVersions(sidecarVersion, MIN_SIDECAR_VERSION) < 0`) — it is deliberately *not* tied to the plugin's own version, since sidecar and plugin versions are independent tracks (see above) and most plugin releases don't need a newer sidecar at all. Bump it only in the specific commit where a plugin change starts depending on sidecar-side behavior that didn't exist before a given sidecar version (a new endpoint, field, or response shape) — set it to that sidecar version, not to "whatever the sidecar happens to be at right now." Bumping it reflexively on every plugin release re-introduces the exact false-positive "outdated" warning this was built to avoid (see changelog 0.14.5) — a plugin update with no new sidecar dependency should never make an already-compatible sidecar start showing as outdated.
 
 **Changelog** — `changelog.txt` at repo root. Reverse-chronological `## YYYY-MM-DD` date headers, each containing one or more `### x.y.z` version subsections with `- Fix:` / `- Improvement:` / `- Feature:` bullets. Every version bump gets an entry, even a one-line fix. When a genuinely new day starts, add a new `## YYYY-MM-DD` header rather than piling more versions under an old date.
 

@@ -50,7 +50,7 @@ cd api && make test        # or: make test-ci (no ML/GPU deps, matches CI), make
 # Lint
 cd api && make lint        # or: make lint-fix
 
-# Check version files are in sync (4 locations, see CLAUDE.md)
+# Check sidecar/plugin version pairs are each internally consistent (see CLAUDE.md)
 ./scripts/check-version.sh
 ```
 
@@ -113,6 +113,6 @@ buffalo_l ONNX models are downloaded at runtime (`model_manager.py`), not baked 
 
 ## Related Skills (this repo)
 
-- `release-beta` — cut a beta version release (version bump across 4 files, tag, push)
+- `release-beta` — cut a sidecar beta release (bumps the 2 sidecar version files, tag, push)
 - `release-stable` — cut a stable version release
 - `db-import-export` — copy face recognition data from the data-gen pipeline to the sidecar (note: still describes the pre-migration dual-Voyager-index file set as of writing — verify current file names in `config.py`'s `DatabaseConfig` before following it literally)

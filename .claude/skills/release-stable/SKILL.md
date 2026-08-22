@@ -1,11 +1,11 @@
 ---
 name: release-stable
-description: Release a stable version (non-beta) - bumps versions in all version files, commits, tags, and pushes
+description: Release a stable sidecar version (non-beta) - bumps the sidecar's version files, commits, tags, and pushes to trigger the GHCR image build
 ---
 
-# Release Stable Version
+# Release Stable Sidecar Version
 
-Use this skill to release a stable (non-beta) version after beta testing is complete.
+Use this skill to release a stable (non-beta) **sidecar** version after beta testing is complete. This releases the Docker image built and published to GHCR. Plugin releases are a separate, independent track published through `AnonTester/stash-plugin-repo` — see `stash-sense-context`'s "Related Skills" note. Don't bump plugin files here unless the sidecar release is bundled with a plugin change too (in which case bump the plugin pair to whatever version makes sense for it, not necessarily matching this tag).
 
 ## Version Convention
 
@@ -24,19 +24,17 @@ Stable versions follow semantic versioning: `X.Y.Z`
 
 ### Step 1: Update Versions
 
-Edit ALL FOUR files to the SAME new version:
+Edit both sidecar version files to the SAME new version:
 - `api/main.py` - update `version="..."` in FastAPI app initialization
 - `api/settings_router.py` - update `_version: str = "..."`
-- `plugin/stash-sense.yml` - update `version:` field
-- `plugin/stash-sense-core.js` - update `const PLUGIN_VERSION = '...'`
 
-**CRITICAL**: All four files must have identical version strings.
+**CRITICAL**: Both files must have identical version strings — `scripts/check-version.sh` (run by CI on tag push) enforces this.
 
 ### Step 2: Commit
 
 ```bash
-git add api/main.py api/settings_router.py plugin/stash-sense.yml plugin/stash-sense-core.js
-git commit -m "chore: bump version to X.Y.Z"
+git add api/main.py api/settings_router.py
+git commit -m "chore: bump sidecar version to X.Y.Z"
 ```
 
 ### Step 3: Push to Main
@@ -59,7 +57,7 @@ git push origin vX.Y.Z
 ## What Happens Next
 
 GitHub Actions (`.github/workflows/docker-build.yml`) triggers on tag push:
-1. Validates all version files match the tag (`scripts/check-version.sh`)
+1. Validates the sidecar version pair matches the tag (`scripts/check-version.sh`) — the plugin pair is checked for internal consistency only, not against the tag
 2. Builds 3 image variants (CPU default, AMD ROCm, NVIDIA CUDA) and pushes
    each to GitHub Container Registry under this repo's own namespace:
    `ghcr.io/anontester/stash-sense2`, `ghcr.io/anontester/stash-sense2-rocm`,
@@ -74,7 +72,7 @@ GitHub Actions (`.github/workflows/docker-build.yml`) triggers on tag push:
 
 ## Common Mistakes to Avoid
 
-- Forgetting to update one of the four version files
+- Forgetting to update one of the two sidecar version files
 - Tag doesn't match version (missing `v` prefix or typo)
 - Pushing tag before pushing commit
 - Creating tag on wrong branch
