@@ -117,29 +117,29 @@ def _load_face_recognition(data_dir: Path) -> dict:
         print("Initializing body proportion extractor...")
         body_extractor = BodyProportionExtractor()
 
-    # Tattoo signal: detection and matching are separate capabilities that
-    # used to be conflated here -- "auto" required the *matching* embedding
-    # index to exist before the *detector* was even constructed, so with no
-    # index populated yet (the normal state today -- nothing has built tattoo
-    # reference embeddings), the detector silently never loaded regardless of
-    # per-request use_tattoo=True. Detection only needs the YOLO model file;
-    # the index (checked below, independently) gates matching on top of it.
-    enable_tattoo = multi_signal_config.enable_tattoo
+    # Tattoo detector: constructed whenever the YOLO model file is
+    # installed, full stop -- independent of the "Tattoo Detection"
+    # Settings toggle. That toggle only gates whether tattoo data feeds
+    # into *matching* (identification_router.py's use_tattoo resolution),
+    # not whether it gets computed at all: detection+embedding already run
+    # unconditionally as part of scene fingerprinting whenever
+    # _multi_signal_matcher is available (_extract_scene_signals is always
+    # called with use_tattoo=True, see identify_scene), riding along with
+    # frame extraction/decode -- by far the expensive part of that job --
+    # so a fingerprint built with the toggle off still has tattoo data
+    # cached and ready the moment someone turns matching on later, instead
+    # of needing every scene re-fingerprinted from scratch.
     tattoo_det_path = mgr.get_model_path("tattoo_yolov5s")
     tattoo_model_available = tattoo_det_path is not None or Path(
         os.environ.get("DATA_DIR", "./data")
     ).joinpath("models", "tattoo_yolov5s.onnx").exists()
-    tattoo_enabled = (
-        enable_tattoo == "true"
-        or (enable_tattoo == "auto" and tattoo_model_available)
-    )
 
     tattoo_detector = None
     tattoo_matcher = None
-    if tattoo_enabled and not tattoo_model_available:
-        print("Tattoo detection enabled but tattoo_yolov5s model not installed -- "
-              "download it via POST /models/download/tattoo_yolov5s. Skipping.")
-    elif tattoo_enabled:
+    if not tattoo_model_available:
+        print("tattoo_yolov5s model not installed -- download it via "
+              "POST /models/download/tattoo_yolov5s to enable tattoo detection.")
+    else:
         tattoo_emb_path = mgr.get_model_path("tattoo_clip_vitb32")
 
         print("Initializing tattoo detector...")
@@ -437,7 +437,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.13.5",
+    version="0.13.6",
     lifespan=lifespan,
 )
 

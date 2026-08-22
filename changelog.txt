@@ -1,5 +1,19 @@
 ## 2026-08-22
 
+### 0.13.6
+- Change: the tattoo detector now loads whenever its model file is
+  installed, regardless of the "Tattoo Detection" Settings toggle. That
+  toggle now only controls whether tattoo data is *used* for matching --
+  detection+embedding already ran as a side effect of scene fingerprinting
+  for every scene either way, so a fingerprint built before you turn the
+  toggle on now already has tattoo data cached, instead of needing every
+  scene re-fingerprinted from scratch.
+- Change (`Dockerfile.rocm`): `HSA_OVERRIDE_GFX_VERSION` is no longer
+  baked into the ROCm image -- one value can't be right for every AMD
+  card. It's now a `docker-compose.rocm.yml` environment variable
+  (defaults to the reference deployment's `11.0.0`), so it can be set per
+  card without rebuilding.
+
 ### 0.13.5
 - Add: the plugin now warns when the sidecar container is running an
   older version than this JS needs. The identify button's status dot

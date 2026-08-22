@@ -108,10 +108,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ldconfig \
     && rm -rf /var/lib/apt/lists/*
 
-# gfx1103 isn't on ROCm's officially-supported target list -- without this,
-# onnxruntime-rocm's ROCM execution provider segfaults (confirmed live,
-# SIGSEGV inside libamdhip64) before running a single inference.
-ENV HSA_OVERRIDE_GFX_VERSION=11.0.0
+# Cards outside ROCm's officially-supported target list need this set to
+# the nearest supported gfx version, or onnxruntime-rocm's ROCM execution
+# provider segfaults (confirmed live on gfx1103/Radeon 780M, SIGSEGV inside
+# libamdhip64, before running a single inference). Left unset here rather
+# than baked in -- a single image can't get this right for every AMD card,
+# since which value (if any) is needed depends on the specific GPU. Set it
+# per-deployment via docker-compose.rocm.yml's environment section instead
+# (see that file for the value this was originally tuned for).
 
 # Static ffmpeg at /usr/local/bin/ffmpeg (takes PATH precedence over system
 # ffmpeg). VAAPI mode explicitly uses /usr/bin/ffmpeg (system package)

@@ -27,6 +27,16 @@ services:
       # `vaapi` is the natural pairing here (reuses the /dev/dri device
       # already mapped in below for VAAPI-accelerated decode).
       - FFMPEG_HWACCEL=vaapi
+      # Cards outside ROCm's officially-supported target list need this set
+      # to their nearest supported gfx version, or inference segfaults
+      # (see Dockerfile.rocm). Defaults to the value the reference
+      # deployment needs (Radeon 780M / gfx1103) -- override by setting
+      # HSA_OVERRIDE_GFX_VERSION in your shell or .env before `up`, or by
+      # editing this line directly, to match *your* card instead. Check
+      # `rocminfo`'s reported gfx version on your host if inference fails
+      # to initialize. Leave unset (remove this line) if your card is
+      # fully supported and doesn't need an override at all.
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0}
     devices:
       - /dev/kfd
       - /dev/dri
