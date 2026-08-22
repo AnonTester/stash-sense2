@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.14.1';
+  const PLUGIN_VERSION = '0.14.2';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -417,9 +417,15 @@
       return { type: 'performer', id: performerMatch[1] };
     }
 
-    // Plugin page
-    if (path.startsWith('/plugins/stash-sense')) {
-      const subpath = path.replace('/plugins/stash-sense', '') || '/';
+    // Plugin page -- must be this plugin's own route specifically.
+    // PLUGIN_ID-derived, not a hardcoded 'stash-sense' prefix: that
+    // literal also matches '/plugins/stash-sense2' (a v1-vs-v2 route
+    // collision when both are installed side-by-side -- see changelog
+    // 0.14.1/0.14.2), and would equally mismatch if this plugin is ever
+    // installed under yet another folder name.
+    const pluginPrefix = '/plugins/' + PLUGIN_ID;
+    if (path === pluginPrefix || path.startsWith(pluginPrefix + '/')) {
+      const subpath = path.slice(pluginPrefix.length) || '/';
       return { type: 'plugin', subpath };
     }
 

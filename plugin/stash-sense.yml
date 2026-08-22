@@ -1,6 +1,6 @@
 name: Stash Sense 2
 description: ML-powered performer identification and library curation for Stash
-version: 0.14.1
+version: 0.14.2
 url: https://github.com/AnonTester/stash-sense2
 
 ui:
@@ -15,8 +15,8 @@ ui:
 
 settings:
   sidecarUrl:
-    displayName: Stash Sense API URL
-    description: URL of the Stash Sense sidecar container (e.g., http://localhost:5000)
+    displayName: Stash Sense 2 API URL
+    description: URL of the Stash Sense 2 sidecar container (e.g., http://localhost:5000)
     type: STRING
   minConfidence:
     displayName: Minimum Confidence

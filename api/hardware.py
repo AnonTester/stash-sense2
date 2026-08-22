@@ -51,15 +51,16 @@ def _classify_tier(gpu_available: bool, gpu_vram_mb: Optional[int]) -> str:
 
 
 def _probe_gpu() -> tuple[bool, Optional[str], Optional[int]]:
-    """Probe GPU via ONNX Runtime providers and pynvml.
+    """Probe GPU via ONNX Runtime providers -- NVIDIA via pynvml, AMD via rocminfo.
 
-    onnxruntime listing "CUDAExecutionProvider" only means the library was
-    *built* with CUDA support -- it says nothing about whether a real
-    NVIDIA GPU is actually present (e.g. this Docker image is built FROM
-    an nvidia/cuda base image, so the provider always shows up even on an
-    AMD-only host). pynvml is the authoritative check: it actually talks to
-    the NVIDIA driver, so if it can't init or find a device, there is no
-    usable GPU regardless of what onnxruntime claims to support.
+    onnxruntime listing "CUDAExecutionProvider"/"ROCMExecutionProvider" only
+    means the library was *built* with that support -- it says nothing about
+    whether a real GPU of that vendor is actually present (e.g. this Docker
+    image is built FROM an nvidia/cuda base image, so the provider always
+    shows up even on an AMD-only host). pynvml/rocminfo are the authoritative
+    checks: they actually talk to the driver, so if neither can init or find
+    a device, there is no usable GPU regardless of what onnxruntime claims
+    to support.
 
     Returns:
         (gpu_available, gpu_name, gpu_vram_mb)
@@ -67,28 +68,70 @@ def _probe_gpu() -> tuple[bool, Optional[str], Optional[int]]:
     try:
         import onnxruntime as ort
         providers = ort.get_available_providers()
-        if "CUDAExecutionProvider" not in providers:
-            return False, None, None
     except Exception as e:
-        logger.debug("ONNX Runtime CUDA probe failed: %s", e)
+        logger.debug("ONNX Runtime provider probe failed: %s", e)
         return False, None, None
 
-    try:
-        import pynvml
-        pynvml.nvmlInit()
+    if "CUDAExecutionProvider" in providers:
         try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            gpu_name = pynvml.nvmlDeviceGetName(handle)
-            if isinstance(gpu_name, bytes):
-                gpu_name = gpu_name.decode("utf-8")
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            gpu_vram_mb = mem_info.total // (1024 * 1024)
-            return True, gpu_name, gpu_vram_mb
-        finally:
-            pynvml.nvmlShutdown()
+            import pynvml
+            pynvml.nvmlInit()
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                gpu_name = pynvml.nvmlDeviceGetName(handle)
+                if isinstance(gpu_name, bytes):
+                    gpu_name = gpu_name.decode("utf-8")
+                mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                gpu_vram_mb = mem_info.total // (1024 * 1024)
+                return True, gpu_name, gpu_vram_mb
+            finally:
+                pynvml.nvmlShutdown()
+        except Exception as e:
+            logger.debug(f"pynvml found no usable NVIDIA GPU: {e}")
+
+    if "ROCMExecutionProvider" in providers:
+        gpu_name = _probe_amd_gpu_name()
+        if gpu_name is not None:
+            # VRAM isn't probed for AMD: rocminfo's pool sizes are shared
+            # system memory on the APUs this was tested against (Radeon
+            # 780M), not a fixed dedicated-VRAM figure, so reporting them
+            # as gpu_vram_mb would be misleading rather than just missing.
+            # _classify_tier() treats vram=None as "gpu-low", a safe
+            # default until this can distinguish APUs from discrete cards.
+            return True, gpu_name, None
+        logger.debug("ROCMExecutionProvider available but rocminfo found no usable AMD GPU")
+
+    return False, None, None
+
+
+def _probe_amd_gpu_name() -> Optional[str]:
+    """Get the marketing name of the first non-CPU device from `rocminfo`.
+
+    rocminfo lists one block per device (the CPU itself, plus each GPU);
+    each block has its own "Vendor Name" and "Marketing Name" lines. Take
+    the Marketing Name from the first block whose Vendor Name isn't "CPU".
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["rocminfo"], capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+
+        vendor = None
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line.startswith("Vendor Name:"):
+                vendor = line.split(":", 1)[1].strip()
+            elif line.startswith("Marketing Name:") and vendor and vendor != "CPU":
+                name = line.split(":", 1)[1].strip()
+                if name:
+                    return name
+        return None
     except Exception as e:
-        logger.debug(f"pynvml found no usable NVIDIA GPU: {e}")
-        return False, None, None
+        logger.debug("rocminfo probe failed: %s", e)
+        return None
 
 
 def _probe_cpu() -> int:

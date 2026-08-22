@@ -1,5 +1,24 @@
 ## 2026-08-22
 
+### 0.14.2
+- Fix: 0.14.1's plugin-identity fix was incomplete -- the dashboard/plugin
+  page router matched routes with `path.startsWith('/plugins/stash-sense')`,
+  which also matches `/plugins/stash-sense2` (and v1's own equivalent check
+  matches v2's route right back), so visiting *either* plugin's page could
+  render whichever plugin's JS happened to paint the shared container
+  last. Now matches this plugin's own install-folder-derived route
+  exactly, so it only renders on its own page.
+- Fix: hardware detection only ever probed for NVIDIA GPUs (onnxruntime's
+  CUDAExecutionProvider + pynvml) -- on this project's actual reference
+  hardware (AMD Radeon 780M via ROCm), it always reported "No GPU" and
+  silently classified the tier as "cpu", using CPU-tier batch
+  size/concurrency defaults even on the GPU container. Now also checks
+  ROCMExecutionProvider + rocminfo for the AMD case.
+- Fix: several more Settings-tab/dashboard strings ("Stash Sense API URL",
+  the dashboard title, various status tooltips/messages) still said
+  "Stash Sense" instead of "Stash Sense 2" -- same missing-"2" problem as
+  0.14.1's plugin-list name fix, just in more places.
+
 ### 0.14.1
 - Fix: installed alongside v1 (stash-sense), this plugin silently read
   v1's sidecar URL and drove v1's backend instead of its own -- Stash

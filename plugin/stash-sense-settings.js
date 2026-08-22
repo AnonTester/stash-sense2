@@ -910,7 +910,7 @@
       ${key === 'detection_size' ? `
         <span class="ss-setting-warning">
           ⚠️ Changing this invalidates the cached face signals used by
-          Stash Sense's fingerprint fast-path. Every scene will need to
+          ${SS.PLUGIN_NAME}'s fingerprint fast-path. Every scene will need to
           be fully re-fingerprinted (frame extraction + detection +
           embedding, not just re-matched) to use the new resolution.
         </span>
