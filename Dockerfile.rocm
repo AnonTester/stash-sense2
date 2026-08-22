@@ -30,8 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     miopen-hip \
     rocm-smi-lib \
     roctracer \
-    # gfx1103 has no precompiled MIOpen kernel cache (unsupported target) --
-    # these are needed for MIOpen's hiprtc JIT-compile fallback at first use.
     hip-dev \
     hipcc \
     miopen-hip-dev \
@@ -90,6 +88,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     miopen-hip \
     rocm-smi-lib \
     roctracer \
+    # gfx1103 has no precompiled MIOpen kernel cache (unsupported target) --
+    # these are needed for MIOpen's hiprtc JIT-compile fallback at first
+    # use, which happens at RUNTIME (first real inference call), not at
+    # image build time -- confirmed live that having these only in Stage 1
+    # (build) and not here was the actual bug: this runtime stage starts
+    # fresh FROM python:3.11-slim and only inherits Stage 1's Python venv
+    # (see COPY --from=build below), not its system apt packages, so the
+    # compiler/headers MIOpen needs at first inference were silently
+    # absent from every image built from this Dockerfile until now --
+    # every /identify call failed with a MIOpen "hip_runtime.h not found"
+    # JIT-compile error, 100% reproducibly, regardless of container
+    # restarts (this looked like GPU flakiness at first; it wasn't).
+    hip-dev \
+    hipcc \
+    miopen-hip-dev \
+    rocm-device-libs-17 \
     && echo "/opt/rocm-7.2.4/lib" > /etc/ld.so.conf.d/rocm.conf \
     && ldconfig \
     && rm -rf /var/lib/apt/lists/*
