@@ -82,11 +82,11 @@ sidecar-prod:
 status:
 	@echo "$(CYAN)Database Status$(RESET)"
 	@echo "==============="
-	@$(PYTHON) -c "import sqlite3; c = sqlite3.connect('data/performers.db').cursor(); c.execute('SELECT COUNT(*) FROM performers'); p = c.fetchone()[0]; c.execute('SELECT COUNT(*), MAX(arcface_index) FROM faces'); f, m = c.fetchone(); print(f'Performers: {p:,}\nFaces: {f:,}\nMax index: {m}')"
+	@$(PYTHON) -c "import sqlite3; c = sqlite3.connect('data/performers.db').cursor(); c.execute('SELECT COUNT(*) FROM performers'); p = c.fetchone()[0]; c.execute('SELECT COUNT(*), MAX(embedding_index) FROM faces'); f, m = c.fetchone(); print(f'Performers: {p:,}\nFaces: {f:,}\nMax index: {m}')"
 	@echo ""
-	@echo "$(CYAN)Voyager Index$(RESET)"
+	@echo "$(CYAN)usearch Index$(RESET)"
 	@echo "=============="
-	@$(PYTHON) -c "from index_manager import IndexManager; im = IndexManager('data'); print(f'Embeddings: {im.current_index:,}')" 2>/dev/null || echo "Index not loaded"
+	@$(PYTHON) -c "from usearch.index import Index; i = Index(ndim=512, metric='cos'); i.load('data/face_embeddings.usearch'); print(f'Embeddings: {len(i):,}')" 2>/dev/null || echo "Index not loaded"
 
 # ============================================================================
 # Development

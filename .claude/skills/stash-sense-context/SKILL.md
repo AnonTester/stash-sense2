@@ -1,11 +1,11 @@
 ---
 name: stash-sense-context
-description: Use when starting work on stash-sense to load project context, architecture overview, and development patterns. Reference for any implementation decisions.
+description: Use when starting work on stash-sense2 to load project context, architecture overview, and development patterns. Reference for any implementation decisions.
 ---
 
-# Stash Sense Project Context
+# Stash Sense 2 Project Context
 
-Quick-reference for architecture, conventions, and operational knowledge. See `docs/architecture.md` for the full system design.
+Quick-reference for architecture, conventions, and operational knowledge. This repo is a fork of the original `carrotwaxr/stash-sense` project, migrated from a legacy RetinaFace/FaceNet512+ArcFace/Voyager pipeline to InsightFace's `buffalo_l` bundle + a single usearch index — architecture below reflects the current, post-migration state only.
 
 ## Architecture
 
@@ -14,44 +14,44 @@ Quick-reference for architecture, conventions, and operational knowledge. See `d
 - **Plugin** (`plugin/`) — JS/CSS/Python injected into Stash web UI, proxies to sidecar
 
 **Two databases:**
-- `performers.db` — Read-only, distributed via GitHub Releases. Face metadata, stash-box IDs, Voyager indices.
-- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, fingerprints.
+- `performers.db` — Read-only, distributed via GitHub Releases on `AnonTester/stash-sense2-data`. Face metadata, stash-box IDs, a single usearch ANN index. Built by the separate, private `AnonTester/stash-sense2-data-gen` repo.
+- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, fingerprints, job queue.
 
 **Deployment:**
-- Sidecar: Docker on unRAID (`10.0.0.4:6960`), image `carrotwaxr/stash-sense:latest`
-- Plugin: SCP to `/mnt/nvme_cache/appdata/stash/config/plugins/stash-sense/`
-- Dev sidecar: `http://localhost:5000` with `--reload`
+- Sidecar: Docker container — 3 published variants (CPU default, AMD ROCm, NVIDIA CUDA best-effort), see `docker-compose*.yml`/`Dockerfile*`. Published to `ghcr.io/anontester/stash-sense2[-rocm|-cuda]` on version-tag push (`.github/workflows/docker-build.yml`).
+- Plugin: installed as a local Stash plugin; `PLUGIN_ID` (in `plugin/stash-sense-core.js`) must match the install folder's directory name exactly, or it silently reads/drives whichever other plugin owns that id (see CLAUDE.md's "Plugin identity" note).
+- Public plugin distribution: `AnonTester/stash-plugin-repo`'s index (separate from this repo's own GHCR image publishing — see CLAUDE.md's "Publishing to the public plugin index").
+- Dev sidecar: `http://localhost:5000` with `--reload` (`cd api && make sidecar`)
 
 ## Key Systems
 
 | System | Key Files | Pattern |
 |--------|-----------|---------|
-| Face Recognition | `embeddings.py`, `recognizer.py`, `face_config.py` | 3-phase batch: extract -> detect -> embed+match |
-| Recommendations | `recommendations_router.py`, `recommendations_db.py`, `analyzers/` | BaseAnalyzer + incremental watermarking |
-| Duplicate Detection | `analyzers/duplicate_scenes.py` | Candidate generation (SQL joins) -> sequential scoring |
-| Upstream Sync | `upstream_field_mapper.py`, `stashbox_client.py`, `analyzers/base_upstream.py` | 3-way diff (upstream vs local vs snapshot), logic versioned |
-| Multi-Signal | `multi_signal_matcher.py`, `body_proportions.py` | Face primary, body/tattoo multiplicative adjustment |
+| Face Recognition | `embeddings.py`, `recognizer.py`, `matching.py`, `face_config.py` | Single buffalo_l detect+embed call per image, one usearch index, plain nearest-neighbor + threshold filter |
+| Recommendations | `recommendations_router.py`, `recommendations_db.py`, `analyzers/` | `BaseAnalyzer` + incremental watermarking |
+| Duplicate Detection | `analyzers/duplicate_scenes.py`, `analyzers/duplicate_performer.py`, `analyzers/duplicate_scene_files.py` | Candidate generation (SQL joins) -> sequential scoring |
+| Upstream Sync | `upstream_field_mapper.py`, `stashbox_client.py`, `analyzers/base_upstream.py`, `analyzers/upstream_*.py` | 3-way diff (upstream vs local vs snapshot), logic versioned. `UpstreamSceneAnalyzer._diff_fields()` deliberately returns a single dict (relational diff), not `list[dict]` like every other entity type — don't assume list shape in shared `base_upstream.py` code paths. |
+| Job Queue | `queue_manager.py`, `job_models.py` (`JOB_REGISTRY`), `base_job.py` | Resource-slot-limited (`ResourceType.GPU/CPU_HEAVY/NETWORK/LIGHT`), cursor-based checkpointing, stop signaling |
+| Hardware-Adaptive Settings | `hardware.py`, `settings.py` (`TIER_DEFAULTS`) | One-shot startup probe (NVIDIA via pynvml, AMD via rocminfo + amdgpu sysfs) picks a tier (`gpu-high`/`gpu-low`/`cpu`) that drives batch size/concurrency defaults; `num_frames`/`detection_size` deliberately NOT tier-varied (accuracy, not just speed) |
 | Gallery ID | `recognizer.py` (`/identify/image`, `/identify/gallery`) | Independent images, aggregate by performer |
-| DB Self-Update | `database_updater.py` | download -> verify -> swap -> reload, 503 gating |
-| Plugin Proxy | `stash_sense_backend.py` | All sidecar calls go through plugin backend |
+| DB Self-Update | `database_updater.py` | download -> verify -> swap -> reload, delta-chain support, 503 gating |
+| Model Downloads | `model_manager.py`, `models.json` | buffalo_l ONNX files downloaded at runtime from GitHub Releases (not baked into the image) |
+| Plugin Proxy | `stash_sense_backend.py` | All sidecar calls go through plugin backend to bypass browser CSP |
 
 ## Development Commands
 
 ```bash
 # Start sidecar (dev)
-cd api && source ../.venv/bin/activate && make sidecar
-
-# Or without shell activation
-/home/carrot/code/stash-sense/.venv/bin/python -m uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+cd api && make sidecar
 
 # Run tests
-cd api && ../.venv/bin/python -m pytest tests/ -v
+cd api && make test        # or: make test-ci (no ML/GPU deps, matches CI), make test-heavy
 
-# Deploy plugin
-scp plugin/* root@10.0.0.4:/mnt/nvme_cache/appdata/stash/config/plugins/stash-sense/
+# Lint
+cd api && make lint        # or: make lint-fix
 
-# Build and push Docker image
-docker build -t carrotwaxr/stash-sense:latest . && docker push carrotwaxr/stash-sense:latest
+# Check version files are in sync (4 locations, see CLAUDE.md)
+./scripts/check-version.sh
 ```
 
 ## Conventions
@@ -64,6 +64,7 @@ docker build -t carrotwaxr/stash-sense:latest . && docker push carrotwaxr/stash-
 - **Plugin logging:** Use Stash's log protocol with level prefix bytes (`\x01` + level_char + `\x02`), not plain JSON to stderr. See `stash_sense_backend.py:_log_prefix()`.
 - **Upstream logic versioning:** Each upstream analyzer has a `logic_version` class attribute. When bumped, the next analysis run auto-clears stale snapshots and watermarks, forcing full re-analysis. Bump when comparison logic changes (field sets, normalization, ID resolution).
 - **Local-only fields:** `favorite`, `rating`, `o_count` are local Stash metadata — never compare against upstream StashBox values.
+- **Resolved/dismissed recommendations sort by recency, not confidence** (`recommendations_db.py:get_recommendations()`) — only pending items are confidence-ranked; once acted on, most-recently-touched should surface first for review.
 
 ## Field Mapping (Stash vs StashBox)
 
@@ -81,38 +82,37 @@ docker build -t carrotwaxr/stash-sense:latest . && docker push carrotwaxr/stash-
 
 Translation: `recommendations_router.py:update_performer_fields()`
 
-## Face Recognition Tuned Defaults
+## Face Recognition Tuned Defaults (`face_config.py`)
 
 | Parameter | Value | Notes |
 |-----------|-------|-------|
-| Fusion weights | 0.5/0.5 FaceNet/ArcFace | Equal weight since ArcFace normalization fixed |
-| max_distance | 0.5 | Plateau at 0.5, was 0.7 |
-| num_frames | 60 | +12.5% accuracy vs 40 |
-| min_unique_frames | 2 | Higher values cost precision |
-| Cluster threshold | 0.6 cosine distance | On concatenated 1024-dim embeddings |
-| Tagged performer boost | +0.03 | Applied when performer already on scene |
+| `MAX_DISTANCE` | 0.5 | Legacy (FaceNet512+ArcFace fusion) tuned value, carried over as a placeholder — NOT re-validated for buffalo_l's single-embedding distance space yet. Needs its own re-tuning pass. |
+| `NUM_FRAMES` | 60 | Same across all hardware tiers — deliberately not lowered for CPU (accuracy tradeoff, not just speed) |
+| `MIN_FACE_SIZE` / `MIN_FACE_CONFIDENCE` | 40px / 0.5 | Detection thresholds |
+| `CLUSTER_THRESHOLD` | 0.6 cosine distance | Face clustering (single buffalo_l embedding space, not concatenated dual-model) |
+| `TOP_K` | 3 | Top matches per person |
+| `SPRITE_MAX_FRAMES` | 300 | Sprite-sheet tiles are cheap (no decode/seek) relative to `NUM_FRAMES`, so this is a pathological-case cap, not a cost/accuracy tradeoff |
 
-## Docker Image
+`EMBEDDING_DIM` (`config.py`) = 512 (single buffalo_l embedding, replacing the old separate `FACENET_DIM`/`ARCFACE_DIM`).
 
-- Base: `nvidia/cuda:12.4.0-runtime-ubuntu22.04`
-- ONNX models baked in: `facenet512.onnx` (90MB) + `arcface.onnx` (130MB)
-- Stripped: PyTorch, TensorFlow, DeepFace (not needed at runtime)
-- Port: 6960 (host) -> 5000 (container)
-- GPU: `--runtime=nvidia --gpus all`
-- Volumes: `/data` (Voyager indices, performers.db, stash_sense.db), `/root/.insightface` (detector cache)
+## Docker Images
+
+3 variants, see each `Dockerfile*` for hardware-specific build notes:
+- `Dockerfile` — CPU-only, `python:3.11-slim` base. Default/fallback for either GPU vendor.
+- `Dockerfile.rocm` — AMD ROCm, `python:3.11-slim` base + AMD's apt repo. The variant actually run and tested (Radeon 780M / gfx1103) — see README's GPU Troubleshooting section for the `HSA_OVERRIDE_GFX_VERSION`/`amdgpu.cwsr_enable` gotchas this hardware needed.
+- `Dockerfile.cuda` — NVIDIA CUDA, `nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04` base. Best-effort/unverified — no NVIDIA hardware in the reference deployment.
+
+buffalo_l ONNX models are downloaded at runtime (`model_manager.py`), not baked into any image. Port: 5000 (container) — host mapping is a user/deployment choice, not fixed. Volumes: `/data` (usearch index, `performers.db`, `stash_sense.db`), `/root/.insightface` (detector cache).
 
 ## GitHub
 
-- Repo: `carrotwaxr/stash-sense`
-- Issues: Used for feature planning (full implementation plans in body)
-- Trainer repo: `/home/carrot/code/stash-sense-trainer/` (private, builds performers.db)
+- Repo: `AnonTester/stash-sense2` (private while unproven — see CLAUDE.md's Repository Policy)
+- Data repo (public): `AnonTester/stash-sense2-data` — GitHub Releases host `performers.db` + usearch index + models
+- Data-gen repo (private): `AnonTester/stash-sense2-data-gen` — builds `performers.db`, crawls stash-box endpoints, publishes releases
+- Public plugin index: `AnonTester/stash-plugin-repo`
 
-## Related Skills
+## Related Skills (this repo)
 
-- `deploy-dev-plugin` — SCP plugin files to Unraid
-- `db-import-export` — Copy face DB from trainer to sidecar
-- `create-ticket` — Plan and create GitHub Issues
-- `work-ticket` — Pick up and implement a GitHub Issue
-- `git-preferences` — Branching, commits, PR conventions
-- `python-fastapi` — FastAPI patterns used in this project
-- `stash` / `stash-box` / `stash-plugin-dev` — Stash ecosystem references
+- `release-beta` — cut a beta version release (version bump across 4 files, tag, push)
+- `release-stable` — cut a stable version release
+- `db-import-export` — copy face recognition data from the data-gen pipeline to the sidecar (note: still describes the pre-migration dual-Voyager-index file set as of writing — verify current file names in `config.py`'s `DatabaseConfig` before following it literally)
