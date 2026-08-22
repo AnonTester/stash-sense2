@@ -107,9 +107,12 @@ def _probe_gpu() -> tuple[bool, Optional[str], Optional[int]]:
 def _probe_amd_gpu_name() -> Optional[str]:
     """Get the marketing name of the first non-CPU device from `rocminfo`.
 
-    rocminfo lists one block per device (the CPU itself, plus each GPU);
-    each block has its own "Vendor Name" and "Marketing Name" lines. Take
-    the Marketing Name from the first block whose Vendor Name isn't "CPU".
+    rocminfo lists one block per device (the CPU itself, plus each GPU),
+    each with its own "Marketing Name" and "Vendor Name" lines -- in that
+    order (Marketing Name comes first within a block), so the vendor
+    needed to decide whether to keep a given Marketing Name isn't known
+    until a couple of lines after it. Buffer the most recent Marketing
+    Name seen and confirm it once its block's Vendor Name line arrives.
     """
     try:
         import subprocess
@@ -119,15 +122,16 @@ def _probe_amd_gpu_name() -> Optional[str]:
         if result.returncode != 0:
             return None
 
-        vendor = None
+        pending_name = None
         for line in result.stdout.splitlines():
             line = line.strip()
-            if line.startswith("Vendor Name:"):
+            if line.startswith("Marketing Name:"):
+                pending_name = line.split(":", 1)[1].strip() or None
+            elif line.startswith("Vendor Name:"):
                 vendor = line.split(":", 1)[1].strip()
-            elif line.startswith("Marketing Name:") and vendor and vendor != "CPU":
-                name = line.split(":", 1)[1].strip()
-                if name:
-                    return name
+                if vendor and vendor != "CPU" and pending_name:
+                    return pending_name
+                pending_name = None
         return None
     except Exception as e:
         logger.debug("rocminfo probe failed: %s", e)
