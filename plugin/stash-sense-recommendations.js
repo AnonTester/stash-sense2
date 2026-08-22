@@ -520,14 +520,19 @@
 
     let versionHtml = '';
     if (pluginVersion || sidecarVersion) {
-      const showMismatch = pluginVersion && sidecarVersion && pluginVersion !== sidecarVersion;
+      // Flag the sidecar only when it's actually below what this plugin
+      // needs (MIN_SIDECAR_VERSION) -- not on any plugin/sidecar version
+      // string mismatch. Versions drift independently by design (sidecar
+      // only needs bumping when a plugin change actually requires a new
+      // sidecar feature), so e.g. plugin v0.14.4 next to a perfectly
+      // compatible sidecar v0.14.3 is not an error.
+      const outdated = sidecarVersion && SS.compareVersions(sidecarVersion, SS.MIN_SIDECAR_VERSION) < 0;
       const pVer = pluginVersion ? `Plugin v${pluginVersion}` : '';
       const sVer = sidecarVersion ? `Sidecar v${sidecarVersion}` : '';
 
-      if (showMismatch) {
-        const pLower = compareSemver(pluginVersion, sidecarVersion) < 0;
-        const pHtml = pVer ? `<span ${pLower ? 'class="ss-version-mismatch"' : ''}>${pVer}</span>` : '';
-        const sHtml = sVer ? `<span ${!pLower ? 'class="ss-version-mismatch"' : ''}>${sVer}</span>` : '';
+      if (outdated) {
+        const pHtml = pVer ? `<span>${pVer}</span>` : '';
+        const sHtml = sVer ? `<span class="ss-version-mismatch">${sVer}</span>` : '';
         versionHtml = [pHtml, sHtml].filter(Boolean).join(' <span class="ss-status-sep">-</span> ');
       } else {
         versionHtml = `<span>${[pVer, sVer].filter(Boolean).join(' - ')}</span>`;
@@ -541,16 +546,6 @@
       <span class="ss-status-label">${connected ? 'Connected' : 'Disconnected'}</span>
       ${sidecarStatus?.error ? `<span class="ss-status-error">${sidecarStatus.error}</span>` : ''}
     `;
-  }
-
-  function compareSemver(a, b) {
-    const pa = String(a).split('.').map(Number);
-    const pb = String(b).split('.').map(Number);
-    for (let i = 0; i < 3; i++) {
-      const diff = (pa[i] || 0) - (pb[i] || 0);
-      if (diff !== 0) return diff;
-    }
-    return 0;
   }
 
   async function renderDashboard(mainContainer, content) {

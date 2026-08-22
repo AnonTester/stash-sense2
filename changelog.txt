@@ -1,5 +1,15 @@
 ## 2026-08-22
 
+### 0.14.5
+- Fix: the dashboard's sidecar version indicator flagged the sidecar
+  version in red on ANY plugin/sidecar version string mismatch (e.g.
+  plugin v0.14.4 next to sidecar v0.14.3), rather than only when the
+  sidecar is actually below what the plugin needs. Now compares against
+  `MIN_SIDECAR_VERSION` (the same floor the Identify button's own
+  outdated check already used), so versions can drift independently
+  without a false "outdated" warning -- only flagged when a sidecar
+  update is genuinely required.
+
 ### 0.14.4
 - Remove the temporary orange border around the Identify button. It was
   meant to distinguish this plugin's button from v1's while both were
