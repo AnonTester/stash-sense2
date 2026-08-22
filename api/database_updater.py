@@ -239,12 +239,12 @@ class DatabaseUpdater:
 
         # Find the *full bundle* zip asset — must match the naming
         # convention exactly (not just "any .zip"), now that delta zips
-        # (stash-sense-delta-*.zip) live on the same release and asset
+        # (stash-sense2-delta-*.zip) live on the same release and asset
         # order isn't a contract worth relying on.
         download_url: Optional[str] = None
         download_size_mb: Optional[int] = None
         for asset in release.get("assets", []):
-            if asset["name"].startswith("stash-sense-data-") and asset["name"].endswith(".zip"):
+            if asset["name"].startswith("stash-sense2-data-") and asset["name"].endswith(".zip"):
                 download_url = asset["browser_download_url"]
                 size_bytes = asset.get("size")
                 if size_bytes:
