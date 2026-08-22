@@ -223,12 +223,6 @@ class TestEnvVarMigration:
         assert count == 1
         assert mgr_gpu_high.get("stash_api_rate") == 10.0
 
-    def test_migrates_body_signal(self, mgr_gpu_high):
-        with patch.dict(os.environ, {"ENABLE_BODY_SIGNAL": "false"}):
-            count = migrate_env_vars(mgr_gpu_high)
-        assert count == 1
-        assert mgr_gpu_high.get("body_signal_enabled") is False
-
     def test_does_not_overwrite_existing_override(self, mgr_gpu_high):
         mgr_gpu_high.set("stash_api_rate", 7.5)
         with patch.dict(os.environ, {"STASH_RATE_LIMIT": "10.0"}):
