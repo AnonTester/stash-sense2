@@ -145,6 +145,9 @@ class PerformerMatchResponse(BaseModel):
     endpoint: Optional[str] = Field(None, description="StashBox endpoint domain (e.g. 'stashdb.org'), or 'local' for a local-library match")
     already_tagged: bool = Field(False, description="Whether this performer is already tagged on the scene")
     local_performer_id: Optional[str] = Field(None, description="Local Stash performer id, set only for local-index matches")
+    source: Optional[str] = Field(None, description="Set only for catalogue (non-stash-box) matches, e.g. 'seekfans'")
+    catalogue_url: Optional[str] = Field(None, description="Catalogue source's own profile page, set only for catalogue matches")
+    profile_url: Optional[str] = Field(None, description="Link to the actual external content site (e.g. onlyfans.com), when the catalogue source has one")
 
 
 class FaceResult(BaseModel):
@@ -336,6 +339,9 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         image_url=m.image_url,
         endpoint=_extract_endpoint(uid) or getattr(m, "endpoint", None),
         local_performer_id=getattr(m, "local_performer_id", None),
+        source=getattr(m, "source", None),
+        catalogue_url=getattr(m, "catalogue_url", None),
+        profile_url=getattr(m, "profile_url", None),
     )
     defaults.update(overrides)
     return PerformerMatchResponse(**defaults)

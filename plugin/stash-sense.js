@@ -615,7 +615,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, sceneId: targetSceneId } = btn.dataset;
+            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -623,16 +623,28 @@
 
             try {
               const settings = await SS.getSettings();
+              // Catalogue (non-stash-box) matches have no external API to
+              // re-fetch full details from -- everything the backend needs
+              // is already on the button's data attributes (see
+              // _catalogueDataAttrs), carried straight from the match.
               const result = await this._withTimeout(
-                SS.runPluginOperation('create_performer_from_stashbox', {
-                  endpoint,
-                  stashdb_id: stashdbId,
-                  // Omitted (not just empty) when staged -- the backend
-                  // only skips its own scene-assignment step when this key
-                  // is entirely absent/falsy.
-                  ...(staged ? {} : { scene_id: targetSceneId }),
-                  sidecar_url: settings.sidecarUrl,
-                }),
+                source
+                  ? SS.runPluginOperation('create_performer_from_catalogue', {
+                      source, name, country: country || undefined,
+                      image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
+                      profile_url: profileUrl || undefined,
+                      ...(staged ? {} : { scene_id: targetSceneId }),
+                      sidecar_url: settings.sidecarUrl,
+                    })
+                  : SS.runPluginOperation('create_performer_from_stashbox', {
+                      endpoint,
+                      stashdb_id: stashdbId,
+                      // Omitted (not just empty) when staged -- the backend
+                      // only skips its own scene-assignment step when this key
+                      // is entirely absent/falsy.
+                      ...(staged ? {} : { scene_id: targetSceneId }),
+                      sidecar_url: settings.sidecarUrl,
+                    }),
                 45000,
                 'Create performer operation timed out',
               );
@@ -655,8 +667,11 @@
               }
             } catch (err) {
               // Fallback: if the plugin call timed out but performer creation
-              // actually succeeded, complete UI flow anyway.
-              if ((err?.message || '').toLowerCase().includes('timed out')) {
+              // actually succeeded, complete UI flow anyway. Catalogue
+              // creations have no stashbox id to search back by, so skip
+              // this recovery for them (less likely to time out anyway --
+              // no external API round-trip involved).
+              if (!source && (err?.message || '').toLowerCase().includes('timed out')) {
                 try {
                   const graphqlUrl = this._stashboxGraphqlUrl(endpoint);
                   const localPerformer = await SS.findPerformerByStashDBId(stashdbId, graphqlUrl);
@@ -716,14 +731,42 @@
         return `/performers/${localPerformerId}`;
       },
 
-      // Build the "View on ..." links for a match. Local matches always
-      // get a "View local performer" link; if the local performer is
-      // *also* linked to a real StashDB id (match.stashdb_id differs from
-      // match.local_performer_id -- the sidecar falls back to the local
-      // id string when there's no real link), show both, since that's two
-      // independent, separately-verifiable signals for the same person.
-      // Non-local matches keep the existing single StashBox link.
+      // Data attributes carried on the "Add to Stash + ..." / "Add as..."
+      // buttons for a catalogue (non-stash-box) match -- see
+      // stashbox_router.py's create_performer_from_catalogue, which needs
+      // this data directly since there's no external API it can re-fetch
+      // full performer details from the way the stashbox flow does.
+      // Returns '' for a stashbox/local match (nothing extra to carry).
+      _catalogueDataAttrs(match) {
+        if (!match.source) return '';
+        const esc = (s) => SS.escapeHtml ? SS.escapeHtml(s || '') : (s || '');
+        return `
+                    data-source="${esc(match.source)}"
+                    data-name="${esc(match.name)}"
+                    data-country="${esc(match.country)}"
+                    data-image-url="${esc(match.image_url)}"
+                    data-catalogue-url="${esc(match.catalogue_url)}"
+                    data-profile-url="${esc(match.profile_url)}"`;
+      },
+
+      // Build the "View on ..." links for a match. Catalogue (non-stash-box)
+      // matches link to the actual external content site when the source
+      // has one (e.g. onlyfans.com for seekfans), falling back to the
+      // catalogue site's own profile page -- there's no stashbox page to
+      // link to at all for these. Local matches always get a "View local
+      // performer" link; if the local performer is *also* linked to a real
+      // StashDB id (match.stashdb_id differs from match.local_performer_id
+      // -- the sidecar falls back to the local id string when there's no
+      // real link), show both, since that's two independent,
+      // separately-verifiable signals for the same person. Non-local,
+      // non-catalogue matches keep the existing single StashBox link.
       _matchLinksHtml(match, stashboxUrl, endpoint) {
+        if (match.source) {
+          const href = match.profile_url || match.catalogue_url;
+          if (!href) return '';
+          const label = match.profile_url ? 'View profile' : `View on ${match.source}`;
+          return `<a href="${href}" target="_blank" rel="noopener" class="ss-link">${label}</a>`;
+        }
         if (!match.local_performer_id) {
           return `<a href="${stashboxUrl}" target="_blank" rel="noopener" class="ss-link">View on ${endpoint}</a>`;
         }
@@ -744,6 +787,13 @@
       async _resolveLibraryPerformer(match, graphqlUrl) {
         if (match.local_performer_id) {
           return { id: match.local_performer_id, name: match.name };
+        }
+        if (match.source) {
+          // Catalogue match: match.stashdb_id is the internal database id,
+          // not a real stash_ids-linkable uuid, and there's no stashbox
+          // GraphQL endpoint to query against -- no way to cross-reference
+          // against the library this way for these yet.
+          return null;
         }
         return SS.findPerformerByStashDBId(match.stashdb_id, graphqlUrl);
       },
@@ -795,13 +845,13 @@
             <button class="ss-btn ss-btn-create"
                     data-endpoint="${endpoint}"
                     data-stashdb-id="${match.stashdb_id}"
-                    data-scene-id="${sceneId}">
+                    data-scene-id="${sceneId}"${this._catalogueDataAttrs(match)}>
               Add to Stash + Scene
             </button>
             <button class="ss-btn ss-btn-link-as"
                     data-endpoint="${endpoint}"
                     data-stashdb-id="${match.stashdb_id}"
-                    data-scene-id="${sceneId}">
+                    data-scene-id="${sceneId}"${this._catalogueDataAttrs(match)}>
               Add as...
             </button>
             <span class="ss-local-status ss-not-in-library">Not in library</span>`;
@@ -868,13 +918,13 @@
                 <button class="ss-btn ss-btn-create ss-btn-sm"
                         data-endpoint="${altEndpoint}"
                         data-stashdb-id="${m.stashdb_id}"
-                        data-scene-id="${sceneId}">
+                        data-scene-id="${sceneId}"${this._catalogueDataAttrs(m)}>
                   Add to Stash + Scene
                 </button>
                 <button class="ss-btn ss-btn-link-as ss-btn-sm"
                         data-endpoint="${altEndpoint}"
                         data-stashdb-id="${m.stashdb_id}"
-                        data-scene-id="${sceneId}">
+                        data-scene-id="${sceneId}"${this._catalogueDataAttrs(m)}>
                   Add as...
                 </button>
                 <span class="ss-local-status ss-not-in-library">Not in library</span>`;
@@ -932,13 +982,20 @@
         const sceneId = triggerBtn.dataset.sceneId;
         const imageId = triggerBtn.dataset.imageId;
         const graphqlUrl = this._stashboxGraphqlUrl(endpoint);
+        // Catalogue (non-stash-box) matches have no real stashbox id to
+        // link -- triggerBtn.dataset.stashdbId is just the internal
+        // database id for these, so offering to "link" it would write
+        // garbage. Omit the checkbox entirely rather than show a control
+        // that does the wrong thing.
+        const isCatalogue = !!triggerBtn.dataset.source;
 
         panel.innerHTML = `
           <input type="text" class="ss-search-input" placeholder="Search performers in library..." />
+          ${isCatalogue ? '' : `
           <label class="ss-update-meta-label">
             <input type="checkbox" class="ss-update-meta-checkbox" checked />
             Link StashBox ID to performer
-          </label>
+          </label>`}
           <ul class="ss-search-results"></ul>
         `;
 
@@ -994,7 +1051,7 @@
                 li.addEventListener('click', async () => {
                   const performerId = li.dataset.performerId;
                   const performerName = li.dataset.performerName;
-                  const updateMeta = updateMetaCheckbox.checked;
+                  const updateMeta = updateMetaCheckbox ? updateMetaCheckbox.checked : false;
                   const staged = !!self._findSaveButton();
 
                   panel.innerHTML = '<div class="ss-search-loading">Linking...</div>';
@@ -1559,13 +1616,13 @@
                       : `<button class="ss-btn ss-btn-create"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
-                                 data-image-id="${imageId}">
+                                 data-image-id="${imageId}"${this._catalogueDataAttrs(match)}>
                            Add to Stash + Image
                          </button>
                          <button class="ss-btn ss-btn-link-as"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
-                                 data-image-id="${imageId}">
+                                 data-image-id="${imageId}"${this._catalogueDataAttrs(match)}>
                            Add as...
                          </button>
                          <span class="ss-local-status ss-not-in-library">Not in library</span>`
@@ -1615,13 +1672,13 @@
                           : `<button class="ss-btn ss-btn-create ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
-                                     data-image-id="${imageId}">
+                                     data-image-id="${imageId}"${this._catalogueDataAttrs(m)}>
                                Add to Stash + Image
                              </button>
                              <button class="ss-btn ss-btn-link-as ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
-                                     data-image-id="${imageId}">
+                                     data-image-id="${imageId}"${this._catalogueDataAttrs(m)}>
                                Add as...
                              </button>
                              <span class="ss-local-status ss-not-in-library">Not in library</span>`
@@ -1671,7 +1728,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, imageId: targetImageId } = btn.dataset;
+            const { endpoint, stashdbId, imageId: targetImageId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -1679,16 +1736,28 @@
 
             try {
               const settings = await SS.getSettings();
+              // Catalogue (non-stash-box) matches have no external API to
+              // re-fetch full details from -- everything the backend needs
+              // is already on the button's data attributes (see
+              // _catalogueDataAttrs), carried straight from the match.
               const result = await this._withTimeout(
-                SS.runPluginOperation('create_performer_from_stashbox', {
-                  endpoint,
-                  stashdb_id: stashdbId,
-                  // Omitted (not just empty) when staged -- the backend
-                  // only skips its own image-assignment step when this key
-                  // is entirely absent/falsy.
-                  ...(staged ? {} : { image_id: targetImageId }),
-                  sidecar_url: settings.sidecarUrl,
-                }),
+                source
+                  ? SS.runPluginOperation('create_performer_from_catalogue', {
+                      source, name, country: country || undefined,
+                      image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
+                      profile_url: profileUrl || undefined,
+                      ...(staged ? {} : { image_id: targetImageId }),
+                      sidecar_url: settings.sidecarUrl,
+                    })
+                  : SS.runPluginOperation('create_performer_from_stashbox', {
+                      endpoint,
+                      stashdb_id: stashdbId,
+                      // Omitted (not just empty) when staged -- the backend
+                      // only skips its own image-assignment step when this key
+                      // is entirely absent/falsy.
+                      ...(staged ? {} : { image_id: targetImageId }),
+                      sidecar_url: settings.sidecarUrl,
+                    }),
                 45000,
                 'Create performer operation timed out',
               );
@@ -1711,8 +1780,11 @@
               }
             } catch (err) {
               // Fallback: if the plugin call timed out but performer creation
-              // actually succeeded, complete UI flow anyway.
-              if ((err?.message || '').toLowerCase().includes('timed out')) {
+              // actually succeeded, complete UI flow anyway. Catalogue
+              // creations have no stashbox id to search back by, so skip
+              // this recovery for them (less likely to time out anyway --
+              // no external API round-trip involved).
+              if (!source && (err?.message || '').toLowerCase().includes('timed out')) {
                 try {
                   const graphqlUrl = this._stashboxGraphqlUrl(endpoint);
                   const localPerformer = await SS.findPerformerByStashDBId(stashdbId, graphqlUrl);
@@ -1837,13 +1909,13 @@
                       : `<button class="ss-btn ss-btn-create"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
-                                 data-scene-id="${sceneId}">
+                                 data-scene-id="${sceneId}"${this._catalogueDataAttrs(match)}>
                            Add to Stash + Scene
                          </button>
                          <button class="ss-btn ss-btn-link-as"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
-                                 data-scene-id="${sceneId}">
+                                 data-scene-id="${sceneId}"${this._catalogueDataAttrs(match)}>
                            Add as...
                          </button>
                          <span class="ss-local-status ss-not-in-library">Not in library</span>`
@@ -1893,13 +1965,13 @@
                           : `<button class="ss-btn ss-btn-create ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
-                                     data-scene-id="${sceneId}">
+                                     data-scene-id="${sceneId}"${this._catalogueDataAttrs(m)}>
                                Add to Stash + Scene
                              </button>
                              <button class="ss-btn ss-btn-link-as ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
-                                     data-scene-id="${sceneId}">
+                                     data-scene-id="${sceneId}"${this._catalogueDataAttrs(m)}>
                                Add as...
                              </button>
                              <span class="ss-local-status ss-not-in-library">Not in library</span>`
@@ -1949,7 +2021,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, sceneId: targetSceneId } = btn.dataset;
+            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -1957,16 +2029,28 @@
 
             try {
               const settings = await SS.getSettings();
+              // Catalogue (non-stash-box) matches have no external API to
+              // re-fetch full details from -- everything the backend needs
+              // is already on the button's data attributes (see
+              // _catalogueDataAttrs), carried straight from the match.
               const result = await this._withTimeout(
-                SS.runPluginOperation('create_performer_from_stashbox', {
-                  endpoint,
-                  stashdb_id: stashdbId,
-                  // Omitted (not just empty) when staged -- the backend
-                  // only skips its own scene-assignment step when this key
-                  // is entirely absent/falsy.
-                  ...(staged ? {} : { scene_id: targetSceneId }),
-                  sidecar_url: settings.sidecarUrl,
-                }),
+                source
+                  ? SS.runPluginOperation('create_performer_from_catalogue', {
+                      source, name, country: country || undefined,
+                      image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
+                      profile_url: profileUrl || undefined,
+                      ...(staged ? {} : { scene_id: targetSceneId }),
+                      sidecar_url: settings.sidecarUrl,
+                    })
+                  : SS.runPluginOperation('create_performer_from_stashbox', {
+                      endpoint,
+                      stashdb_id: stashdbId,
+                      // Omitted (not just empty) when staged -- the backend
+                      // only skips its own scene-assignment step when this key
+                      // is entirely absent/falsy.
+                      ...(staged ? {} : { scene_id: targetSceneId }),
+                      sidecar_url: settings.sidecarUrl,
+                    }),
                 45000,
                 'Create performer operation timed out',
               );
@@ -1989,8 +2073,11 @@
               }
             } catch (err) {
               // Fallback: if the plugin call timed out but performer creation
-              // actually succeeded, complete UI flow anyway.
-              if ((err?.message || '').toLowerCase().includes('timed out')) {
+              // actually succeeded, complete UI flow anyway. Catalogue
+              // creations have no stashbox id to search back by, so skip
+              // this recovery for them (less likely to time out anyway --
+              // no external API round-trip involved).
+              if (!source && (err?.message || '').toLowerCase().includes('timed out')) {
                 try {
                   const graphqlUrl = this._stashboxGraphqlUrl(endpoint);
                   const localPerformer = await SS.findPerformerByStashDBId(stashdbId, graphqlUrl);

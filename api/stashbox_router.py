@@ -86,6 +86,24 @@ class CreatePerformerResponse(BaseModel):
     success: bool
 
 
+class CreatePerformerFromCatalogueRequest(BaseModel):
+    """Create a Stash performer from a non-stash-box catalogue match (e.g.
+    seekfans) -- there's no GraphQL API to re-fetch full metadata from like
+    the stashbox flow above, so the caller (plugin JS, which already has
+    this match's data from the identify response) sends along what little
+    the database actually has: name/country/image_url plus the catalogue
+    site's own page and, when the source has one, a link to the actual
+    external content site (e.g. onlyfans.com)."""
+    scene_id: Optional[str] = None
+    image_id: Optional[str] = None
+    source: str = Field(description="Catalogue source name, e.g. 'seekfans'")
+    name: str
+    country: Optional[str] = None
+    image_url: Optional[str] = Field(None, description="Cover image URL, downloaded by Stash itself on create")
+    catalogue_url: Optional[str] = Field(None, description="The catalogue site's own profile page, e.g. seekfans.com/onlyfans/<user>")
+    profile_url: Optional[str] = Field(None, description="Link to the actual external content site, e.g. onlyfans.com/<user> -- not every source has one")
+
+
 class LinkPerformerRequest(BaseModel):
     # Optional: same reasoning as CreatePerformerRequest.scene_id/image_id above.
     scene_id: Optional[str] = None
@@ -296,6 +314,75 @@ async def create_performer_from_stashbox(request: CreatePerformerRequest):
 
     # 3. Add performer to scene/image, unless the caller is staging it into
     # an already-open edit form instead (scene_id/image_id omitted then).
+    if request.scene_id:
+        get_query = """
+        query GetScene($id: ID!) {
+            findScene(id: $id) { performers { id } }
+        }
+        """
+        scene_data = await stash_client._execute(get_query, {"id": request.scene_id})
+        current_ids = [p["id"] for p in scene_data["findScene"]["performers"]]
+        if new_performer["id"] not in current_ids:
+            current_ids.append(new_performer["id"])
+            await stash_client.update_scene_performers(request.scene_id, current_ids)
+    elif request.image_id:
+        get_query = """
+        query GetImage($id: ID!) {
+            findImage(id: $id) { performers { id } }
+        }
+        """
+        image_data = await stash_client._execute(get_query, {"id": request.image_id})
+        current_ids = [p["id"] for p in image_data["findImage"]["performers"]]
+        if new_performer["id"] not in current_ids:
+            current_ids.append(new_performer["id"])
+            await stash_client.update_image_performers(request.image_id, current_ids)
+
+    return CreatePerformerResponse(
+        performer_id=new_performer["id"],
+        name=new_performer["name"],
+        success=True,
+    )
+
+
+@router.post("/stash/create-performer-from-catalogue", response_model=CreatePerformerResponse)
+async def create_performer_from_catalogue(request: CreatePerformerFromCatalogueRequest):
+    """Create a performer in Stash from a non-stash-box catalogue match's
+    limited metadata, then add to scene/image. Mirrors
+    create_performer_from_stashbox's shape but has no external API to
+    re-fetch full details from -- everything comes from the request
+    itself (see CreatePerformerFromCatalogueRequest)."""
+    if not _stash_url:
+        raise HTTPException(status_code=400, detail="STASH_URL not configured")
+
+    from stash_client_unified import StashClientUnified
+    stash_client = StashClientUnified(_stash_url, _stash_api_key)
+
+    # profile_url's path is the source account's own username/handle --
+    # e.g. "https://onlyfans.com/trippie_bri" -> "trippie_bri" -- a much
+    # more useful alias than the internal database id.
+    alias_list = []
+    if request.profile_url:
+        handle = request.profile_url.rstrip("/").rsplit("/", 1)[-1]
+        if handle:
+            alias_list.append(handle)
+
+    create_input = {
+        "name": request.name,
+        "disambiguation": f"({request.source.capitalize()})",
+    }
+    if request.country:
+        create_input["country"] = request.country
+    if alias_list:
+        create_input["alias_list"] = alias_list
+    if request.image_url:
+        create_input["image"] = request.image_url
+
+    new_performer = await stash_client.create_performer(**create_input)
+
+    urls = [u for u in (request.profile_url, request.catalogue_url) if u]
+    if urls:
+        await stash_client.update_performer(new_performer["id"], urls=urls)
+
     if request.scene_id:
         get_query = """
         query GetScene($id: ID!) {

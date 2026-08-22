@@ -14,6 +14,7 @@ from config import DatabaseConfig
 from embeddings import FaceEmbeddingGenerator, DetectedFace, FaceEmbedding
 from matching import MatchingConfig, match_face, MatchingResult
 from database_reader import PerformerDatabaseReader
+from stashbox_utils import classify_universal_id
 
 
 @dataclass
@@ -33,6 +34,15 @@ class PerformerMatch:
     # above is a real linked StashDB uuid rather than the local id itself,
     # so callers never have to guess which one stashdb_id actually holds.
     local_performer_id: Optional[str] = None
+    # Set only for catalogue matches (see stashbox_utils.classify_universal_id)
+    # -- a performer discovered via a non-stash-box source (e.g. seekfans),
+    # with no stashbox metadata API to pull a cover/detail link from.
+    # `catalogue_url` is that source's own profile page; `profile_url` is a
+    # link to the actual external content site when the source has one
+    # (onlyfans.com for seekfans) -- not every future source will.
+    source: Optional[str] = None
+    catalogue_url: Optional[str] = None
+    profile_url: Optional[str] = None
 
 
 @dataclass
@@ -151,8 +161,10 @@ class FaceRecognizer:
         matches = []
         for candidate in result.matches:
             id_part = candidate.universal_id.split(":", 1)[1] if ":" in candidate.universal_id else candidate.universal_id
+            category = classify_universal_id(candidate.universal_id)
 
-            if candidate.universal_id.startswith("local:"):
+            source = catalogue_url = profile_url = None
+            if category == "local":
                 # Local-index match: id_part is the local Stash performer
                 # id, not a StashDB uuid. Use the real linked stashdb_id if
                 # this performer has one (so "already tagged" checks and
@@ -164,6 +176,19 @@ class FaceRecognizer:
                 country = None
                 image_url = local_info.get("image_url")
                 local_performer_id = id_part
+            elif category == "catalogue":
+                # Non-stash-box source (e.g. seekfans) -- id_part is the
+                # internal database performer id, not a StashDB uuid, and
+                # there's no stashbox metadata API to fetch a cover/link
+                # from, so pull everything from performers.json directly.
+                info = self.performers.get(candidate.universal_id, {})
+                stashdb_id = id_part
+                country = info.get("country")
+                image_url = info.get("image_url")
+                local_performer_id = None
+                source = info.get("source")
+                catalogue_url = info.get("catalogue_url")
+                profile_url = info.get("profile_url")
             else:
                 stashdb_id = id_part
                 country = self.performers.get(candidate.universal_id, {}).get("country")
@@ -179,6 +204,9 @@ class FaceRecognizer:
                 distance=candidate.distance,
                 combined_score=candidate.combined_distance,
                 local_performer_id=local_performer_id,
+                source=source,
+                catalogue_url=catalogue_url,
+                profile_url=profile_url,
             ))
 
         return matches, result, embedding

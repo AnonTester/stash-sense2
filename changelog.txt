@@ -1,3 +1,18 @@
+## 2026-08-22
+
+### 0.13.3
+- Add: performers discovered via a non-stash-box catalogue source (e.g.
+  seekfans.com's OnlyFans directory) now render and act correctly as
+  matches -- previously they were silently dropped from the published
+  database entirely (see stash-sense2-data-gen's export_json.py fix), so
+  none of them were ever actually matchable. Catalogue matches show their
+  source's own cover image and link out to the real external profile
+  (e.g. onlyfans.com) when the source has one, rather than a stashbox
+  page. "Add to Stash" for a catalogue match creates the performer from
+  the source's limited metadata (name, country, cover, urls) with a
+  "(Source)" disambiguation and the external username as an alias, since
+  there's no stashbox API to pull full details from.
+
 ## 2026-08-21
 
 ### 0.13.2

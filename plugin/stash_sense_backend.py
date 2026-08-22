@@ -83,6 +83,17 @@ def main():
             "endpoint": args.get("endpoint", ""),
             "stashdb_id": args.get("stashdb_id", ""),
         }, timeout=30)
+    elif mode == "create_performer_from_catalogue":
+        result = sidecar_post(sidecar_url, "/stash/create-performer-from-catalogue", {
+            "scene_id": str(args.get("scene_id", "")),
+            "image_id": str(args.get("image_id", "")),
+            "source": args.get("source", ""),
+            "name": args.get("name", ""),
+            "country": args.get("country") or None,
+            "image_url": args.get("image_url") or None,
+            "catalogue_url": args.get("catalogue_url") or None,
+            "profile_url": args.get("profile_url") or None,
+        }, timeout=30)
     elif mode == "link_performer_stashbox":
         result = sidecar_post(sidecar_url, "/stash/link-performer", {
             "scene_id": str(args.get("scene_id", "")),
