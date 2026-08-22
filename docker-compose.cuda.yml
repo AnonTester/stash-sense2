@@ -4,6 +4,13 @@
 # the NVIDIA Container Toolkit on the host (see README's GPU
 # Troubleshooting section).
 #
+# Pre-built images are published to GHCR on every tagged release -- no
+# local build needed:
+#
+#   docker compose -f docker-compose.cuda.yml up -d
+#
+# To build locally instead (e.g. testing an unreleased change):
+#
 #   docker compose -f docker-compose.cuda.yml build
 #   docker compose -f docker-compose.cuda.yml up -d
 services:
@@ -11,7 +18,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.cuda
-    image: stash-sense2-cuda:local
+    image: ghcr.io/anontester/stash-sense2-cuda:latest
     container_name: stash-sense2-cuda
     restart: unless-stopped
     ports:

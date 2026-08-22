@@ -1,10 +1,12 @@
-# Stash Sense
+# Stash Sense 2
 
 ML-powered performer identification and library curation for [Stash](https://github.com/stashapp/stash). Identifies performers in your scenes using face recognition, detects duplicate scenes, syncs upstream metadata changes, and surfaces actionable recommendations — all running locally on your hardware.
 
-## What is Stash Sense?
+This is a fork of [carrotwaxr/stash-sense](https://github.com/carrotwaxr/stash-sense), which appears to be abandoned (no activity in 6+ months, open issues unaddressed). Since forking, the underlying face recognition pipeline has been fully replaced (InsightFace's `buffalo_l` + a single usearch index, migrated from the original's RetinaFace + dual FaceNet512/ArcFace + Voyager setup), alongside UI changes — see `changelog.txt` for the version-by-version history.
 
-Stash Sense is a sidecar service and Stash plugin that brings ML-powered analysis to your Stash library:
+## What is Stash Sense 2?
+
+Stash Sense 2 is a sidecar service and Stash plugin that brings ML-powered analysis to your Stash library:
 
 - **Face Recognition** — Identify performers in scenes and images using InsightFace's buffalo_l model. Matches against a database of 150,000+ performers sourced from StashDB, ThePornDB, and other stash-box endpoints, plus non-stash-box catalogue sources
 - **Duplicate Scene Detection** — Find duplicate scenes using face fingerprints, stash-box IDs, and metadata overlap — catches duplicates that phash matching misses
@@ -15,7 +17,11 @@ Stash Sense is a sidecar service and Stash plugin that brings ML-powered analysi
 
 ## Quick Start
 
-There's no pre-built image to `docker pull` yet — build the sidecar locally from this repo with the Dockerfile matching your hardware, then install the plugin from the [stash-plugin-repo](https://github.com/AnonTester/stash-plugin-repo) index.
+Pre-built images for all 3 hardware variants are published to GHCR on every tagged release — no local build needed, just `docker compose up -d` (see below). Building locally is still fully supported and is what `docker compose build` does, if you'd rather not pull a pre-built image or are testing an unreleased change.
+
+> **This repo is currently private**, so its GHCR images are private too (GitHub ties package visibility to the repo). Pulling them needs `docker login ghcr.io` with a PAT that has `read:packages` scope until the repo goes public. If you don't have access, `docker compose build` works from a clone regardless.
+
+Install the plugin from the [stash-plugin-repo](https://github.com/AnonTester/stash-plugin-repo) index (step 3 below) either way.
 
 ### Prerequisites
 
@@ -23,7 +29,7 @@ There's no pre-built image to `docker pull` yet — build the sidecar locally fr
 2. **Docker** with **Docker Compose** installed on your system
 3. A GPU is optional — NVIDIA (CUDA) or AMD (ROCm) both work, or run CPU-only (slower, but the most portable and the least to go wrong)
 
-### 1. Build and start the container
+### 1. Start the container
 
 Clone this repo, then set your Stash connection details:
 
@@ -34,25 +40,27 @@ cp api/.env.example .env
 # edit .env: fill in STASH_URL and STASH_API_KEY
 ```
 
-Pick the compose file matching your hardware and build+start:
+Pick the compose file matching your hardware:
 
-| Hardware | Compose file | Dockerfile used | Status |
-|----------|--------------|------------------|--------|
-| CPU only | `docker-compose.yml` | `Dockerfile` | Tested, most portable |
-| AMD GPU (ROCm) | `docker-compose.rocm.yml` | `Dockerfile.rocm` | Tested (reference deployment: Radeon 780M / gfx1103) |
-| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `Dockerfile.cuda` | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+| Hardware | Compose file | GHCR image | Status |
+|----------|--------------|------------|--------|
+| CPU only | `docker-compose.yml` | `ghcr.io/anontester/stash-sense2` | Tested, most portable |
+| AMD GPU (ROCm) | `docker-compose.rocm.yml` | `ghcr.io/anontester/stash-sense2-rocm` | Tested (reference deployment: Radeon 780M / gfx1103) |
+| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+
+Each compose file's `image:` already points at its GHCR image, so `up -d` alone pulls and runs it — `build:` is also there if you'd rather build locally instead.
 
 ```bash
-# CPU
+# CPU — pull and start
+docker compose up -d
+# ...or build locally instead of pulling:
 docker compose build && docker compose up -d
 
-# AMD (ROCm) — needs the NVIDIA-equivalent ROCm userspace on the host,
-# see GPU Troubleshooting below for /dev/kfd and /dev/dri access
-docker compose -f docker-compose.rocm.yml build
+# AMD (ROCm) — needs the ROCm userspace on the host, see GPU
+# Troubleshooting below for /dev/kfd and /dev/dri access
 docker compose -f docker-compose.rocm.yml up -d
 
 # NVIDIA (CUDA) — needs the NVIDIA Container Toolkit on the host
-docker compose -f docker-compose.cuda.yml build
 docker compose -f docker-compose.cuda.yml up -d
 ```
 
@@ -72,16 +80,16 @@ In Stash, go to **Settings > Plugins > Available Plugins**, click **Add Source**
 
 | Field | Value |
 |-------|-------|
-| Name | Stash Sense |
+| Name | Stash Sense 2 |
 | Source URL | `https://raw.githubusercontent.com/AnonTester/stash-plugin-repo/main/index.yml` |
 
-The **Stash Sense** plugin will now show up in the Available Plugins list alongside any other plugins from that index — install it, then configure the sidecar URL (`http://your-host:6960`) in its settings.
+The **Stash Sense 2** plugin will now show up in the Available Plugins list alongside any other plugins from that index — install it, then configure the sidecar URL (`http://your-host:6960`) in its settings.
 
 To update later: **Settings > Plugins > Installed Plugins**, click **Check for Updates** (or reload the plugin source) — new plugin releases show up there the same way, whenever a new version lands in the [stash-plugin-repo index](https://github.com/AnonTester/stash-plugin-repo).
 
 ### 4. Download database and models
 
-Navigate to `/plugins/stash-sense` in Stash to open the Stash Sense dashboard. From the **Settings** tab:
+Navigate to `/plugins/stash-sense2` in Stash to open the Stash Sense 2 dashboard. From the **Settings** tab:
 
 1. **Database** — Click **Update** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
 2. **Models** — Click **Download All** to download the required ONNX models (buffalo_l face recognition, ~200 MB)
@@ -130,7 +138,7 @@ Check your host's render node with `ls /dev/dri/` — use `renderD129` if you ha
 
 ### Database Updates
 
-Stash Sense checks for new database releases automatically. To update:
+Stash Sense 2 checks for new database releases automatically. To update:
 
 1. Open the **Settings** tab in the plugin
 2. Check the **Database** section for available updates
@@ -138,7 +146,15 @@ Stash Sense checks for new database releases automatically. To update:
 
 ### Container Updates
 
-No pre-built image to pull yet — pull the latest source and rebuild with the same compose file you started with (data under `./api/data` and the named `insightface` volume both persist across a rebuild):
+If you're running a pre-built GHCR image, pull the new tag and recreate (data under `./api/data` and the named `insightface` volume both persist):
+
+```bash
+docker compose pull && docker compose up -d          # CPU
+docker compose -f docker-compose.rocm.yml pull && docker compose -f docker-compose.rocm.yml up -d   # AMD
+docker compose -f docker-compose.cuda.yml pull && docker compose -f docker-compose.cuda.yml up -d   # NVIDIA
+```
+
+If you built locally instead, pull the latest source and rebuild with the same compose file you started with:
 
 ```bash
 git pull
@@ -148,10 +164,6 @@ docker compose -f docker-compose.cuda.yml build && docker compose -f docker-comp
 ```
 
 Your recommendation history and settings are stored separately from the face database and persist across both types of updates.
-
-## Documentation
-
-This README is the source of truth for setup and configuration. (An inherited `docs/` mkdocs site from the upstream project this was forked from was removed — it was never adapted for this fork and no GitHub Pages deployment of it ever existed.)
 
 ## Requirements
 

@@ -3,11 +3,18 @@
 # (NVIDIA) and docker-compose.rocm.yml (AMD, tested on the reference
 # deployment) for GPU-accelerated inference instead.
 #
+# Pre-built images are published to GHCR on every tagged release -- no
+# local build needed:
+#
+#   docker compose up -d
+#
+# To build locally instead (e.g. testing an unreleased change):
+#
 #   docker compose build && docker compose up -d
 services:
   stash-sense2:
     build: .
-    image: stash-sense2:local
+    image: ghcr.io/anontester/stash-sense2:latest
     container_name: stash-sense2
     restart: unless-stopped
     ports:

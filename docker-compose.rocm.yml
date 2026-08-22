@@ -2,6 +2,13 @@
 # deployment (AMD Radeon 780M / gfx1103). See Dockerfile.rocm for the full
 # story on the package choices this needed.
 #
+# Pre-built images are published to GHCR on every tagged release -- no
+# local build needed:
+#
+#   docker compose -f docker-compose.rocm.yml up -d
+#
+# To build locally instead (e.g. testing an unreleased change):
+#
 #   docker compose -f docker-compose.rocm.yml build
 #   docker compose -f docker-compose.rocm.yml up -d
 services:
@@ -9,7 +16,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.rocm
-    image: stash-sense2-rocm:local
+    image: ghcr.io/anontester/stash-sense2-rocm:latest
     container_name: stash-sense2-rocm
     restart: unless-stopped
     ports:
