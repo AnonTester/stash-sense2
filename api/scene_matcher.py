@@ -227,10 +227,10 @@ def cluster_faces_by_person(
     for frame_idx, result in all_results:
         # Use stored embedding if available, otherwise recompute
         if result.embedding is not None:
-            face_vector = np.concatenate([result.embedding.facenet, result.embedding.arcface])
+            face_vector = result.embedding.embedding
         else:
             embedding = recognizer.generator.get_embedding(result.face.image)
-            face_vector = np.concatenate([embedding.facenet, embedding.arcface])
+            face_vector = embedding.embedding
 
         # Find nearest cluster by cosine distance
         best_cluster_idx = -1
