@@ -8,7 +8,7 @@
   // Plugin configuration
   const PLUGIN_ID = 'stash-sense';
   const PLUGIN_NAME = 'Stash Sense';
-  const PLUGIN_VERSION = '0.13.3';
+  const PLUGIN_VERSION = '0.13.4';
 
   // Default settings
   const DEFAULTS = {

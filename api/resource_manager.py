@@ -63,16 +63,33 @@ class ResourceManager:
     after being idle beyond the configured timeout.
     """
 
-    def __init__(self, idle_timeout_seconds: float = 1800.0):
+    def __init__(self, idle_timeout_seconds: Optional[float] = 1800.0):
         """Initialize the resource manager.
 
         Args:
             idle_timeout_seconds: Seconds of idle time before a resource group
-                is unloaded. Default is 30 minutes (1800 seconds).
+                is unloaded. Default is 30 minutes (1800 seconds). None or
+                <= 0 disables idle unloading entirely. This is just the
+                startup value -- see set_idle_timeout() for changing it live
+                (e.g. from a Settings value main.py's idle checker re-reads
+                every poll).
         """
-        self._idle_timeout = idle_timeout_seconds
+        self._idle_timeout = idle_timeout_seconds if (idle_timeout_seconds is not None and idle_timeout_seconds > 0) else None
         self._groups: dict[str, ResourceGroup] = {}
         self._lock = threading.Lock()
+
+    def set_idle_timeout(self, seconds: Optional[float]) -> None:
+        """Update the idle-unload timeout (e.g. from a live Settings value).
+
+        Args:
+            seconds: New idle timeout in seconds. None or <= 0 disables
+                idle unloading entirely -- check_idle() becomes a no-op
+                until a positive value is set again. Safe to call every
+                poll (see main.py's _idle_checker); does not itself
+                unload anything or reset any group's last_access.
+        """
+        with self._lock:
+            self._idle_timeout = seconds if (seconds is not None and seconds > 0) else None
 
     def register(self, name: str, loader: Callable[[], Any], unloader: Callable[[], None]) -> None:
         """Register a resource group with its loader and unloader functions.
@@ -184,8 +201,12 @@ class ResourceManager:
 
         Iterates all registered groups and unloads any that are loaded and
         have not been accessed within idle_timeout_seconds. Calls gc.collect()
-        after unloading any resources.
+        after unloading any resources. No-op entirely if idle unloading is
+        disabled (see set_idle_timeout).
         """
+        if self._idle_timeout is None:
+            return
+
         now = time.monotonic()
         unloaded_any = False
 
@@ -294,7 +315,7 @@ _resource_manager: Optional[ResourceManager] = None
 
 
 def init_resource_manager(
-    idle_timeout_seconds: float = 1800.0,
+    idle_timeout_seconds: Optional[float] = 1800.0,
 ) -> ResourceManager:
     """Initialize the global resource manager. Called once at startup.
 

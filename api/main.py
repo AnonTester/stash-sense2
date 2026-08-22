@@ -243,12 +243,19 @@ def reload_database(data_dir: Path) -> bool:
 async def _idle_checker(resource_mgr: ResourceManager, interval: float = 60.0) -> None:
     """Background task that periodically checks for idle resource groups.
 
-    Runs forever until cancelled. Calls resource_mgr.check_idle() every
-    *interval* seconds to unload resources that have been idle beyond their
-    configured timeout.
+    Runs forever until cancelled. Every *interval* seconds, re-reads the
+    live "idle_unload_minutes" Setting (so a change takes effect on the
+    next poll, no restart needed -- 0 disables idle unloading entirely)
+    and calls resource_mgr.check_idle() to unload resources idle beyond it.
     """
     while True:
         await asyncio.sleep(interval)
+        try:
+            from settings import get_setting
+            minutes = get_setting("idle_unload_minutes")
+            resource_mgr.set_idle_timeout(minutes * 60 if minutes else None)
+        except RuntimeError:
+            pass  # Settings not initialized yet (very early startup) -- keep the current timeout
         resource_mgr.check_idle()
 
 
@@ -279,8 +286,12 @@ async def lifespan(app: FastAPI):
               f"{startup_manifest.get('performer_count', 0):,} performers, "
               f"{startup_manifest.get('face_count', 0):,} faces")
 
-    # Initialize resource manager for lazy loading of heavy resources
-    resource_mgr = init_resource_manager(idle_timeout_seconds=1800.0)
+    # Initialize resource manager for lazy loading of heavy resources.
+    # 3600s (60min) matches the "idle_unload_minutes" setting's own
+    # fallback -- this startup value only matters for the brief window
+    # before _idle_checker's first poll re-reads the live setting (which
+    # isn't available yet this early -- init_settings() runs later below).
+    resource_mgr = init_resource_manager(idle_timeout_seconds=3600.0)
     resource_mgr.register(
         FACE_RECOGNITION_RESOURCE,
         loader=lambda: _load_face_recognition(data_dir),
@@ -415,7 +426,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.13.3",
+    version="0.13.4",
     lifespan=lifespan,
 )
 

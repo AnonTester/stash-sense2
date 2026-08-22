@@ -1,5 +1,14 @@
 ## 2026-08-22
 
+### 0.13.4
+- Add: "Idle Unload Timeout" setting (Settings -> Performance) controlling
+  how long face recognition sits idle before being unloaded from memory
+  (freeing it up, at the cost of a reload delay on the next request).
+  Previously hardcoded at 30 minutes with no way to change it; now
+  defaults to 60 minutes and can be set to 0 to disable idle unloading
+  entirely (keep it loaded once started, until the sidecar restarts).
+  Takes effect live, no restart needed.
+
 ### 0.13.3
 - Add: performers discovered via a non-stash-box catalogue source (e.g.
   seekfans.com's OnlyFans directory) now render and act correctly as

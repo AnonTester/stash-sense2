@@ -93,6 +93,12 @@ _define("detection_size", "Detection Resolution",
         "Face detection input resolution (pixels). Higher = more accurate but slower",
         "performance", SettingType.INT, fallback=640, min_val=160, max_val=1280)
 
+_define("idle_unload_minutes", "Idle Unload Timeout",
+        "Minutes of inactivity before face recognition models are unloaded from "
+        "memory/GPU to free resources (reloaded automatically on the next request, "
+        "with a one-time delay for that request). Set to 0 to never unload once loaded.",
+        "performance", SettingType.INT, fallback=60, min_val=0, max_val=1440)
+
 # -- Rate Limits --
 _define("stash_api_rate", "Stash API Rate",
         "Maximum requests per second to local Stash instance",
