@@ -26,6 +26,16 @@ jobs:
             image: stash-sense2-cuda
 
     steps:
+      # ROCm's own packages need ~15GB, twice over (once per build stage in
+      # Dockerfile.rocm's multi-stage build) -- GitHub's standard runner
+      # only has ~14GB free by default, so the ROCm build fails with "No
+      # space left on device" partway through dpkg unpacking without this.
+      # Harmless (a couple minutes) for the other two variants.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+
       - name: Checkout repository
         uses: actions/checkout@v7
 
