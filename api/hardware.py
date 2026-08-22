@@ -32,7 +32,11 @@ class HardwareProfile:
     def summary(self) -> str:
         """One-line hardware summary for startup log."""
         if self.gpu_available:
-            gpu_info = f"{self.gpu_name} ({self.gpu_vram_mb}MB VRAM)"
+            gpu_info = (
+                f"{self.gpu_name} ({self.gpu_vram_mb}MB VRAM)"
+                if self.gpu_vram_mb is not None
+                else str(self.gpu_name)
+            )
         else:
             gpu_info = "No GPU"
         return (
