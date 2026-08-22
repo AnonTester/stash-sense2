@@ -171,7 +171,7 @@ class TestTattooAdjustment:
         assert result == 1.0
 
     def test_query_has_tattoos_candidate_has_no_embeddings_returns_penalty(self):
-        """Test that query with tattoos but candidate without embeddings returns 0.7."""
+        """Test that query with tattoos but candidate without embeddings returns 0.97."""
         from signal_scoring import tattoo_adjustment
 
         query_result = TattooResult(
@@ -191,10 +191,10 @@ class TestTattooAdjustment:
             tattoo_scores={}, has_tattoo_embeddings=False,
         )
 
-        assert result == 0.7
+        assert result == 0.97
 
     def test_query_no_tattoos_candidate_has_embeddings_returns_slight_penalty(self):
-        """Test that query without tattoos but candidate with embeddings returns 0.95."""
+        """Test that query without tattoos but candidate with embeddings returns 0.98."""
         from signal_scoring import tattoo_adjustment
 
         query_result = TattooResult(
@@ -208,10 +208,10 @@ class TestTattooAdjustment:
             tattoo_scores={}, has_tattoo_embeddings=True,
         )
 
-        assert result == 0.95
+        assert result == 0.98
 
     def test_high_similarity_returns_strong_boost(self):
-        """Test that high tattoo similarity (>0.7) returns 1.3-1.5 boost."""
+        """Test that high tattoo similarity (>0.7) returns a modest 1.05-1.08 boost."""
         from signal_scoring import tattoo_adjustment
 
         query_result = TattooResult(
@@ -232,10 +232,10 @@ class TestTattooAdjustment:
             has_tattoo_embeddings=True,
         )
 
-        assert 1.3 <= result <= 1.5
+        assert 1.05 <= result <= 1.08
 
     def test_moderate_similarity_returns_modest_boost(self):
-        """Test that moderate tattoo similarity (>0.5, <=0.7) returns 1.1."""
+        """Test that moderate tattoo similarity (>0.5, <=0.7) returns 1.03."""
         from signal_scoring import tattoo_adjustment
 
         query_result = TattooResult(
@@ -256,7 +256,7 @@ class TestTattooAdjustment:
             has_tattoo_embeddings=True,
         )
 
-        assert result == 1.1
+        assert result == 1.03
 
     def test_low_similarity_returns_neutral(self):
         """Test that low similarity (<=0.5) with embeddings returns 1.0."""
@@ -300,7 +300,7 @@ class TestTattooAdjustment:
         assert result == 1.0
 
     def test_no_scores_dict_returns_penalty_if_no_embeddings(self):
-        """Test that missing scores dict with no embeddings returns penalty."""
+        """Test that missing scores dict with no embeddings returns the mild down-weight."""
         from signal_scoring import tattoo_adjustment
 
         query_result = TattooResult(
@@ -320,4 +320,4 @@ class TestTattooAdjustment:
             tattoo_scores=None, has_tattoo_embeddings=False,
         )
 
-        assert result == 0.7
+        assert result == 0.97

@@ -1,5 +1,17 @@
 ## 2026-08-22
 
+### 0.13.7
+- Change: tattoo signal now nudges face-match ranking within roughly
+  +-8% instead of the old 0.7-1.5x range -- a real matching-accuracy pass
+  found the wider range net-negative (it moved very few scenes, and
+  every move was neutral-to-harmful, including flipping at least one
+  already-correct face match to a wrong one). Tattoo signal was always
+  meant as a corroborating/tie-breaking signal, not a strong identifier
+  on its own; the multiplier range now reflects that. Also softened the
+  "candidate has no reference embedding" case from an outright penalty
+  to a mild one -- absence of a reference embedding usually just means
+  nobody's built one yet, not evidence the candidate lacks a tattoo.
+
 ### 0.13.6
 - Change: the tattoo detector now loads whenever its model file is
   installed, regardless of the "Tattoo Detection" Settings toggle. That
