@@ -36,7 +36,14 @@ services:
       # `rocminfo`'s reported gfx version on your host if inference fails
       # to initialize. Leave unset (remove this line) if your card is
       # fully supported and doesn't need an override at all.
-      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0}
+      #
+      # On gfx1103 (Radeon 780M), 11.0.0 alone caused intermittent
+      # "GPU Hang" crashes on the reference deployment during MIOpen's
+      # kernel warmup -- fixed by pairing this with the HOST kernel
+      # parameter `amdgpu.cwsr_enable=0` (add to GRUB_CMDLINE_LINUX_DEFAULT,
+      # `update-grub`, reboot) and bumping this to 11.0.3. If you hit the
+      # same crash on this card, try that combination.
+      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.3}
     devices:
       - /dev/kfd
       - /dev/dri
