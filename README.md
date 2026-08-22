@@ -19,8 +19,6 @@ Stash Sense 2 is a sidecar service and Stash plugin that brings ML-powered analy
 
 Pre-built images for all 3 hardware variants are published to GHCR on every tagged release — no local build needed, just `docker compose up -d` (see below). Building locally is still fully supported and is what `docker compose build` does, if you'd rather not pull a pre-built image or are testing an unreleased change.
 
-> **This repo is currently private**, so its GHCR images are private too (GitHub ties package visibility to the repo). Pulling them needs `docker login ghcr.io` with a PAT that has `read:packages` scope until the repo goes public. If you don't have access, `docker compose build` works from a clone regardless.
-
 Install the plugin from the [stash-plugin-repo](https://github.com/AnonTester/stash-plugin-repo) index (step 3 below) either way.
 
 ### Prerequisites

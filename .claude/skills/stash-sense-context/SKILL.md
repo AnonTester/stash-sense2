@@ -106,7 +106,7 @@ buffalo_l ONNX models are downloaded at runtime (`model_manager.py`), not baked 
 
 ## GitHub
 
-- Repo: `AnonTester/stash-sense2` (private while unproven — see CLAUDE.md's Repository Policy)
+- Repo: `AnonTester/stash-sense2` (public — see CLAUDE.md's Public Repository Policy)
 - Data repo (public): `AnonTester/stash-sense2-data` — GitHub Releases host `performers.db` + usearch index + models
 - Data-gen repo (private): `AnonTester/stash-sense2-data-gen` — builds `performers.db`, crawls stash-box endpoints, publishes releases
 - Public plugin index: `AnonTester/stash-plugin-repo`
