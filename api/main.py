@@ -117,20 +117,29 @@ def _load_face_recognition(data_dir: Path) -> dict:
         print("Initializing body proportion extractor...")
         body_extractor = BodyProportionExtractor()
 
-    # Tattoo signal: "auto" enables if index files exist, "true" always enables
+    # Tattoo signal: detection and matching are separate capabilities that
+    # used to be conflated here -- "auto" required the *matching* embedding
+    # index to exist before the *detector* was even constructed, so with no
+    # index populated yet (the normal state today -- nothing has built tattoo
+    # reference embeddings), the detector silently never loaded regardless of
+    # per-request use_tattoo=True. Detection only needs the YOLO model file;
+    # the index (checked below, independently) gates matching on top of it.
     enable_tattoo = multi_signal_config.enable_tattoo
+    tattoo_det_path = mgr.get_model_path("tattoo_yolov5s")
+    tattoo_model_available = tattoo_det_path is not None or Path(
+        os.environ.get("DATA_DIR", "./data")
+    ).joinpath("models", "tattoo_yolov5s.onnx").exists()
     tattoo_enabled = (
         enable_tattoo == "true"
-        or (enable_tattoo == "auto"
-            and db_config.tattoo_index_path.exists()
-            and db_config.tattoo_json_path.exists())
+        or (enable_tattoo == "auto" and tattoo_model_available)
     )
 
     tattoo_detector = None
     tattoo_matcher = None
-    if tattoo_enabled:
-        # Use model manager paths for tattoo models
-        tattoo_det_path = mgr.get_model_path("tattoo_yolov5s")
+    if tattoo_enabled and not tattoo_model_available:
+        print("Tattoo detection enabled but tattoo_yolov5s model not installed -- "
+              "download it via POST /models/download/tattoo_yolov5s. Skipping.")
+    elif tattoo_enabled:
         tattoo_emb_path = mgr.get_model_path("tattoo_clip_vitb32")
 
         print("Initializing tattoo detector...")
@@ -147,6 +156,8 @@ def _load_face_recognition(data_dir: Path) -> dict:
                 embedder_model_path=str(tattoo_emb_path) if tattoo_emb_path else None,
             )
             print(f"Tattoo embedding matching ready: {len(recognizer.tattoo_index)} embeddings loaded")
+        else:
+            print("Tattoo detector ready (no embedding index yet -- detection only, no matching)")
 
     multi_signal_matcher = None
     if recognizer.db_reader and (body_extractor or tattoo_detector):
@@ -426,7 +437,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.13.4",
+    version="0.13.5",
     lifespan=lifespan,
 )
 

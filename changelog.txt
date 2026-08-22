@@ -7,6 +7,16 @@
   tooltip names the running/required versions when the sidecar is
   reachable but out of date; a matching console warning is also logged.
   Update the sidecar container to clear it.
+- Fix: tattoo detection never actually ran, regardless of the
+  `use_tattoo` request flag or the "Tattoo Detection" Settings toggle --
+  startup wrongly required a tattoo *matching* index (which nothing has
+  ever populated) before it would even construct the *detector*, so the
+  YOLO model was never loaded. Detection and matching are now decoupled:
+  the detector loads whenever its model file is installed, independent
+  of whether reference embeddings exist for matching on top of it. A
+  `use_tattoo=True` request against a sidecar where the detector still
+  isn't loaded (toggle off, or model not installed) now surfaces a clear
+  error in the response instead of silently reporting zero tattoos found.
 
 ### 0.13.4
 - Add: "Idle Unload Timeout" setting (Settings -> Performance) controlling

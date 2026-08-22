@@ -1579,6 +1579,21 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     }
     print(f"[identify_scene] Timing: {timing_data}")
 
+    response_errors = list(extraction_result.errors[:5]) if extraction_result.errors else []
+    if request.use_tattoo and not (_multi_signal_matcher and _multi_signal_matcher.tattoo_detector):
+        # use_tattoo=True is a request-level flag, but the detector itself
+        # is only ever constructed once at process startup (see main.py) --
+        # if the "Tattoo Detection" Settings toggle was off, or the model
+        # file wasn't installed, at that point, no per-request flag can
+        # activate it. Surface that explicitly rather than silently
+        # returning tattoos_detected=0 for every person, which looks
+        # identical to "detector ran and found nothing."
+        response_errors.append(
+            "use_tattoo=True was requested but the tattoo detector isn't loaded on this "
+            "sidecar (Settings > Signals > Tattoo Detection is off, or the tattoo_yolov5s "
+            "model isn't installed) -- restart the sidecar after enabling/installing it."
+        )
+
     _set_stage(request.scene_id, "done")
     return SceneIdentifyResponse(
         scene_id=request.scene_id,
@@ -1587,7 +1602,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         faces_detected=total_faces,
         faces_after_filter=filtered_faces,
         persons=persons,
-        errors=extraction_result.errors[:5] if extraction_result.errors else [],
+        errors=response_errors[:5],
         fingerprint_saved=fingerprint_saved,
         fingerprint_error=fingerprint_error,
         timing=timing_data,
