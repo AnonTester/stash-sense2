@@ -1,5 +1,13 @@
 ## 2026-08-22
 
+### 0.14.4
+- Remove the temporary orange border around the Identify button. It was
+  meant to distinguish this plugin's button from v1's while both were
+  installed side by side during testing, but (like the button-collision
+  bug fixed in 0.14.3) it targeted the shared, unscoped `.ss-identify-btn`
+  class, so it showed on both plugins' buttons instead of just this one.
+  No longer needed as this nears full release.
+
 ### 0.14.3
 - Fix: with v1 (stash-sense) and this plugin both installed, only one
   scene/image/gallery "Identify" button ever appeared -- both plugins use

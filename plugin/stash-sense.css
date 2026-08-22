@@ -1,13 +1,5 @@
 /* Stash Sense Plugin Styles */
 
-/* TEMPORARY (buffalo_l + usearch migration testing): orange border marks
-   this as the v2 sidecar's button, so it's visually distinguishable from
-   the v1 plugin's identical button when both are installed at once on the
-   same Stash instance. Remove this rule once v2 replaces v1 for real. */
-.ss-identify-btn {
-  border: 2px solid #ff8c00 !important;
-}
-
 /* Identify Button (icon-only) */
 .ss-identify-btn {
   display: inline-flex;
