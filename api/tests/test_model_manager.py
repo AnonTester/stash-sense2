@@ -27,7 +27,7 @@ from model_manager import (
 
 SAMPLE_MANIFEST = {
     "version": 2,
-    "repo": "carrotwaxr/stash-sense",
+    "repo": "AnonTester/stash-sense2-data",
     "release_tag": "models",
     "models": {
         "test_model_a": {
@@ -171,7 +171,7 @@ class TestGetDownloadUrl:
         """URL should follow GitHub release asset format."""
         url = mgr.get_download_url("test_model_a")
         expected = (
-            "https://github.com/carrotwaxr/stash-sense/releases/download/"
+            "https://github.com/AnonTester/stash-sense2-data/releases/download/"
             "models/test_model_a.onnx"
         )
         assert url == expected
@@ -300,7 +300,7 @@ class TestDownloadModel:
 
         manifest = {
             "version": 2,
-            "repo": "carrotwaxr/stash-sense",
+            "repo": "AnonTester/stash-sense2-data",
             "release_tag": "models",
             "models": {
                 "test_model": {

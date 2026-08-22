@@ -10,10 +10,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 main_ver=$(grep -oP 'version="\K[^"]+' "$ROOT/api/main.py")
 settings_ver=$(grep -oP '_version: str = "\K[^"]+' "$ROOT/api/settings_router.py")
 plugin_ver=$(grep -oP '^version: \K.+' "$ROOT/plugin/stash-sense.yml")
+core_js_ver=$(grep -oP "const PLUGIN_VERSION = '\K[^']+" "$ROOT/plugin/stash-sense-core.js")
 
-echo "api/main.py:            $main_ver"
-echo "api/settings_router.py: $settings_ver"
-echo "plugin/stash-sense.yml: $plugin_ver"
+echo "api/main.py:                $main_ver"
+echo "api/settings_router.py:     $settings_ver"
+echo "plugin/stash-sense.yml:     $plugin_ver"
+echo "plugin/stash-sense-core.js: $core_js_ver"
 
 errors=0
 
@@ -24,6 +26,11 @@ fi
 
 if [[ "$main_ver" != "$plugin_ver" ]]; then
   echo "ERROR: main.py ($main_ver) != stash-sense.yml ($plugin_ver)"
+  errors=1
+fi
+
+if [[ "$main_ver" != "$core_js_ver" ]]; then
+  echo "ERROR: main.py ($main_ver) != stash-sense-core.js ($core_js_ver)"
   errors=1
 fi
 

@@ -151,7 +151,7 @@ Your recommendation history and settings are stored separately from the face dat
 
 ## Documentation
 
-This README is the current source of truth for setup and configuration. The `docs/` folder in this repo is inherited from the upstream project this was forked from and hasn't been fully updated for the buffalo_l/usearch migration yet — treat it as unreliable until that's done.
+This README is the source of truth for setup and configuration. (An inherited `docs/` mkdocs site from the upstream project this was forked from was removed — it was never adapted for this fork and no GitHub Pages deployment of it ever existed.)
 
 ## Requirements
 
@@ -170,7 +170,6 @@ This README is the current source of truth for setup and configuration. The `doc
 |---------|----------|
 | `docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]]` | Install `nvidia-container-toolkit` and restart Docker |
 | GPU not detected inside container | Verify with `nvidia-smi` on the host; ensure the toolkit is configured: `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
-| unRAID | Add `--runtime=nvidia --gpus all` in **Extra Parameters** on the Docker container config page |
 
 **AMD (ROCm):** `docker-compose.rocm.yml` maps `/dev/kfd` and `/dev/dri` and sets `security_opt: seccomp=unconfined` — no separate toolkit install needed beyond the host having a working kernel driver for your card (`rocminfo` should list your GPU). If your card isn't on ROCm's officially supported list (e.g. integrated/APU parts like the Radeon 780M this was tested on), you may need `HSA_OVERRIDE_GFX_VERSION` set to the nearest supported target — check `rocminfo`'s reported `gfx` version. This is a compose-level environment variable (`docker-compose.rocm.yml`'s `HSA_OVERRIDE_GFX_VERSION`, defaulting to the reference deployment's `11.0.3`), not baked into the image, so set it to match *your* card (or delete the line if your card doesn't need an override) without needing to rebuild.
 

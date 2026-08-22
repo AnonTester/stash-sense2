@@ -57,8 +57,11 @@ git push origin vX.Y.Z-beta.N
 ## What Happens Next
 
 GitHub Actions (`.github/workflows/docker-build.yml`) triggers on tag push:
-1. Builds Docker image from `./Dockerfile`
-2. Pushes to Docker Hub: `carrotwaxr/stash-sense` with tags `X.Y.Z-beta.N` and `beta`
+1. Validates all version files match the tag (`scripts/check-version.sh`)
+2. Builds 3 image variants (CPU default, AMD ROCm, NVIDIA CUDA) and pushes
+   each to GitHub Container Registry under this repo's own namespace:
+   `ghcr.io/anontester/stash-sense2`, `ghcr.io/anontester/stash-sense2-rocm`,
+   `ghcr.io/anontester/stash-sense2-cuda` — tags `X.Y.Z-beta.N` and `beta`
 3. Creates GitHub Release (marked as prerelease)
 
 ## Common Mistakes to Avoid

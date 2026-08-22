@@ -87,7 +87,7 @@ Dev API at `http://localhost:5000`, docs at `http://localhost:5000/docs`. Requir
 
 Two components talking to one Stash instance:
 
-- **`api/`** — FastAPI sidecar (Python). Face recognition, recommendations engine, upstream sync. Runs as Docker container on unRAID at port 6960.
+- **`api/`** — FastAPI sidecar (Python). Face recognition, recommendations engine, upstream sync. Runs as a Docker container (see `docker-compose*.yml` for the CPU/ROCm/CUDA variants).
 - **`plugin/`** — JS/CSS/Python injected into Stash web UI. All sidecar calls go through `stash_sense_backend.py` to bypass browser CSP.
 
 **Two databases:**
