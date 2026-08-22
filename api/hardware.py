@@ -96,13 +96,14 @@ def _probe_gpu() -> tuple[bool, Optional[str], Optional[int]]:
     if "ROCMExecutionProvider" in providers:
         gpu_name = _probe_amd_gpu_name()
         if gpu_name is not None:
-            # VRAM isn't probed for AMD: rocminfo's pool sizes are shared
-            # system memory on the APUs this was tested against (Radeon
-            # 780M), not a fixed dedicated-VRAM figure, so reporting them
-            # as gpu_vram_mb would be misleading rather than just missing.
-            # _classify_tier() treats vram=None as "gpu-low", a safe
-            # default until this can distinguish APUs from discrete cards.
-            return True, gpu_name, None
+            # rocminfo's own pool sizes aren't used for VRAM: on the APUs
+            # this was tested against (Radeon 780M) they report shared
+            # system/GTT memory, not the fixed dedicated-VRAM carve-out.
+            # The amdgpu kernel driver's sysfs interface is authoritative
+            # for both APUs (BIOS-configured VRAM carve-out) and discrete
+            # cards (actual dedicated VRAM) instead.
+            gpu_vram_mb = _probe_amd_gpu_vram_mb()
+            return True, gpu_name, gpu_vram_mb
         logger.debug("ROCMExecutionProvider available but rocminfo found no usable AMD GPU")
 
     return False, None, None
@@ -139,6 +140,31 @@ def _probe_amd_gpu_name() -> Optional[str]:
         return None
     except Exception as e:
         logger.debug("rocminfo probe failed: %s", e)
+        return None
+
+
+def _probe_amd_gpu_vram_mb() -> Optional[int]:
+    """Read the amdgpu driver's dedicated VRAM size from sysfs.
+
+    /sys/class/drm/card*/device/mem_info_vram_total reports the real
+    dedicated-VRAM figure for both discrete cards and APUs (the BIOS-
+    configured carve-out, e.g. 4096MB on a Radeon 780M), unlike rocminfo's
+    pool sizes which reflect shared/GTT memory on APUs. Multiple `card*`
+    entries can exist (headless render nodes, other GPUs); the first one
+    with a populated, non-zero vram_total wins.
+    """
+    try:
+        import glob
+        for path in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")):
+            try:
+                vram_bytes = int(Path(path).read_text().strip())
+            except (OSError, ValueError):
+                continue
+            if vram_bytes > 0:
+                return vram_bytes // (1024 * 1024)
+        return None
+    except Exception as e:
+        logger.debug("amdgpu sysfs VRAM probe failed: %s", e)
         return None
 
 

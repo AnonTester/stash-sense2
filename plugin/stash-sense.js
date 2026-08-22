@@ -2159,6 +2159,7 @@
           attrs: {
             title: statusTitle('Identify performers using face recognition'),
             'data-default-title': 'Identify performers using face recognition',
+            'data-ss-plugin': SS.PLUGIN_ID,
           },
           innerHTML: `
             <span class="ss-btn-icon ${statusIconClass(status)}">
@@ -2220,7 +2221,10 @@
       updateButtonStatus(connected) {
         const versionInfo = SS.getSidecarVersionInfo();
         const outdated = connected === true && versionInfo && versionInfo.outdated;
-        document.querySelectorAll('.ss-identify-btn').forEach(btn => {
+        // Scoped to this plugin's own buttons (data-ss-plugin) -- v1 and v2
+        // share the .ss-identify-btn class name, so an unscoped selector
+        // would also flip v1's connection dot based on v2's sidecar status.
+        document.querySelectorAll(`.ss-identify-btn[data-ss-plugin="${SS.PLUGIN_ID}"]`).forEach(btn => {
           const icon = btn.querySelector('.ss-btn-icon');
           if (!icon) return;
           icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated');
@@ -2277,6 +2281,7 @@
           attrs: {
             title: statusTitle('Identify performers using face recognition'),
             'data-default-title': 'Identify performers using face recognition',
+            'data-ss-plugin': SS.PLUGIN_ID,
           },
           innerHTML: `
             <span class="ss-btn-icon ${statusIconClass(status)}">
@@ -2597,6 +2602,7 @@
           attrs: {
             title: statusTitle('Identify all performers in this gallery'),
             'data-default-title': 'Identify all performers in this gallery',
+            'data-ss-plugin': SS.PLUGIN_ID,
           },
           innerHTML: `
             <span class="ss-btn-icon ${statusIconClass(status)}">
@@ -2656,9 +2662,15 @@
       setTimeout(check, 300);
     }
 
-    // Inject button into the appropriate toolbar for the current page type
+    // Inject button into the appropriate toolbar for the current page type.
+    // Idempotency check is scoped to this plugin's own buttons
+    // (data-ss-plugin) -- v1 and v2 share the .ss-identify-btn class name,
+    // so an unscoped selector meant "whichever plugin's JS ran first wins,
+    // the other silently sees a button that isn't its own and never
+    // injects" when both are installed side by side.
+    const OWN_BUTTON_SELECTOR = `.ss-identify-btn[data-ss-plugin="${SS.PLUGIN_ID}"]`;
     function injectButton(route) {
-      if (document.querySelector('.ss-identify-btn')) return;
+      if (document.querySelector(OWN_BUTTON_SELECTOR)) return;
 
       const toolbarMap = {
         scene:   { selector: '.scene-toolbar-group:last-child',   create: () => FaceRecognition.createButton() },
@@ -2670,7 +2682,7 @@
       if (!config) return;
 
       waitForElement(config.selector, (container) => {
-        if (document.querySelector('.ss-identify-btn')) return; // re-check after wait
+        if (document.querySelector(OWN_BUTTON_SELECTOR)) return; // re-check after wait
         container.appendChild(config.create());
         console.log(`[${SS.PLUGIN_NAME}] Button injected into ${config.selector}`);
       });

@@ -1,5 +1,27 @@
 ## 2026-08-22
 
+### 0.14.3
+- Fix: with v1 (stash-sense) and this plugin both installed, only one
+  scene/image/gallery "Identify" button ever appeared -- both plugins use
+  the same `.ss-identify-btn` class (a leftover from this plugin being
+  forked from v1), and each one's idempotency check and connection-status
+  update used that unscoped class name, so whichever plugin injected its
+  button first silently blocked the other's. Buttons are now tagged with
+  a `data-ss-plugin` attribute and every check/update is scoped to this
+  plugin's own buttons only, so v1 and v2 can each show their own button
+  side by side.
+- Fix: AMD GPU VRAM was always reported as unknown (0.14.2 added AMD GPU
+  *detection* but not VRAM), which understated the tier on APUs like the
+  Radeon 780M that carve out a fixed chunk of system RAM as dedicated
+  VRAM (BIOS-configured, not the same as rocminfo's shared/GTT pool
+  sizes). Now reads the real figure from the amdgpu kernel driver's own
+  sysfs interface (`mem_info_vram_total`), so this hardware now correctly
+  classifies as "gpu-high" instead of "gpu-low".
+- Improvement: the Identification Database section of Settings only
+  refreshed its fingerprint/performer counts when the tab was switched
+  away from and back to, which could look like fingerprint counts weren't
+  updating after running an identify. Added a manual Refresh button.
+
 ### 0.14.2
 - Fix: 0.14.1's plugin-identity fix was incomplete -- the dashboard/plugin
   page router matched routes with `path.startsWith('/plugins/stash-sense')`,

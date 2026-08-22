@@ -439,7 +439,10 @@
     const section = SS.createElement('div', { className: 'ss-settings-category ss-id-database-settings-section' });
     section.innerHTML = `
       <div class="ss-settings-cat-header">
-        <h2 class="ss-settings-cat-title">Identification Database</h2>
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+          <h2 class="ss-settings-cat-title">Identification Database</h2>
+          <button class="ss-btn ss-btn-sm ss-id-db-refresh-btn" type="button" title="Re-fetch these stats -- they're a snapshot from when this tab was opened, not live.">Refresh</button>
+        </div>
         <p class="ss-settings-cat-desc">Face recognition database used for performer identification and duplicate detection.</p>
       </div>
       <div class="ss-settings-cat-body">
@@ -460,6 +463,19 @@
 
     const performerStatsEl = section.querySelector('.ss-id-database-stats-performer');
     const fingerprintStatsEl = section.querySelector('.ss-id-database-stats-fingerprint');
+
+    const refreshBtn = section.querySelector('.ss-id-db-refresh-btn');
+    if (refreshBtn) {
+      refreshBtn.addEventListener('click', async () => {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = 'Refreshing…';
+        // refreshIdDatabaseSection() replaces this whole section (including
+        // this button) with a freshly-rendered one -- nothing to reset here
+        // even on success; on failure, renderIdDatabaseSection()'s own
+        // try/catch swaps in error text instead of throwing.
+        await refreshIdDatabaseSection();
+      });
+    }
 
     try {
       const [fpStatus, dbInfo, updateInfo, fpJobs] = await Promise.all([
