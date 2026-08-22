@@ -1,5 +1,13 @@
 ## 2026-08-22
 
+### 0.13.5
+- Add: the plugin now warns when the sidecar container is running an
+  older version than this JS needs. The identify button's status dot
+  turns orange (distinct from the red "disconnected" state) and its
+  tooltip names the running/required versions when the sidecar is
+  reachable but out of date; a matching console warning is also logged.
+  Update the sidecar container to clear it.
+
 ### 0.13.4
 - Add: "Idle Unload Timeout" setting (Settings -> Performance) controlling
   how long face recognition sits idle before being unloaded from memory

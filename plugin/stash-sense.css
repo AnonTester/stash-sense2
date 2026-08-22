@@ -56,6 +56,10 @@
   background: #dc3545;
 }
 
+.ss-btn-icon.ss-outdated::after {
+  background: #fd7e14;
+}
+
 /* Floating button (fallback) */
 .ss-floating-btn {
   position: fixed;

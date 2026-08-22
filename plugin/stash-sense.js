@@ -22,6 +22,28 @@
   waitForCore(() => {
     const SS = window.StashSense;
 
+    // Shared between button-creation templates and updateButtonStatus() so
+    // the "outdated sidecar" indicator (distinct from plain connected/
+    // disconnected) is consistent everywhere a button gets its initial
+    // class/title, not just on the periodic health-check re-render.
+    function statusIconClass(status) {
+      const versionInfo = SS.getSidecarVersionInfo();
+      if (status === true && versionInfo && versionInfo.outdated) return 'ss-outdated';
+      if (status === true) return 'ss-connected';
+      if (status === false) return 'ss-disconnected';
+      return '';
+    }
+    function statusTitle(defaultTitle) {
+      const status = SS.getSidecarStatus();
+      const versionInfo = SS.getSidecarVersionInfo();
+      if (status === true && versionInfo && versionInfo.outdated) {
+        return `Stash Sense: sidecar v${versionInfo.current} is older than required `
+          + `(v${versionInfo.required}+). Update the sidecar container to restore full functionality.`;
+      }
+      if (status === false) return 'Stash Sense: Not connected';
+      return defaultTitle;
+    }
+
     // Poll /health while an identify request is in flight so the loading
     // modal can show real feedback during the multi-second lazy model load
     // (face recognition + tattoo/body models) instead of sitting on
@@ -2136,10 +2158,11 @@
         const toggle = SS.createElement('button', {
           className: 'ss-identify-btn btn btn-secondary',
           attrs: {
-            title: status === false ? 'Stash Sense: Not connected' : 'Identify performers using face recognition',
+            title: statusTitle('Identify performers using face recognition'),
+            'data-default-title': 'Identify performers using face recognition',
           },
           innerHTML: `
-            <span class="ss-btn-icon ${status === true ? 'ss-connected' : status === false ? 'ss-disconnected' : ''}">
+            <span class="ss-btn-icon ${statusIconClass(status)}">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
               </svg>
@@ -2196,12 +2219,25 @@
       },
 
       updateButtonStatus(connected) {
-        document.querySelectorAll('.ss-identify-btn .ss-btn-icon').forEach(icon => {
-          icon.classList.remove('ss-connected', 'ss-disconnected');
-          if (connected === true) {
+        const versionInfo = SS.getSidecarVersionInfo();
+        const outdated = connected === true && versionInfo && versionInfo.outdated;
+        document.querySelectorAll('.ss-identify-btn').forEach(btn => {
+          const icon = btn.querySelector('.ss-btn-icon');
+          if (!icon) return;
+          icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated');
+          if (outdated) {
+            // Connected, but the sidecar container is running an older
+            // version than this plugin JS needs -- distinct from a plain
+            // "disconnected" so it's clear the fix is updating the
+            // sidecar, not troubleshooting connectivity.
+            icon.classList.add('ss-outdated');
+            btn.title = statusTitle(btn.title);
+          } else if (connected === true) {
             icon.classList.add('ss-connected');
+            if (btn.dataset.defaultTitle) btn.title = btn.dataset.defaultTitle;
           } else if (connected === false) {
             icon.classList.add('ss-disconnected');
+            btn.title = statusTitle(btn.title);
           }
         });
       },
@@ -2240,10 +2276,11 @@
         const btn = SS.createElement('button', {
           className: 'ss-identify-btn btn btn-secondary',
           attrs: {
-            title: status === false ? 'Stash Sense: Not connected' : 'Identify performers using face recognition',
+            title: statusTitle('Identify performers using face recognition'),
+            'data-default-title': 'Identify performers using face recognition',
           },
           innerHTML: `
-            <span class="ss-btn-icon ${status === true ? 'ss-connected' : status === false ? 'ss-disconnected' : ''}">
+            <span class="ss-btn-icon ${statusIconClass(status)}">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
               </svg>
@@ -2559,10 +2596,11 @@
         const btn = SS.createElement('button', {
           className: 'ss-identify-btn btn btn-secondary',
           attrs: {
-            title: status === false ? 'Stash Sense: Not connected' : 'Identify all performers in this gallery',
+            title: statusTitle('Identify all performers in this gallery'),
+            'data-default-title': 'Identify all performers in this gallery',
           },
           innerHTML: `
-            <span class="ss-btn-icon ${status === true ? 'ss-connected' : status === false ? 'ss-disconnected' : ''}">
+            <span class="ss-btn-icon ${statusIconClass(status)}">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                 <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 3c1.66 0 3 1.34 3 3s-1.34 3-3 3-3-1.34-3-3 1.34-3 3-3zm0 14.2c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08 1.99 0 5.97 1.09 6 3.08-1.29 1.94-3.5 3.22-6 3.22z"/>
               </svg>
@@ -2665,6 +2703,7 @@
       if (window._ssHealthCheckInterval) {
         clearInterval(window._ssHealthCheckInterval);
       }
+      let lastOutdated = SS.getSidecarVersionInfo() ? SS.getSidecarVersionInfo().outdated : false;
       window._ssHealthCheckInterval = setInterval(async () => {
         try {
           const health = await Promise.race([
@@ -2672,8 +2711,11 @@
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
           ]);
           const newStatus = health ? true : false;
-          if (newStatus !== SS.getSidecarStatus()) {
+          const info = SS.getSidecarVersionInfo();
+          const newOutdated = newStatus && info ? info.outdated : false;
+          if (newStatus !== SS.getSidecarStatus() || newOutdated !== lastOutdated) {
             SS.setSidecarStatus(newStatus);
+            lastOutdated = newOutdated;
             FaceRecognition.updateButtonStatus(newStatus);
           }
         } catch (_) {

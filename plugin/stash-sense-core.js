@@ -8,7 +8,18 @@
   // Plugin configuration
   const PLUGIN_ID = 'stash-sense';
   const PLUGIN_NAME = 'Stash Sense';
-  const PLUGIN_VERSION = '0.13.4';
+  const PLUGIN_VERSION = '0.13.5';
+
+  // Lowest sidecar version this plugin JS actually works against -- bump
+  // this alongside PLUGIN_VERSION whenever a JS change starts depending on
+  // a sidecar-side API/field that didn't exist before (e.g. the
+  // source/catalogue_url/profile_url match fields added in sidecar 0.13.3,
+  // or the create-performer-from-catalogue endpoint in 0.13.3). Compared
+  // against the sidecar's own reported /health version in checkHealth()
+  // below so a plugin update that outran its sidecar container shows a
+  // clear "sidecar needs updating" signal instead of silently missing
+  // fields or hitting 404s on endpoints that don't exist yet.
+  const MIN_SIDECAR_VERSION = '0.13.3';
 
   // Default settings
   const DEFAULTS = {
@@ -20,6 +31,25 @@
   // Cached state
   let cachedSettings = null;
   let sidecarStatus = null; // null = unknown, true = connected, false = disconnected
+  let sidecarVersionInfo = null; // null = unknown, else { current, required, outdated }
+
+  // ==================== Version Comparison ====================
+
+  /**
+   * Compares two "X.Y.Z" version strings. Returns negative if a < b, 0 if
+   * equal, positive if a > b. Deliberately simple (numeric dot-segments
+   * only) -- matches this project's own plain-semver versioning, not a
+   * full semver spec (no pre-release/build metadata to worry about).
+   */
+  function compareVersions(a, b) {
+    const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+    const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+      const diff = (pa[i] || 0) - (pb[i] || 0);
+      if (diff !== 0) return diff;
+    }
+    return 0;
+  }
 
   // ==================== Settings ====================
 
@@ -138,12 +168,27 @@
       });
       if (result.error) {
         sidecarStatus = false;
+        sidecarVersionInfo = null;
         return null;
       }
       sidecarStatus = true;
+      if (result.version) {
+        const outdated = compareVersions(result.version, MIN_SIDECAR_VERSION) < 0;
+        sidecarVersionInfo = { current: result.version, required: MIN_SIDECAR_VERSION, outdated };
+        if (outdated) {
+          console.warn(
+            `[${PLUGIN_NAME}] Sidecar is running v${result.version}, but this plugin (v${PLUGIN_VERSION}) `
+            + `needs at least v${MIN_SIDECAR_VERSION}. Some features may be missing or broken until the `
+            + `sidecar container is rebuilt/updated to a newer version.`
+          );
+        }
+      } else {
+        sidecarVersionInfo = null; // older sidecar that predates /health reporting a version at all
+      }
       return result;
     } catch (e) {
       sidecarStatus = false;
+      sidecarVersionInfo = null;
       return null;
     }
   }
@@ -154,6 +199,11 @@
 
   function setSidecarStatus(status) {
     sidecarStatus = status;
+  }
+
+  /** Returns { current, required, outdated } from the last checkHealth() call, or null if unknown/unavailable. */
+  function getSidecarVersionInfo() {
+    return sidecarVersionInfo;
   }
 
   // ==================== Stash GraphQL Helpers ====================
@@ -526,6 +576,7 @@
     PLUGIN_ID,
     PLUGIN_NAME,
     PLUGIN_VERSION,
+    MIN_SIDECAR_VERSION,
     DEFAULTS,
 
     // Settings
@@ -538,6 +589,8 @@
     checkHealth,
     getSidecarStatus,
     setSidecarStatus,
+    getSidecarVersionInfo,
+    compareVersions,
 
     // Stash GraphQL
     stashQuery,
