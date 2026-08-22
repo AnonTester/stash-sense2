@@ -2,7 +2,7 @@
 
 The sidecar ships with a pre-baked face recognition database.  This module
 lets it self-update by downloading newer releases from the public
-``carrotwaxr/stash-sense-data`` repository on GitHub.
+``AnonTester/stash-sense2-data`` repository on GitHub.
 
 Lifecycle
 ---------
@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 # Overridable so forks can point at their own data repo (e.g. a fork whose
 # own dataset-update pipeline has picked up where a stale/abandoned upstream
 # data repo left off) without patching this file again on every pull.
-GITHUB_REPO = os.environ.get("DATABASE_UPDATE_REPO", "carrotwaxr/stash-sense-data")
+GITHUB_REPO = os.environ.get("DATABASE_UPDATE_REPO", "AnonTester/stash-sense2-data")
 GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 CACHE_TTL_SECONDS = 600          # 10 minutes — in-memory short-term cache
 PERSISTENT_CACHE_TTL = 43_200   # 12 hours — survives Docker restarts

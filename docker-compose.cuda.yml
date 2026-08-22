@@ -1,0 +1,48 @@
+# NVIDIA CUDA GPU variant. Offered on a best-effort basis -- see
+# Dockerfile.cuda's own header: this is unverified on the reference
+# deployment (AMD Radeon 780M, no NVIDIA card to test against). Requires
+# the NVIDIA Container Toolkit on the host (see README's GPU
+# Troubleshooting section).
+#
+#   docker compose -f docker-compose.cuda.yml build
+#   docker compose -f docker-compose.cuda.yml up -d
+services:
+  stash-sense2-cuda:
+    build:
+      context: .
+      dockerfile: Dockerfile.cuda
+    image: stash-sense2-cuda:local
+    container_name: stash-sense2-cuda
+    restart: unless-stopped
+    ports:
+      - "6960:5000"
+    volumes:
+      - ./api/data:/data
+      - stash-sense2-cuda-insightface:/root/.insightface
+    environment:
+      - STASH_URL=${STASH_URL:-http://stash:9999}
+      - STASH_API_KEY=${STASH_API_KEY}
+      - DATA_DIR=/data
+      - DATABASE_UPDATE_REPO=AnonTester/stash-sense2-data
+      - PYTHONUNBUFFERED=1
+      # See docker-compose.yml for the full FFMPEG_HWACCEL explanation --
+      # `cuda` is the natural pairing here (reuses the same GPU reserved
+      # below for NVDEC-accelerated decode), but stays opt-in since it
+      # trades a little per-frame latency for lower host RAM usage.
+      - FFMPEG_HWACCEL=none
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  stash-sense2-cuda-insightface:

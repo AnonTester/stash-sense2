@@ -1,32 +1,38 @@
+# CPU-only variant (default/fallback for either GPU vendor) -- no GPU
+# reservation, runs anywhere Docker runs. See docker-compose.cuda.yml
+# (NVIDIA) and docker-compose.rocm.yml (AMD, tested on the reference
+# deployment) for GPU-accelerated inference instead.
+#
+#   docker compose build && docker compose up -d
 services:
-  stash-sense:
-    # to build locally:
+  stash-sense2:
     build: .
-    image: stash-sense:local
-    # to use docker hub:
-    # image: carrotwaxr/stash-sense:latest
-    container_name: stash-sense
+    image: stash-sense2:local
+    container_name: stash-sense2
     restart: unless-stopped
     ports:
       - "6960:5000"
     volumes:
       - ./api/data:/data
-      - stash-sense-insightface:/root/.insightface
+      - stash-sense2-insightface:/root/.insightface
     environment:
       - STASH_URL=${STASH_URL:-http://stash:9999}
       - STASH_API_KEY=${STASH_API_KEY}
       - DATA_DIR=/data
+      - DATABASE_UPDATE_REPO=AnonTester/stash-sense2-data
       - PYTHONUNBUFFERED=1
-      # Hardware-accelerated ffmpeg decoding for frame extraction.
+      # Hardware-accelerated ffmpeg decoding for frame extraction. Independent
+      # of which Dockerfile/compose file you're using for inference -- this
+      # only affects video decode, not the face recognition GPU backend.
       # Reduces memory usage on large/high-resolution files (e.g. 4K+ HEVC)
       # by decoding on the GPU instead of allocating full-resolution frame
-      # buffers in host RAM. Comes at the cost of slightly higher per-frame
-      # seek latency due to GPU context init overhead.
+      # buffers in host RAM, at the cost of slightly higher per-frame seek
+      # latency from GPU context init overhead.
       #
       # Options:
       #   none  — CPU decoding (default, most compatible)
-      #   cuda  — NVIDIA GPU via NVDEC (requires deploy.resources.reservations below)
-      #   vaapi — AMD or Intel GPU via VAAPI (requires /dev/dri device, see below)
+      #   cuda  — NVIDIA GPU via NVDEC (needs docker-compose.cuda.yml's GPU reservation)
+      #   vaapi — AMD or Intel GPU via VAAPI (needs the /dev/dri device below)
       - FFMPEG_HWACCEL=none
     # AMD / Intel GPU device access for VAAPI (FFMPEG_HWACCEL=vaapi).
     # Uncomment the 'devices' block below and set FFMPEG_HWACCEL=vaapi above.
@@ -34,13 +40,6 @@ services:
     # 'ls /dev/dri/' on the host if your system has multiple GPUs.
     #devices:
     #  - /dev/dri/renderD128:/dev/dri/renderD128
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -49,4 +48,4 @@ services:
       start_period: 120s
 
 volumes:
-  stash-sense-insightface:
+  stash-sense2-insightface:

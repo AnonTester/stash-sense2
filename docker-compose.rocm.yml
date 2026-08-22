@@ -1,0 +1,43 @@
+# AMD ROCm GPU variant -- the one actually built and run on the reference
+# deployment (AMD Radeon 780M / gfx1103). See Dockerfile.rocm for the full
+# story on the package choices this needed.
+#
+#   docker compose -f docker-compose.rocm.yml build
+#   docker compose -f docker-compose.rocm.yml up -d
+services:
+  stash-sense2-rocm:
+    build:
+      context: .
+      dockerfile: Dockerfile.rocm
+    image: stash-sense2-rocm:local
+    container_name: stash-sense2-rocm
+    restart: unless-stopped
+    ports:
+      - "6960:5000"
+    volumes:
+      - ./api/data:/data
+      - stash-sense2-rocm-insightface:/root/.insightface
+    environment:
+      - STASH_URL=${STASH_URL:-http://stash:9999}
+      - STASH_API_KEY=${STASH_API_KEY}
+      - DATA_DIR=/data
+      - DATABASE_UPDATE_REPO=AnonTester/stash-sense2-data
+      - PYTHONUNBUFFERED=1
+      # See docker-compose.yml for the full FFMPEG_HWACCEL explanation --
+      # `vaapi` is the natural pairing here (reuses the /dev/dri device
+      # already mapped in below for VAAPI-accelerated decode).
+      - FFMPEG_HWACCEL=vaapi
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    security_opt:
+      - seccomp=unconfined
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  stash-sense2-rocm-insightface:

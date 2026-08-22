@@ -6,56 +6,59 @@ ML-powered performer identification and library curation for [Stash](https://git
 
 Stash Sense is a sidecar service and Stash plugin that brings ML-powered analysis to your Stash library:
 
-- **Face Recognition** — Identify performers in scenes using sprite sheets. Matches against a database of 108,000+ performers from StashDB, FansDB, ThePornDB, PMVStash, and JAVStash
+- **Face Recognition** — Identify performers in scenes and images using InsightFace's buffalo_l model. Matches against a database of 150,000+ performers sourced from StashDB, ThePornDB, and other stash-box endpoints, plus non-stash-box catalogue sources
 - **Duplicate Scene Detection** — Find duplicate scenes using face fingerprints, stash-box IDs, and metadata overlap — catches duplicates that phash matching misses
 - **Upstream Sync** — Detect metadata changes on stash-box endpoints and review per-field merge controls to keep your library current
 - **Recommendations Dashboard** — A unified view of all suggestions: duplicates, unidentified scenes, missing stash-box links, and upstream updates
 - **Self-Updating Database** — Check for and apply database updates from the Settings UI without restarting the container
-- **Hardware-Adaptive** — Auto-detects your GPU and adjusts performance settings. Works with NVIDIA GPUs or CPU-only (slower)
+- **Hardware-Adaptive** — Auto-detects your GPU and adjusts performance settings. Works with AMD (ROCm) or NVIDIA (CUDA) GPUs, or CPU-only (slower)
 
 ## Quick Start
+
+There's no pre-built image to `docker pull` yet — build the sidecar locally from this repo with the Dockerfile matching your hardware, then install the plugin from the [stash-plugin-repo](https://github.com/AnonTester/stash-plugin-repo) index.
 
 ### Prerequisites
 
 1. **Stash** running with scene sprite sheets generated
-2. **Docker** installed on your system
-3. **NVIDIA GPU** with 4GB+ VRAM recommended (CPU fallback available)
+2. **Docker** with **Docker Compose** installed on your system
+3. A GPU is optional — NVIDIA (CUDA) or AMD (ROCm) both work, or run CPU-only (slower, but the most portable and the least to go wrong)
 
-### 1. Start the container
+### 1. Build and start the container
 
-```bash
-docker run -d \
-  --name stash-sense \
-  --gpus all \
-  -p 6960:5000 \
-  -e STASH_URL=http://your-stash-host:9999 \
-  -e STASH_API_KEY=your-api-key \
-  -v ./stash-sense-data:/data \
-  -v stash-sense-insightface:/root/.insightface \
-  carrotwaxr/stash-sense:latest
-```
-
-Or using an env file (`cp api/.env.example .env`, fill in values, then):
+Clone this repo, then set your Stash connection details:
 
 ```bash
-docker run -d \
-  --name stash-sense \
-  --gpus all \
-  -p 6960:5000 \
-  --env-file .env \
-  -v ./stash-sense-data:/data \
-  -v stash-sense-insightface:/root/.insightface \
-  carrotwaxr/stash-sense:latest
+git clone https://github.com/AnonTester/stash-sense2.git
+cd stash-sense2
+cp api/.env.example .env
+# edit .env: fill in STASH_URL and STASH_API_KEY
 ```
 
-**Volume mounts:**
+Pick the compose file matching your hardware and build+start:
 
-| Mount | Container Path | Purpose |
-|-------|---------------|---------|
-| `./stash-sense-data` | `/data` | Databases, recommendations, settings (persists across updates) |
-| `stash-sense-insightface` | `/root/.insightface` | InsightFace model cache (downloaded on first run) |
+| Hardware | Compose file | Dockerfile used | Status |
+|----------|--------------|------------------|--------|
+| CPU only | `docker-compose.yml` | `Dockerfile` | Tested, most portable |
+| AMD GPU (ROCm) | `docker-compose.rocm.yml` | `Dockerfile.rocm` | Tested (reference deployment: Radeon 780M / gfx1103) |
+| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `Dockerfile.cuda` | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
 
-> **No NVIDIA GPU?** Remove `--gpus all` — the sidecar auto-detects and falls back to CPU mode. See [GPU Troubleshooting](#gpu-troubleshooting) below.
+```bash
+# CPU
+docker compose build && docker compose up -d
+
+# AMD (ROCm) — needs the NVIDIA-equivalent ROCm userspace on the host,
+# see GPU Troubleshooting below for /dev/kfd and /dev/dri access
+docker compose -f docker-compose.rocm.yml build
+docker compose -f docker-compose.rocm.yml up -d
+
+# NVIDIA (CUDA) — needs the NVIDIA Container Toolkit on the host
+docker compose -f docker-compose.cuda.yml build
+docker compose -f docker-compose.cuda.yml up -d
+```
+
+Each variant listens on port `6960` and persists its data under `./api/data` — only run one at a time unless you also change the port/volume mappings to avoid a collision. First startup downloads the buffalo_l face recognition models on first use (or via Settings → Models → Download All once running) and can take a few minutes.
+
+> **Want to try a different variant later?** `docker compose -f <other-file>.yml down` the one you're not using first — they all default to the same port and container data directory.
 
 ### 2. Verify it's running
 
@@ -65,20 +68,23 @@ curl http://localhost:6960/health
 
 ### 3. Install the Stash plugin
 
-In Stash, go to **Settings > Plugins > Available Plugins** and add this source:
+In Stash, go to **Settings > Plugins > Available Plugins**, click **Add Source**, and add:
 
-```
-https://carrotwaxr.github.io/stash-sense/plugin/index.yml
-```
+| Field | Value |
+|-------|-------|
+| Name | Stash Sense |
+| Source URL | `https://raw.githubusercontent.com/AnonTester/stash-plugin-repo/main/index.yml` |
 
-Name it **Stash Sense**, then install the plugin and configure the sidecar URL (`http://your-host:6960`).
+The **Stash Sense** plugin will now show up in the Available Plugins list alongside any other plugins from that index — install it, then configure the sidecar URL (`http://your-host:6960`) in its settings.
+
+To update later: **Settings > Plugins > Installed Plugins**, click **Check for Updates** (or reload the plugin source) — new plugin releases show up there the same way, whenever a new version lands in the [stash-plugin-repo index](https://github.com/AnonTester/stash-plugin-repo).
 
 ### 4. Download database and models
 
 Navigate to `/plugins/stash-sense` in Stash to open the Stash Sense dashboard. From the **Settings** tab:
 
-1. **Database** — Click **Update** to download the face recognition database (~1.5 GB)
-2. **Models** — Click **Download All** to download the required ONNX models (~220 MB)
+1. **Database** — Click **Update** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
+2. **Models** — Click **Download All** to download the required ONNX models (buffalo_l face recognition, ~200 MB; tattoo detection is optional and downloads separately if you enable that signal in Settings)
 
 ## Configuration
 
@@ -96,30 +102,19 @@ By default ffmpeg decodes video frames on the CPU. For very large or high-resolu
 
 | Value | GPU | Notes |
 |-------|-----|-------|
-| `none` | Any / CPU | Default. Most compatible. |
-| `cuda` | NVIDIA | Uses NVDEC. Requires `--gpus all` / `deploy.resources.reservations`. |
-| `vaapi` | AMD or Intel | Uses VAAPI. Requires `/dev/dri/renderD128` mapped into the container. |
+| `none` | Any / CPU | Default in every compose file, regardless of which one you're running. |
+| `cuda` | NVIDIA | Uses NVDEC. Only meaningful with `docker-compose.cuda.yml`, which already reserves the GPU it needs. |
+| `vaapi` | AMD or Intel | Uses VAAPI. `docker-compose.rocm.yml` already maps `/dev/dri` and defaults to this; for CPU-inference + VAAPI-decode on the base compose file, uncomment its `devices:` block instead. |
 
 **Trade-off:** hwaccel reduces memory pressure but adds a small per-frame GPU context setup cost, which slightly slows down single-frame seeks. For normal 1080p/4K libraries the default CPU mode is faster. Use hwaccel only if you are hitting OOM crashes on specific large files.
 
 **NVIDIA (CUDA):**
 
-Uncomment the `deploy` block in your compose file and set the env var:
-```yaml
-environment:
-  - FFMPEG_HWACCEL=cuda
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
-```
+Set `FFMPEG_HWACCEL=cuda` in `docker-compose.cuda.yml`'s `environment:` section — the GPU reservation it needs is already there.
 
 **AMD / Intel (VAAPI):**
 
-Map the DRI render device and set the env var:
+`docker-compose.rocm.yml` already maps `/dev/dri` and defaults to `FFMPEG_HWACCEL=vaapi`. On the CPU compose file, uncomment the `devices:` block and set the env var yourself:
 ```yaml
 environment:
   - FFMPEG_HWACCEL=vaapi
@@ -143,53 +138,47 @@ Stash Sense checks for new database releases automatically. To update:
 
 ### Container Updates
 
-```bash
-docker stop stash-sense && docker rm stash-sense
-docker pull carrotwaxr/stash-sense:latest
-# Re-run the same docker run command from installation
-```
+No pre-built image to pull yet — pull the latest source and rebuild with the same compose file you started with (data under `./api/data` and the named `insightface` volume both persist across a rebuild):
 
-**unRAID users:** Click **Force Update** in the Docker tab to pull the latest image.
+```bash
+git pull
+docker compose build && docker compose up -d          # CPU
+docker compose -f docker-compose.rocm.yml build && docker compose -f docker-compose.rocm.yml up -d   # AMD
+docker compose -f docker-compose.cuda.yml build && docker compose -f docker-compose.cuda.yml up -d   # NVIDIA
+```
 
 Your recommendation history and settings are stored separately from the face database and persist across both types of updates.
 
 ## Documentation
 
-Full documentation: **[https://carrotwaxr.github.io/stash-sense](https://carrotwaxr.github.io/stash-sense)**
-
-- [Installation Guide](https://carrotwaxr.github.io/stash-sense/installation/)
-- [Configuration](https://carrotwaxr.github.io/stash-sense/configuration/)
-- [Features](https://carrotwaxr.github.io/stash-sense/features/performer-identification/)
-- [Plugin Setup](https://carrotwaxr.github.io/stash-sense/plugin)
-- [Database & Updates](https://carrotwaxr.github.io/stash-sense/database/)
-- [Settings](https://carrotwaxr.github.io/stash-sense/settings-system/)
-- [Troubleshooting](https://carrotwaxr.github.io/stash-sense/troubleshooting/)
+This README is the current source of truth for setup and configuration. The `docs/` folder in this repo is inherited from the upstream project this was forked from and hasn't been fully updated for the buffalo_l/usearch migration yet — treat it as unreliable until that's done.
 
 ## Requirements
 
 | Component | Requirement |
 |-----------|-------------|
 | Stash | v0.25+ with sprite sheets generated |
-| Docker | With `nvidia-container-toolkit` (for GPU) |
-| GPU | NVIDIA with 4GB+ VRAM (optional — CPU fallback available) |
-| Disk | ~2.5 GB for face recognition data, models, and working space |
+| Docker | With Docker Compose; plus `nvidia-container-toolkit` (NVIDIA) or a working ROCm host install (AMD), only if using GPU acceleration |
+| GPU | Optional — AMD (ROCm, tested) or NVIDIA (CUDA, best-effort) with 4GB+ VRAM recommended; CPU-only fallback works for every feature, just slower for face recognition |
+| Disk | ~1.5 GB for the face recognition database + models, plus working space for frame extraction |
 
 ## GPU Troubleshooting
 
-The `--gpus all` flag requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) to be installed on the host.
+**NVIDIA (CUDA):** requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
 
 | Problem | Solution |
 |---------|----------|
 | `docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]]` | Install `nvidia-container-toolkit` and restart Docker |
 | GPU not detected inside container | Verify with `nvidia-smi` on the host; ensure the toolkit is configured: `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
-| Non-NVIDIA GPU (AMD/Intel) | Remove `--gpus all` — CPU mode works for all features, just slower for face recognition |
 | unRAID | Add `--runtime=nvidia --gpus all` in **Extra Parameters** on the Docker container config page |
+
+**AMD (ROCm):** `docker-compose.rocm.yml` maps `/dev/kfd` and `/dev/dri` and sets `security_opt: seccomp=unconfined` — no separate toolkit install needed beyond the host having a working kernel driver for your card (`rocminfo` should list your GPU). If your card isn't on ROCm's officially supported list (e.g. integrated/APU parts like the Radeon 780M this was tested on), you may need `HSA_OVERRIDE_GFX_VERSION` set to the nearest supported target — check `rocminfo`'s reported `gfx` version and search for the matching override if inference fails to initialize.
+
+**Neither?** Use the default `docker-compose.yml` (CPU-only) — every feature works, face recognition is just slower per scene.
 
 ## Support
 
-- **Documentation**: [https://carrotwaxr.github.io/stash-sense](https://carrotwaxr.github.io/stash-sense)
-- **Bug Reports**: [GitHub Issues](https://github.com/carrotwaxr/stash-sense/issues)
-- **Community**: [Stash Discord](https://discord.gg/2TsNFKt) `#third-party-integrations`
+- **Bug Reports**: [GitHub Issues](https://github.com/AnonTester/stash-sense2/issues)
 
 ## License
 
