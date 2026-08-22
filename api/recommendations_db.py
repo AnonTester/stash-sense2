@@ -18,7 +18,7 @@ from typing import Optional, Iterator, Any
 SCHEMA_VERSION = 12
 
 # Caches the DB-independent, expensive-to-recompute part of scene
-# fingerprinting (frame extraction + face/body/tattoo detection+embedding)
+# fingerprinting (frame extraction + face detection+embedding)
 # so a performer-database version bump only has to redo the cheap
 # DB-dependent matching/re-ranking step, not the whole pipeline. Keyed by
 # stash_scene_id directly (not fingerprint_id) so it survives
@@ -1633,7 +1633,12 @@ class RecommendationsDB:
                 conn.execute(f"DELETE FROM scene_tattoo_embeddings WHERE stash_scene_id IN ({placeholders})", chunk)
         return deleted
 
-    # ==================== Scene signal cache (face/body/tattoo) ====================
+    # ==================== Scene signal cache (face) ====================
+    # body_*/tattoos_detected columns and the scene_tattoo_embeddings table
+    # (schema above) are no longer written -- body/tattoo identification
+    # signals were removed. Left in the schema unused/NULL rather than
+    # migrated away, since SQLite migrations on already-deployed databases
+    # aren't worth the risk for dead columns.
     #
     # Caches the DB-independent, expensive part of scene analysis (frame
     # extraction + detection + embedding) separately from the match
@@ -1653,38 +1658,28 @@ class RecommendationsDB:
     def save_scene_signal_cache(
         self, stash_scene_id: int, *, num_frames: int, min_face_size: int,
         min_face_confidence: float, start_offset_pct: float, end_offset_pct: float,
-        frames_analyzed: int, body_ratios: Optional[dict] = None, tattoos_detected: int = 0,
+        frames_analyzed: int,
     ) -> None:
-        """Upsert the cache-meta row (detection params + body ratios + tattoo count)."""
+        """Upsert the cache-meta row (detection params). body_*/tattoos_detected
+        columns are no longer written (body/tattoo signals were removed) but
+        stay in the schema as unused/NULL-or-default for existing rows."""
         with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO scene_signal_cache (
                     stash_scene_id, num_frames, min_face_size, min_face_confidence,
-                    start_offset_pct, end_offset_pct, frames_analyzed,
-                    body_shoulder_hip_ratio, body_leg_torso_ratio,
-                    body_arm_span_height_ratio, body_confidence, tattoos_detected
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    start_offset_pct, end_offset_pct, frames_analyzed
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(stash_scene_id) DO UPDATE SET
                     num_frames=excluded.num_frames, min_face_size=excluded.min_face_size,
                     min_face_confidence=excluded.min_face_confidence,
                     start_offset_pct=excluded.start_offset_pct, end_offset_pct=excluded.end_offset_pct,
                     frames_analyzed=excluded.frames_analyzed,
-                    body_shoulder_hip_ratio=excluded.body_shoulder_hip_ratio,
-                    body_leg_torso_ratio=excluded.body_leg_torso_ratio,
-                    body_arm_span_height_ratio=excluded.body_arm_span_height_ratio,
-                    body_confidence=excluded.body_confidence,
-                    tattoos_detected=excluded.tattoos_detected,
                     created_at=datetime('now')
                 """,
                 (
                     stash_scene_id, num_frames, min_face_size, min_face_confidence,
                     start_offset_pct, end_offset_pct, frames_analyzed,
-                    body_ratios.get("shoulder_hip_ratio") if body_ratios else None,
-                    body_ratios.get("leg_torso_ratio") if body_ratios else None,
-                    body_ratios.get("arm_span_height_ratio") if body_ratios else None,
-                    body_ratios.get("confidence") if body_ratios else None,
-                    tattoos_detected,
                 ),
             )
 
@@ -1715,37 +1710,6 @@ class RecommendationsDB:
                     (stash_scene_id, f["frame_index"], json.dumps(f["bbox"]), f["confidence"],
                      f.get("yaw"), f["facenet_vector"], f["arcface_vector"])
                     for f in faces
-                ],
-            )
-
-    def get_tattoo_embeddings(self, stash_scene_id: int) -> list[dict]:
-        with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM scene_tattoo_embeddings WHERE stash_scene_id = ?",
-                (stash_scene_id,),
-            ).fetchall()
-            return [dict(row) for row in rows]
-
-    def replace_tattoo_embeddings(self, stash_scene_id: int, tattoos: list[dict]) -> None:
-        """Clear and bulk-insert cached tattoo detections for a scene.
-
-        Each dict: frame_index, bbox (dict), location_hint, confidence,
-        embedding (bytes). Call with an empty list for "detection ran, found
-        none" — that's distinct from never having cached this scene at all
-        (scene_signal_cache.tattoos_detected / row presence tells them apart).
-        """
-        with self._connection() as conn:
-            conn.execute("DELETE FROM scene_tattoo_embeddings WHERE stash_scene_id = ?", (stash_scene_id,))
-            conn.executemany(
-                """
-                INSERT INTO scene_tattoo_embeddings (
-                    stash_scene_id, frame_index, bbox_json, location_hint, confidence, embedding
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (stash_scene_id, t["frame_index"], json.dumps(t["bbox"]), t.get("location_hint"),
-                     t["confidence"], t["embedding"])
-                    for t in tattoos
                 ],
             )
 

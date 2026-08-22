@@ -16,20 +16,6 @@
       "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
       "group": "face_recognition",
       "description": "buffalo_l ResNet50@WebFace600K face recognition model"
-    },
-    "tattoo_yolov5s": {
-      "file": "tattoo_yolov5s.onnx",
-      "size": 83882182,
-      "sha256": "91ad9d010d8f0d09847db2bc3769b854ec67366a5755b29fd152dc975361692b",
-      "group": "tattoo_detection",
-      "description": "TattooTrace YOLOv5s tattoo detector"
-    },
-    "tattoo_clip_vitb32": {
-      "file": "tattoo_clip_vitb32.onnx",
-      "size": 351771135,
-      "sha256": "f2c1ee5e5017437f546b4c939345a9796a7431134a3dbd3bf6ad3ebd55066a94",
-      "group": "tattoo_embedding",
-      "description": "CLIP ViT-B/32 image encoder (OpenAI weights) for tattoo similarity matching"
     }
   }
 }

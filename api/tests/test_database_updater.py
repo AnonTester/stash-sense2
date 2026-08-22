@@ -452,33 +452,34 @@ class TestSwapFiles:
         assert (data_dir / "face_adaface.voy").read_bytes() == b"adaface-data"
 
     def test_preserves_optional_files_absent_from_extract(self, tmp_path):
-        """Optional release files that exist locally but are absent from the
-        new release should be left untouched (not backed up and deleted)."""
+        """Files that exist locally but are neither in RELEASE_FILES nor
+        present in the new release should be left untouched (not backed
+        up and deleted) -- e.g. a local file from a since-removed feature."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
         for fname in REQUIRED_FILES:
             (data_dir / fname).write_text(f"old-{fname}")
-        # Simulate existing tattoo files from a previous release
-        (data_dir / "tattoo_embeddings.voy").write_bytes(b"tattoo-index")
-        (data_dir / "tattoo_embeddings.json").write_text('["mapping"]')
+        # Simulate a leftover local file not in RELEASE_FILES at all
+        (data_dir / "unrelated_local_file.bin").write_bytes(b"local-data")
+        (data_dir / "unrelated_local_file.json").write_text('["mapping"]')
 
         updater = DatabaseUpdater(data_dir=data_dir, reload_fn=MagicMock(return_value=True))
 
         extract_dir = tmp_path / "extract"
         extract_dir.mkdir()
-        # New release only has required files — no tattoo files
+        # New release only has required files
         for fname in REQUIRED_FILES:
             (extract_dir / fname).write_text(f"new-{fname}")
 
         backup_dir = updater._swap_files(extract_dir)
 
-        # Tattoo files should still be in data dir, untouched
-        assert (data_dir / "tattoo_embeddings.voy").read_bytes() == b"tattoo-index"
-        assert (data_dir / "tattoo_embeddings.json").read_text() == '["mapping"]'
-        # Tattoo files should NOT be in backup
-        assert not (backup_dir / "tattoo_embeddings.voy").exists()
-        assert not (backup_dir / "tattoo_embeddings.json").exists()
+        # Unrelated local files should still be in data dir, untouched
+        assert (data_dir / "unrelated_local_file.bin").read_bytes() == b"local-data"
+        assert (data_dir / "unrelated_local_file.json").read_text() == '["mapping"]'
+        # Unrelated local files should NOT be in backup
+        assert not (backup_dir / "unrelated_local_file.bin").exists()
+        assert not (backup_dir / "unrelated_local_file.json").exists()
 
 
 class TestRollback:

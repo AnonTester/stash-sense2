@@ -85,19 +85,6 @@ class FaceRecognizer:
 
         print(f"Loaded {len(self.faces)} faces, {len(self.performers)} performers")
 
-        # Optionally load tattoo embedding index and mapping
-        self.tattoo_index = None
-        self.tattoo_mapping = None
-        if (db_config.tattoo_index_path and db_config.tattoo_index_path.exists()
-                and db_config.tattoo_json_path and db_config.tattoo_json_path.exists()):
-            print(f"Loading tattoo embedding index from {db_config.tattoo_index_path}...")
-            self.tattoo_index = Index(ndim=512, metric="cos")
-            self.tattoo_index.load(str(db_config.tattoo_index_path))
-            with open(db_config.tattoo_json_path) as f:
-                self.tattoo_mapping = json.load(f)  # index -> universal_id
-            print(f"Tattoo embeddings loaded: {len(self.tattoo_index)} vectors, "
-                  f"{len(self.tattoo_mapping)} mappings")
-
         # Optionally load the local performer index -- built from this
         # Stash instance's own performer cover images by the
         # local_performer_sync job, absent until that's run at least once.

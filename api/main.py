@@ -27,11 +27,8 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from config import DatabaseConfig, MultiSignalConfig
+from config import DatabaseConfig
 from recognizer import FaceRecognizer
-from body_proportions import BodyProportionExtractor
-from tattoo_detector import TattooDetector
-from multi_signal_matcher import MultiSignalMatcher
 from recommendations_router import router as recommendations_router, init_recommendations, set_db_version
 from identification_router import router as identification_router, init_identification_router, update_identification_globals
 from stashbox_router import router as stashbox_router, init_stashbox_router
@@ -59,9 +56,8 @@ FACE_RECOGNITION_RESOURCE = "face_recognition"
 def _load_face_recognition(data_dir: Path) -> dict:
     """Loader for face recognition resource group.
 
-    Loads the face recognition database, multi-signal components (body,
-    tattoo), and returns them as a dict. This function is called by
-    ResourceManager.require() on first access.
+    Loads the face recognition database and returns it as a dict. This
+    function is called by ResourceManager.require() on first access.
 
     Uses the model manager to resolve ONNX model paths, checking the
     data volume (DATA_DIR/models/) first and falling back to local
@@ -71,7 +67,7 @@ def _load_face_recognition(data_dir: Path) -> dict:
         data_dir: Path to the data directory containing DB files.
 
     Returns:
-        Dict with keys: recognizer, multi_signal_matcher, db_manifest.
+        Dict with keys: recognizer, db_manifest.
 
     Raises:
         Exception: on any failure during loading.
@@ -109,70 +105,6 @@ def _load_face_recognition(data_dir: Path) -> dict:
     recognizer = FaceRecognizer(db_config, models_dir=models_dir)
     print("Face database loaded successfully!")
 
-    # Initialize multi-signal components
-    multi_signal_config = MultiSignalConfig.from_settings()
-
-    body_extractor = None
-    if multi_signal_config.enable_body:
-        print("Initializing body proportion extractor...")
-        body_extractor = BodyProportionExtractor()
-
-    # Tattoo detector: constructed whenever the YOLO model file is
-    # installed, full stop -- independent of the "Tattoo Detection"
-    # Settings toggle. That toggle only gates whether tattoo data feeds
-    # into *matching* (identification_router.py's use_tattoo resolution),
-    # not whether it gets computed at all: detection+embedding already run
-    # unconditionally as part of scene fingerprinting whenever
-    # _multi_signal_matcher is available (_extract_scene_signals is always
-    # called with use_tattoo=True, see identify_scene), riding along with
-    # frame extraction/decode -- by far the expensive part of that job --
-    # so a fingerprint built with the toggle off still has tattoo data
-    # cached and ready the moment someone turns matching on later, instead
-    # of needing every scene re-fingerprinted from scratch.
-    tattoo_det_path = mgr.get_model_path("tattoo_yolov5s")
-    tattoo_model_available = tattoo_det_path is not None or Path(
-        os.environ.get("DATA_DIR", "./data")
-    ).joinpath("models", "tattoo_yolov5s.onnx").exists()
-
-    tattoo_detector = None
-    tattoo_matcher = None
-    if not tattoo_model_available:
-        print("tattoo_yolov5s model not installed -- download it via "
-              "POST /models/download/tattoo_yolov5s to enable tattoo detection.")
-    else:
-        tattoo_emb_path = mgr.get_model_path("tattoo_clip_vitb32")
-
-        print("Initializing tattoo detector...")
-        tattoo_detector = TattooDetector(
-            model_path=str(tattoo_det_path) if tattoo_det_path else None,
-        )
-
-        # Initialize embedding-based matcher if index is available
-        if recognizer.tattoo_index is not None and recognizer.tattoo_mapping is not None:
-            from tattoo_matcher import TattooMatcher
-            tattoo_matcher = TattooMatcher(
-                tattoo_index=recognizer.tattoo_index,
-                tattoo_mapping=recognizer.tattoo_mapping,
-                embedder_model_path=str(tattoo_emb_path) if tattoo_emb_path else None,
-            )
-            print(f"Tattoo embedding matching ready: {len(recognizer.tattoo_index)} embeddings loaded")
-        else:
-            print("Tattoo detector ready (no embedding index yet -- detection only, no matching)")
-
-    multi_signal_matcher = None
-    if recognizer.db_reader and (body_extractor or tattoo_detector):
-        print("Initializing multi-signal matcher...")
-        multi_signal_matcher = MultiSignalMatcher(
-            face_recognizer=recognizer,
-            db_reader=recognizer.db_reader,
-            body_extractor=body_extractor,
-            tattoo_detector=tattoo_detector,
-            tattoo_matcher=tattoo_matcher,
-        )
-        tattoo_count = len(multi_signal_matcher.performers_with_tattoo_embeddings)
-        print(f"Multi-signal ready: {len(multi_signal_matcher.body_data)} body, "
-              f"{tattoo_count} performers with tattoo embeddings")
-
     # Set DB version for fingerprint tracking
     if db_manifest.get("version"):
         set_db_version(db_manifest["version"])
@@ -180,19 +112,16 @@ def _load_face_recognition(data_dir: Path) -> dict:
 
     resources = {
         "recognizer": recognizer,
-        "multi_signal_matcher": multi_signal_matcher,
         "db_manifest": db_manifest,
     }
 
     # Update router globals so endpoints can use the loaded data
     update_identification_globals(
         recognizer=recognizer,
-        multi_signal_matcher=multi_signal_matcher,
         db_manifest=db_manifest,
     )
     update_database_health_globals(
         recognizer=recognizer,
-        multi_signal_matcher=multi_signal_matcher,
         db_manifest=db_manifest,
     )
 
@@ -202,9 +131,9 @@ def _load_face_recognition(data_dir: Path) -> dict:
 def _unload_face_recognition(data_dir: Path) -> None:
     """Unloader for face recognition resource group.
 
-    Clears recognizer/matcher globals but preserves manifest so the
-    database stats endpoint can still report version and counts while
-    the heavy resources are unloaded.
+    Clears recognizer globals but preserves manifest so the database
+    stats endpoint can still report version and counts while the heavy
+    resources are unloaded.
     """
     db_config = DatabaseConfig(data_dir=data_dir)
     manifest = {}
@@ -214,12 +143,10 @@ def _unload_face_recognition(data_dir: Path) -> None:
 
     update_identification_globals(
         recognizer=None,
-        multi_signal_matcher=None,
         db_manifest=manifest,
     )
     update_database_health_globals(
         recognizer=None,
-        multi_signal_matcher=None,
         db_manifest=manifest,
     )
 
@@ -318,10 +245,9 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize identification router with runtime dependencies
-    # recognizer and multi_signal_matcher start as None (lazy loaded)
+    # recognizer starts as None (lazy loaded)
     init_identification_router(
         recognizer=None,
-        multi_signal_matcher=None,
         db_manifest=startup_manifest,
         db_updater=db_updater,
         stash_url=STASH_URL,
@@ -337,7 +263,6 @@ async def lifespan(app: FastAPI):
     # Initialize database health router
     init_database_health_router(
         recognizer=None,
-        multi_signal_matcher=None,
         db_manifest=startup_manifest,
         db_updater=db_updater,
     )
@@ -437,7 +362,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.13.7",
+    version="0.14.0",
     lifespan=lifespan,
 )
 

@@ -65,13 +65,9 @@ class DatabaseConfig:
     # per face, replacing the old dual Voyager facenet/arcface pair)
     embedding_index_path: Path = None
 
-    # Tattoo embedding index
-    tattoo_index_path: Path = None
-    tattoo_json_path: Path = None
-
     # Local performer index (built from this Stash instance's own performer
     # cover images, kept alongside the main StashDB-derived index -- see
-    # local_performer_index.py). Optional, same as the tattoo index above.
+    # local_performer_index.py). Optional -- may not exist yet.
     local_embedding_index_path: Path = None
     local_faces_json_path: Path = None
 
@@ -86,43 +82,12 @@ class DatabaseConfig:
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.embedding_index_path = self.embedding_index_path or self.data_dir / "face_embeddings.usearch"
-        self.tattoo_index_path = self.tattoo_index_path or self.data_dir / "tattoo_embeddings.usearch"
-        self.tattoo_json_path = self.tattoo_json_path or self.data_dir / "tattoo_embeddings.json"
         self.local_embedding_index_path = self.local_embedding_index_path or self.data_dir / "local_embeddings.usearch"
         self.local_faces_json_path = self.local_faces_json_path or self.data_dir / "local_faces.json"
         self.sqlite_db_path = self.sqlite_db_path or self.data_dir / "performers.db"
         self.faces_json_path = self.faces_json_path or self.data_dir / "faces.json"
         self.performers_json_path = self.performers_json_path or self.data_dir / "performers.json"
         self.manifest_json_path = self.manifest_json_path or self.data_dir / "manifest.json"
-
-
-@dataclass
-class MultiSignalConfig:
-    """Configuration for multi-signal identification."""
-    enable_body: bool = True
-    enable_tattoo: str = "auto"  # "true", "false", or "auto" (auto-detect based on index)
-    face_candidates: int = 20
-
-    @classmethod
-    def from_env(cls) -> "MultiSignalConfig":
-        return cls(
-            enable_body=os.environ.get("ENABLE_BODY_SIGNAL", "true").lower() == "true",
-            enable_tattoo=os.environ.get("ENABLE_TATTOO_SIGNAL", "auto").lower(),
-            face_candidates=int(os.environ.get("FACE_CANDIDATES", "20")),
-        )
-
-    @classmethod
-    def from_settings(cls) -> "MultiSignalConfig":
-        """Create config from the settings system. Falls back to from_env() if settings not ready."""
-        try:
-            from settings import get_setting
-            return cls(
-                enable_body=get_setting("body_signal_enabled"),
-                enable_tattoo="true" if get_setting("tattoo_signal_enabled") else "false",
-                face_candidates=get_setting("face_candidates"),
-            )
-        except RuntimeError:
-            return cls.from_env()
 
 
 # Embedding dimensions

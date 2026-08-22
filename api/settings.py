@@ -113,19 +113,6 @@ _define("num_frames", "Frames Per Scene",
         "Number of frames to sample from each scene for face recognition",
         "recognition", SettingType.INT, fallback=60, min_val=10, max_val=200)
 
-_define("face_candidates", "Face Candidates",
-        "Number of candidate matches to retrieve from the vector index per face",
-        "recognition", SettingType.INT, fallback=20, min_val=5, max_val=100)
-
-# -- Signals --
-_define("body_signal_enabled", "Body Proportions",
-        "Use body proportion analysis as a supplementary identification signal",
-        "signals", SettingType.BOOL, fallback=True)
-
-_define("tattoo_signal_enabled", "Tattoo Detection",
-        "Use tattoo detection as a supplementary identification signal (requires model)",
-        "signals", SettingType.BOOL, fallback=False)
-
 # -- Local Performers --
 _define("local_performer_auto_sync_enabled", "Auto-Sync on Performer Changes",
         "Automatically update the local performer index in the background whenever a "
@@ -219,9 +206,6 @@ TIER_DEFAULTS: dict[str, dict[str, Any]] = {
 ENV_VAR_MIGRATION: dict[str, str] = {
     # env_var_name -> setting_key
     "STASH_RATE_LIMIT": "stash_api_rate",
-    "ENABLE_BODY_SIGNAL": "body_signal_enabled",
-    "ENABLE_TATTOO_SIGNAL": "tattoo_signal_enabled",
-    "FACE_CANDIDATES": "face_candidates",
 }
 
 

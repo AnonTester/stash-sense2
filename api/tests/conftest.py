@@ -12,7 +12,6 @@ import pytest
 _ML_MODULES = [
     "cv2",
     "onnxruntime",
-    "mediapipe",
     "voyager",
     "insightface",
     "insightface.app",

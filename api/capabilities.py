@@ -23,17 +23,6 @@ _FACE_MODEL_FILES = [
     "models/buffalo_l/w600k_r50.onnx",
 ]
 
-# Tattoo detection + embedding ONNX models
-_TATTOO_MODEL_FILES = [
-    "tattoo_yolov5s.onnx",
-    "tattoo_clip_vitb32.onnx",
-]
-
-# Tattoo embedding data
-_TATTOO_DATA_FILES = [
-    "tattoo_embeddings.usearch",
-]
-
 
 def _all_exist(directory: Path, filenames: list[str]) -> bool:
     """Return True if every file in *filenames* exists under *directory*."""
@@ -44,7 +33,7 @@ def detect_capabilities(data_dir: Path, models_dir: Path) -> dict[str, bool]:
     """Detect available capabilities based on files on disk.
 
     Args:
-        data_dir: Root data directory containing face/tattoo data files.
+        data_dir: Root data directory containing face data files.
         models_dir: Directory containing ONNX model files.
 
     Returns:
@@ -54,13 +43,8 @@ def detect_capabilities(data_dir: Path, models_dir: Path) -> dict[str, bool]:
     has_face_models = _all_exist(models_dir, _FACE_MODEL_FILES)
     has_identification = has_face_data and has_face_models
 
-    has_tattoo_models = _all_exist(models_dir, _TATTOO_MODEL_FILES)
-    has_tattoo_data = _all_exist(data_dir, _TATTOO_DATA_FILES)
-    has_tattoo_signal = has_identification and has_tattoo_models and has_tattoo_data
-
     return {
         "upstream_sync": True,
         "duplicate_detection_basic": True,
         "identification": has_identification,
-        "tattoo_signal": has_tattoo_signal,
     }

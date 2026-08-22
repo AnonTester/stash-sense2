@@ -60,8 +60,6 @@ RELEASE_FILES = {
     "faces.json",
     "performers.json",
     "manifest.json",
-    "tattoo_embeddings.usearch",
-    "tattoo_embeddings.json",
 }
 
 # Subset of RELEASE_FILES that *must* be present for a valid release.
@@ -510,9 +508,8 @@ class DatabaseUpdater:
 
         Only backs up files that have a replacement in the new release.
         Files in ``RELEASE_FILES`` that exist locally but are absent from
-        the new release are left untouched (e.g. optional tattoo indices).
-        ``stash_sense.db`` and any other non-release artefacts are never
-        touched.
+        the new release are left untouched. ``stash_sense.db`` and any
+        other non-release artefacts are never touched.
 
         Returns the backup directory path.
         """

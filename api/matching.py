@@ -270,9 +270,7 @@ def match_face(
     # Optionally merge in local-performer-index matches (see fuse_local_results).
     # A handful of local performers is common (especially right after the
     # first sync), so index.search()'s k can exceed the index size -- guard
-    # with try/except the same way the tattoo matcher does for its own
-    # small supplementary index, rather than requiring every caller to
-    # pre-check size.
+    # with try/except rather than requiring every caller to pre-check size.
     if local_index is not None and local_performers_mapping and len(local_index) > 0:
         try:
             local_query_result = query_index(embedding, local_index, config)

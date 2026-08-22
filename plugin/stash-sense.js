@@ -45,11 +45,11 @@
     }
 
     // Poll /health while an identify request is in flight so the loading
-    // modal can show real feedback during the multi-second lazy model load
-    // (face recognition + tattoo/body models) instead of sitting on
-    // "Connecting to Stash Sense..." with no indication anything is
-    // happening. Returns a stop function; safe to call even if the identify
-    // request finishes before the first poll response comes back.
+    // modal can show real feedback during the multi-second lazy face
+    // recognition model load instead of sitting on "Connecting to Stash
+    // Sense..." with no indication anything is happening. Returns a stop
+    // function; safe to call even if the identify request finishes before
+    // the first poll response comes back.
     function pollModelLoading(sidecarUrl, onProgress) {
       let stopped = false;
       let shownLoadingMessage = false;
@@ -891,7 +891,7 @@
             </div>
             <div class="ss-match-info">
               <h4>${match.name}</h4>
-              <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>${person.signals_used && person.signals_used.includes('tattoo') ? '<span class="ss-signal-badge ss-signal-tattoo">tattoo match</span>' : ''}
+              <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
               ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
               <div class="ss-links">
                 ${this._matchLinksHtml(match, stashboxUrl, endpoint)}
@@ -1384,7 +1384,6 @@
           ['analyzing_frames', 'Analyzing frames'],
           ['analyzing_screenshot', 'Analyzing scene screenshot'],
           ['analyzing_sprite', 'Analyzing sprite thumbnails'],
-          ['checking_signals', 'Checking tattoos & body signals'],
           ['matching_performers', 'Matching against performer database'],
           ['saving_fingerprint', 'Saving fingerprint'],
         ],

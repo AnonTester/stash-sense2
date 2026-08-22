@@ -6,7 +6,6 @@ from unittest.mock import patch
 from config import (
     StashConfig,
     DatabaseConfig,
-    MultiSignalConfig,
     get_stashbox_shortname,
     STASHBOX_ENDPOINTS,
     FACENET_DIM,
@@ -35,7 +34,6 @@ class TestDatabaseConfig:
         assert config.facenet_index_path == tmp_path / "face_facenet.voy"
         assert config.arcface_index_path == tmp_path / "face_arcface.voy"
         assert config.adaface_index_path == tmp_path / "face_adaface.voy"
-        assert config.tattoo_index_path == tmp_path / "tattoo_embeddings.voy"
         assert config.sqlite_db_path == tmp_path / "performers.db"
         assert config.faces_json_path == tmp_path / "faces.json"
         assert config.performers_json_path == tmp_path / "performers.json"
@@ -53,14 +51,6 @@ class TestDatabaseConfig:
         assert config.facenet_index_path == custom_facenet
         # Other paths should still use defaults
         assert config.arcface_index_path == tmp_path / "face_arcface.voy"
-
-
-class TestMultiSignalConfig:
-    def test_defaults(self):
-        config = MultiSignalConfig()
-        assert config.enable_body is True
-        assert config.enable_tattoo == "auto"
-        assert config.face_candidates == 20
 
 
 class TestGetStashboxShortname:

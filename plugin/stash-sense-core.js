@@ -8,7 +8,7 @@
   // Plugin configuration
   const PLUGIN_ID = 'stash-sense';
   const PLUGIN_NAME = 'Stash Sense';
-  const PLUGIN_VERSION = '0.13.5';
+  const PLUGIN_VERSION = '0.14.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on

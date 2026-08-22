@@ -74,8 +74,6 @@ Two components talking to one Stash instance:
 ### Face Recognition (lazy-loaded)
 3-phase batch pipeline in `recognizer.py`: extract frames (ffmpeg, 8 workers) → detect faces (RetinaFace ONNX) → batch embed + match (FaceNet512 + ArcFace ONNX, Voyager ANN index). `resource_manager.py` manages lazy load/unload with 30-min idle timeout.
 
-Multi-signal late fusion in `multi_signal_matcher.py`: `final_score = face_score × body_multiplier × tattoo_multiplier`. Body via MediaPipe pose (`body_proportions.py`), tattoo via YOLO detection (`tattoo_detector.py`).
-
 ### Recommendations Engine
 `BaseAnalyzer` (`analyzers/base.py`) + incremental watermarking pattern. Each analyzer type has a `logic_version` class attribute — bumping it auto-clears stale snapshots/watermarks for full re-analysis on next run. Analyzers: duplicate scenes, duplicate performers, upstream performer/scene/studio/tag changes, scene fingerprint matching, missing stash-box links.
 

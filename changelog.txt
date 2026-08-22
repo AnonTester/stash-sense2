@@ -1,5 +1,24 @@
 ## 2026-08-22
 
+### 0.14.0
+- Remove: tattoo and body-proportion identification signals, entirely.
+  A real matching-accuracy benchmark (100 tattoo-tagged scenes, a real
+  reference embedding index) found tattoo signal never measurably
+  helped identification and slightly hurt it even after two rounds of
+  fixes (better reference photos, narrower fusion weighting) -- see
+  0.13.5-0.13.7. Body-proportion matching never had any reference data
+  populated by any part of the pipeline in the first place (confirmed:
+  every fingerprint ever logged "0 body" performers), so it never did
+  anything either. Removed: the tattoo detector/matcher and body
+  extractor, the "Tattoo Detection"/"Body Proportions" Settings toggles,
+  `tattoo_yolov5s`/`tattoo_clip_vitb32` from the downloadable models list
+  (and their GitHub release assets), the `use_body`/`use_tattoo`/
+  `use_multi_signal` request fields and `signals_used`/`tattoos_detected`
+  response fields on every identify endpoint, and the tattoo embedding
+  count shown in Settings. Scene fingerprinting is unaffected -- it only
+  ever needed face detection+embedding for its fast-path cache, never
+  body/tattoo data.
+
 ### 0.13.7
 - Change: tattoo signal now nudges face-match ranking within roughly
   +-8% instead of the old 0.7-1.5x range -- a real matching-accuracy pass

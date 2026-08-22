@@ -61,9 +61,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ffmpeg-static /ffmpeg /usr/local/bin/ffmpeg
 COPY --from=ffmpeg-static /ffprobe /usr/local/bin/ffprobe
 
-# MediaPipe runtime dependency check (required by mp.Image)
-RUN ldconfig -p | grep -q "libGLESv2.so.2"
-
 WORKDIR /app
 
 COPY --from=build /app/venv /app/venv
@@ -75,7 +72,6 @@ RUN mkdir -p /data
 
 ENV DATA_DIR=/data
 ENV PYTHONUNBUFFERED=1
-ENV ENABLE_TATTOO_SIGNAL=auto
 
 EXPOSE 5000
 

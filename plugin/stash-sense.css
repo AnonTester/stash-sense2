@@ -302,12 +302,6 @@
   vertical-align: middle;
 }
 
-.ss-signal-tattoo {
-  background: rgba(156, 39, 176, 0.2);
-  color: #ce93d8;
-  border: 1px solid rgba(156, 39, 176, 0.3);
-}
-
 .ss-country {
   font-size: 13px;
   color: var(--bs-secondary-color, #888);

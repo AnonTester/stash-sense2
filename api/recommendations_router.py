@@ -143,14 +143,14 @@ def save_scene_fingerprint(
 # ==================== Scene signal cache ====================
 #
 # Caches the DB-independent, expensive part of scene analysis (frame
-# extraction + face/body/tattoo detection+embedding) separately from
+# extraction + face detection+embedding) separately from
 # scene_fingerprint_faces' match results, so a performer-database version
 # bump can redo just the cheap matching/re-ranking step instead of the
 # whole pipeline. See identification_router.py's /identify/scene.
 
 def get_scene_signal_cache(scene_id: int) -> Optional[dict]:
-    """Cached detection params + body/tattoo signal summary for a scene,
-    or None if this scene has never been analyzed."""
+    """Cached detection params for a scene, or None if this scene has
+    never been analyzed."""
     if rec_db is None:
         return None
     return rec_db.get_scene_signal_cache(scene_id)
@@ -180,7 +180,6 @@ def is_scene_cache_compatible(
 def save_scene_signal_cache(
     scene_id: int, *, num_frames: int, min_face_size: int, min_face_confidence: float,
     start_offset_pct: float, end_offset_pct: float, frames_analyzed: int,
-    body_ratios: Optional[dict] = None, tattoos_detected: int = 0,
 ) -> None:
     if rec_db is None:
         return
@@ -188,7 +187,6 @@ def save_scene_signal_cache(
         scene_id, num_frames=num_frames, min_face_size=min_face_size,
         min_face_confidence=min_face_confidence, start_offset_pct=start_offset_pct,
         end_offset_pct=end_offset_pct, frames_analyzed=frames_analyzed,
-        body_ratios=body_ratios, tattoos_detected=tattoos_detected,
     )
 
 
@@ -202,18 +200,6 @@ def load_face_signal_cache(scene_id: int) -> list[dict]:
     if rec_db is None:
         return []
     return rec_db.get_face_embeddings(scene_id)
-
-
-def save_tattoo_signal_cache(scene_id: int, tattoos: list[dict]) -> None:
-    if rec_db is None:
-        return
-    rec_db.replace_tattoo_embeddings(scene_id, tattoos)
-
-
-def load_tattoo_signal_cache(scene_id: int) -> list[dict]:
-    if rec_db is None:
-        return []
-    return rec_db.get_tattoo_embeddings(scene_id)
 
 
 def save_image_fingerprint(

@@ -1,7 +1,7 @@
 """Identification API endpoints for face recognition.
 
 Provides routes for identifying performers in images, galleries, and scenes
-using face recognition with optional multi-signal matching (body, tattoo).
+using face recognition.
 """
 
 import asyncio
@@ -27,11 +27,7 @@ from frame_extractor import (
     check_ffmpeg_available,
 )
 from matching import MatchingConfig
-from body_proportions import BodyProportions
-from tattoo_detector import TattooDetection, TattooResult
 from scene_matcher import (
-    _extract_scene_signals,
-    _rerank_scene_persons,
     cluster_faces_by_person,
     merge_clusters_by_match,
     aggregate_matches,
@@ -49,8 +45,6 @@ from recommendations_router import (
     save_scene_signal_cache,
     save_face_signal_cache,
     load_face_signal_cache,
-    save_tattoo_signal_cache,
-    load_tattoo_signal_cache,
 )
 from database_updater import UpdateStatus
 
@@ -75,7 +69,6 @@ def _set_stage(scene_id: str, stage: str) -> None:
 
 # Module-level globals set by init
 _recognizer = None
-_multi_signal_matcher = None
 _db_manifest = {}
 _db_updater = None
 _stash_url = ""
@@ -84,7 +77,6 @@ _stash_api_key = ""
 
 def init_identification_router(
     recognizer,
-    multi_signal_matcher,
     db_manifest: dict,
     db_updater,
     stash_url: str,
@@ -94,10 +86,9 @@ def init_identification_router(
 
     Called from main.py lifespan after models are loaded.
     """
-    global _recognizer, _multi_signal_matcher, _db_manifest, _db_updater
+    global _recognizer, _db_manifest, _db_updater
     global _stash_url, _stash_api_key
     _recognizer = recognizer
-    _multi_signal_matcher = multi_signal_matcher
     _db_manifest = db_manifest
     _db_updater = db_updater
     _stash_url = stash_url
@@ -109,15 +100,12 @@ _UNSET = object()  # sentinel to distinguish "not provided" from None
 
 def update_identification_globals(
     recognizer=_UNSET,
-    multi_signal_matcher=_UNSET,
     db_manifest=_UNSET,
 ):
     """Update globals after a database hot-swap or idle unload."""
-    global _recognizer, _multi_signal_matcher, _db_manifest
+    global _recognizer, _db_manifest
     if recognizer is not _UNSET:
         _recognizer = recognizer
-    if multi_signal_matcher is not _UNSET:
-        _multi_signal_matcher = multi_signal_matcher
     if db_manifest is not _UNSET:
         _db_manifest = db_manifest
 
@@ -163,9 +151,6 @@ class IdentifyRequest(BaseModel):
     top_k: int = Field(5, ge=1, le=20, description="Number of matches per face")
     max_distance: float = Field(0.6, ge=0.0, le=2.0, description="Maximum distance threshold")
     min_face_confidence: float = Field(0.5, ge=0.0, le=1.0, description="Minimum face detection confidence")
-    use_multi_signal: bool = True
-    use_body: Optional[bool] = Field(None, description="Defaults to the 'Body Proportions' Settings toggle when omitted")
-    use_tattoo: Optional[bool] = Field(None, description="Defaults to the 'Tattoo Detection' Settings toggle when omitted")
 
 
 class IdentifyResponse(BaseModel):
@@ -180,9 +165,6 @@ class ImageIdentifyRequest(BaseModel):
     top_k: int = Field(5, ge=1, le=20, description="Number of matches per face")
     max_distance: float = Field(0.6, ge=0.0, le=2.0, description="Maximum distance threshold")
     min_face_confidence: float = Field(0.5, ge=0.0, le=1.0, description="Minimum face detection confidence")
-    use_multi_signal: bool = True
-    use_body: Optional[bool] = Field(None, description="Defaults to the 'Body Proportions' Settings toggle when omitted")
-    use_tattoo: Optional[bool] = Field(None, description="Defaults to the 'Tattoo Detection' Settings toggle when omitted")
 
 
 class GalleryPerformerResult(BaseModel):
@@ -246,13 +228,8 @@ class SceneIdentifyRequest(BaseModel):
     # Already-tagged performers (StashDB IDs) for boosting
     scene_performer_stashdb_ids: list[str] = Field(default_factory=list, description="StashDB IDs of performers already tagged on this scene")
 
-    # Multi-signal settings
-    use_multi_signal: bool = True
-    use_body: Optional[bool] = Field(None, description="Defaults to the 'Body Proportions' Settings toggle when omitted")
-    use_tattoo: Optional[bool] = Field(None, description="Defaults to the 'Tattoo Detection' Settings toggle when omitted")
-
     # Cache settings
-    use_cache: bool = Field(True, description="Reuse cached face/body/tattoo signals from a prior extraction on this scene when detection params match, skipping ffmpeg/detection/embedding and only redoing matching")
+    use_cache: bool = Field(True, description="Reuse a cached prior extraction on this scene when detection params match, skipping ffmpeg/detection/embedding and only redoing matching")
 
     # Sprite-sheet settings
     use_sprite: bool = Field(False, description="Additionally detect and match faces from the scene's sprite/thumbnail sheet (Stash's scrubber-bar preview tiles), merged in alongside video-frame results")
@@ -265,8 +242,6 @@ class PersonResult(BaseModel):
     frame_count: int = Field(description="Number of frames this person appeared in")
     best_match: Optional[PerformerMatchResponse] = Field(description="Best performer match")
     all_matches: list[PerformerMatchResponse] = Field(description="All potential matches")
-    signals_used: list[str] = Field(default_factory=list, description="Signals used for matching, e.g. ['face', 'body', 'tattoo']")
-    tattoos_detected: int = Field(0, description="Number of YOLO tattoo detections in this person's frames")
 
 
 class SceneIdentifyResponse(BaseModel):
@@ -281,42 +256,10 @@ class SceneIdentifyResponse(BaseModel):
     fingerprint_saved: bool = False
     fingerprint_error: Optional[str] = None
     timing: Optional[dict] = None
-    multi_signal_used: bool = False
     used_cache: bool = False
 
 
 # ==================== Helper Functions ====================
-
-
-def _resolve_multi_signal_flags(
-    use_body: Optional[bool], use_tattoo: Optional[bool],
-) -> tuple[bool, bool]:
-    """Resolve use_body/use_tattoo from the live Settings toggles when the
-    caller didn't explicitly specify them.
-
-    Every caller of these identify endpoints today (the Stash "Face
-    Identification" button via stash_sense_backend.py, and
-    fingerprint_generator.py's bulk job) omits these fields entirely, which
-    previously meant the Pydantic default of True was always used
-    regardless of the "Body Proportions"/"Tattoo Detection" Settings
-    toggles -- disabling either had no effect. Resolving from settings here
-    (once, centrally) fixes that for every caller instead of requiring each
-    one to thread the setting through itself.
-    """
-    if use_body is None or use_tattoo is None:
-        from settings import get_setting
-        try:
-            if use_body is None:
-                use_body = bool(get_setting("body_signal_enabled"))
-            if use_tattoo is None:
-                use_tattoo = bool(get_setting("tattoo_signal_enabled"))
-        except Exception:
-            logger.warning("Failed to resolve body/tattoo settings, defaulting both to enabled", exc_info=True)
-            if use_body is None:
-                use_body = True
-            if use_tattoo is None:
-                use_tattoo = True
-    return use_body, use_tattoo
 
 
 def distance_to_confidence(distance: float) -> float:
@@ -327,7 +270,7 @@ def distance_to_confidence(distance: float) -> float:
 
 
 def _match_to_response(m, **overrides) -> PerformerMatchResponse:
-    """Convert a PerformerMatch (or MultiSignalMatch or PerformerMatchResponse) to PerformerMatchResponse."""
+    """Convert a PerformerMatch (or PerformerMatchResponse) to PerformerMatchResponse."""
     uid = getattr(m, "universal_id", None)
     score = getattr(m, "combined_score", getattr(m, "distance", 0))
     defaults = dict(
@@ -453,8 +396,6 @@ async def identify_performers(request: IdentifyRequest, _=Depends(require_db_ava
     Provide either `image_url` or `image_base64`. Returns detected faces
     with potential performer matches sorted by confidence.
     """
-    request.use_body, request.use_tattoo = _resolve_multi_signal_flags(request.use_body, request.use_tattoo)
-
     # Validate input
     if not request.image_url and not request.image_base64:
         raise HTTPException(
@@ -477,36 +418,6 @@ async def identify_performers(request: IdentifyRequest, _=Depends(require_db_ava
         raise HTTPException(status_code=400, detail=f"Failed to fetch image: {e}")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decode image: {e}")
-
-    # Use multi-signal matching if available and requested
-    if request.use_multi_signal and _multi_signal_matcher is not None:
-        multi_results = _multi_signal_matcher.identify(
-            image,
-            top_k=request.top_k,
-            use_body=request.use_body,
-            use_tattoo=request.use_tattoo,
-        )
-        # Fetch missing images from StashBox
-        all_matches = [m for mr in multi_results for m in mr.matches]
-        await _fetch_missing_images(all_matches)
-
-        # Convert to response format
-        faces = []
-        for mr in multi_results:
-            bbox = mr.face.bbox
-            face_box = FaceBox(
-                x=int(bbox["x"]),
-                y=int(bbox["y"]),
-                width=int(bbox["w"]),
-                height=int(bbox["h"]),
-                confidence=mr.face.confidence,
-            )
-
-            matches = [_match_to_response(m) for m in mr.matches]
-
-            faces.append(FaceResult(box=face_box, matches=matches))
-
-        return IdentifyResponse(faces=faces, face_count=len(faces))
 
     # Run recognition
     try:
@@ -561,8 +472,6 @@ async def identify_image(request: ImageIdentifyRequest, _=Depends(require_db_ava
     Identify performers in a Stash image by image ID.
     Fetches the image from Stash, runs face recognition, and stores fingerprint.
     """
-    request.use_body, request.use_tattoo = _resolve_multi_signal_flags(request.use_body, request.use_tattoo)
-
     base_url = _stash_url.rstrip("/")
     api_key = _stash_api_key
 
@@ -591,73 +500,37 @@ async def identify_image(request: ImageIdentifyRequest, _=Depends(require_db_ava
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch image: {e}")
 
-    # Use multi-signal matching if available and requested
-    if request.use_multi_signal and _multi_signal_matcher is not None:
-        try:
-            multi_results = _multi_signal_matcher.identify(
-                image,
-                top_k=request.top_k,
-                use_body=request.use_body,
-                use_tattoo=request.use_tattoo,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Recognition failed: {e}")
+    # Run recognition
+    try:
+        results = _recognizer.recognize_image(
+            image,
+            top_k=request.top_k,
+            max_distance=request.max_distance,
+            min_face_confidence=request.min_face_confidence,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recognition failed: {e}")
 
-        # Fetch missing images from StashBox
-        all_ms_matches = [m for mr in multi_results for m in mr.matches]
-        await _fetch_missing_images(all_ms_matches)
+    # Fetch missing images from StashBox
+    all_matches = [m for r in results for m in r.matches]
+    await _fetch_missing_images(all_matches)
 
-        faces = []
-        img_h, img_w = image.shape[:2]
-        # Also build results list for fingerprint saving
-        results = []
-        for mr in multi_results:
-            bbox = mr.face.bbox
-            face_box = FaceBox(
-                x=int(bbox["x"]),
-                y=int(bbox["y"]),
-                width=int(bbox["w"]),
-                height=int(bbox["h"]),
-                confidence=mr.face.confidence,
-            )
+    faces = []
+    img_h, img_w = image.shape[:2]
 
-            matches = [_match_to_response(m) for m in mr.matches]
+    for result in results:
+        bbox = result.face.bbox
+        face_box = FaceBox(
+            x=int(bbox["x"]),
+            y=int(bbox["y"]),
+            width=int(bbox["w"]),
+            height=int(bbox["h"]),
+            confidence=result.face.confidence,
+        )
 
-            faces.append(FaceResult(box=face_box, matches=matches))
-            # Build RecognitionResult for fingerprint
-            results.append(RecognitionResult(face=mr.face, matches=mr.matches))
-    else:
-        # Run face-only recognition
-        try:
-            results = _recognizer.recognize_image(
-                image,
-                top_k=request.top_k,
-                max_distance=request.max_distance,
-                min_face_confidence=request.min_face_confidence,
-            )
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Recognition failed: {e}")
+        matches = [_match_to_response(m) for m in result.matches]
 
-        # Fetch missing images from StashBox
-        all_fo_matches = [m for r in results for m in r.matches]
-        await _fetch_missing_images(all_fo_matches)
-
-        faces = []
-        img_h, img_w = image.shape[:2]
-
-        for result in results:
-            bbox = result.face.bbox
-            face_box = FaceBox(
-                x=int(bbox["x"]),
-                y=int(bbox["y"]),
-                width=int(bbox["w"]),
-                height=int(bbox["h"]),
-                confidence=result.face.confidence,
-            )
-
-            matches = [_match_to_response(m) for m in result.matches]
-
-            faces.append(FaceResult(box=face_box, matches=matches))
+        faces.append(FaceResult(box=face_box, matches=matches))
 
     # Save fingerprint
     try:
@@ -965,12 +838,11 @@ async def _identify_scene_from_cache(
     t_start: float,
     extra_results: Optional[list[tuple[int, RecognitionResult]]] = None,
 ) -> "SceneIdentifyResponse":
-    """Reconstruct matching inputs from cached face/body/tattoo signals and
-    rerun only the DB-dependent steps (matching, clustering, re-ranking).
+    """Reconstruct matching inputs from cached face signals and rerun only
+    the DB-dependent steps (matching, clustering).
 
-    Skips ffmpeg frame extraction, buffalo_l detection+embedding, MediaPipe
-    pose extraction, and YOLO tattoo detection entirely -- all reused
-    verbatim from a prior full run on this scene.
+    Skips ffmpeg frame extraction and buffalo_l detection+embedding
+    entirely -- reused verbatim from a prior full run on this scene.
 
     TODO(buffalo_l migration): recommendations_db.py's scene_face_embeddings
     table (and save_face_signal_cache/load_face_signal_cache in
@@ -1001,12 +873,11 @@ async def _identify_scene_from_cache(
     cached_faces = load_face_signal_cache(scene_id_int)
     if not cached_faces:
         # identify_scene() still writes scene-level cache metadata
-        # (save_scene_signal_cache -- body/tattoo signals, unrelated to
-        # buffalo_l) even though face-embedding caching is disabled for
-        # this migration (see this function's docstring), so cache_meta
-        # existing no longer implies cached face rows exist. Raise so the
-        # caller's existing try/except falls back to the real pipeline,
-        # instead of silently returning a wrong "0 faces" result.
+        # (save_scene_signal_cache) even though face-embedding caching is
+        # disabled for this migration (see this function's docstring), so
+        # cache_meta existing no longer implies cached face rows exist.
+        # Raise so the caller's existing try/except falls back to the real
+        # pipeline, instead of silently returning a wrong "0 faces" result.
         raise RuntimeError(f"No cached face embeddings for scene {scene_id_int} (face cache disabled)")
     all_results: list[tuple[int, RecognitionResult]] = []
     for row in cached_faces:
@@ -1023,73 +894,9 @@ async def _identify_scene_from_cache(
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
 
-    # Multi-signal reconstruction, mirroring _extract_scene_signals' semantics:
-    # "body"/"tattoo" only join signals_used when a signal was actually found,
-    # not merely attempted.
-    scene_body_ratios = None
-    scene_tattoo_result = None
-    scene_tattoo_scores = None
-    scene_signals_used = ["face"]
-    scene_tattoos_detected = cache_meta["tattoos_detected"] or 0
-    ms_used = False
-
-    if request.use_multi_signal and _multi_signal_matcher is not None and all_results:
-        if request.use_body and cache_meta["body_shoulder_hip_ratio"] is not None:
-            scene_body_ratios = BodyProportions.from_dict({
-                "shoulder_hip_ratio": cache_meta["body_shoulder_hip_ratio"],
-                "leg_torso_ratio": cache_meta["body_leg_torso_ratio"],
-                "arm_span_height_ratio": cache_meta["body_arm_span_height_ratio"],
-                "confidence": cache_meta["body_confidence"],
-            })
-            scene_signals_used.append("body")
-
-        if request.use_tattoo:
-            # scene_tattoos_detected (raw YOLO count) can be >0 with no cached
-            # embedding rows -- e.g. no tattoo_matcher was available to embed
-            # against at cache-population time. Mirror _extract_scene_signals'
-            # semantics: "tattoo" joins signals_used whenever detections were
-            # found at all, independent of whether scoring embeddings exist.
-            cached_tattoos = load_tattoo_signal_cache(scene_id_int) if scene_tattoos_detected > 0 else []
-            if scene_tattoos_detected > 0:
-                if cached_tattoos:
-                    detections = [
-                        TattooDetection(
-                            bbox=json.loads(row["bbox_json"]),
-                            confidence=row["confidence"],
-                            location_hint=row["location_hint"],
-                        )
-                        for row in cached_tattoos
-                    ]
-                    scene_tattoo_result = TattooResult(
-                        detections=detections, has_tattoos=True,
-                        confidence=max(d.confidence for d in detections),
-                    )
-                    if _multi_signal_matcher.tattoo_matcher is not None:
-                        embeddings = [np.frombuffer(row["embedding"], dtype=np.float32) for row in cached_tattoos]
-                        scene_tattoo_scores = _multi_signal_matcher.tattoo_matcher.match_from_embeddings(embeddings)
-                else:
-                    scene_tattoo_result = TattooResult(detections=[], has_tattoos=True, confidence=0.0)
-                scene_signals_used.append("tattoo")
-            else:
-                scene_tattoo_result = TattooResult(detections=[], has_tattoos=False, confidence=0.0)
-
-        ms_used = len(scene_signals_used) > 1
-
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
     persons = _cluster_and_match(all_results, request)
-
-    if ms_used and _multi_signal_matcher is not None:
-        persons = _rerank_scene_persons(
-            persons=persons, matcher=_multi_signal_matcher,
-            body_ratios=scene_body_ratios, tattoo_result=scene_tattoo_result,
-            tattoo_scores=scene_tattoo_scores, signals_used=scene_signals_used,
-            # scene_tattoos_detected comes straight from the cache row
-            # unconditionally (used above just to distinguish "ran, found
-            # none" from "never cached") -- only surface it here if tattoo
-            # usage is actually enabled, same as scene_tattoo_result/scores.
-            tattoos_detected=scene_tattoos_detected if request.use_tattoo else 0,
-        )
 
     top_names = [p.best_match.name for p in persons[:3] if p.best_match]
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] === DONE (cache) === Top matches: {', '.join(top_names)}")
@@ -1142,7 +949,6 @@ async def _identify_scene_from_cache(
         fingerprint_saved=fingerprint_saved,
         fingerprint_error=fingerprint_error,
         timing=timing_data,
-        multi_signal_used=ms_used,
         used_cache=True,
     )
 
@@ -1156,8 +962,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     detects faces, clusters them by person, and returns matches.
     """
     t_start = time.time()
-
-    request.use_body, request.use_tattoo = _resolve_multi_signal_flags(request.use_body, request.use_tattoo)
 
     base_url = _stash_url.rstrip("/")
     api_key = _stash_api_key
@@ -1221,7 +1025,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
             fingerprint_saved=False,
             fingerprint_error=None,
             timing={"total_ms": round((time.time() - t_start) * 1000)},
-            multi_signal_used=False,
             used_cache=False,
         )
 
@@ -1451,33 +1254,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
 
-    # Extract multi-signal data (body + tattoo) from representative frames.
-    # Extraction always runs when the matcher/models are available, whether
-    # or not use_body/use_tattoo is currently enabled -- it needs the raw
-    # frame pixels, so it's worth caching even when a signal isn't being
-    # used for matching right now, to avoid re-fingerprinting every scene
-    # if the toggle gets re-enabled later. Whether the result actually
-    # influences ranking (below) is a separate decision.
-    _set_stage(request.scene_id, "checking_signals")
-    scene_body_ratios = None
-    scene_tattoo_result = None
-    scene_tattoo_scores = None
-    scene_signals_used = ["face"]
-    scene_tattoos_detected = 0
-    ms_used = False
-
-    tattoo_cache_rows: list[dict] = []
-    if request.use_multi_signal and _multi_signal_matcher is not None and detected_faces:
-        t_ms = time.time()
-        scene_body_ratios, scene_tattoo_result, scene_tattoo_scores, scene_signals_used, scene_tattoos_detected, tattoo_cache_rows = _extract_scene_signals(
-            frames=extraction_result.frames,
-            detected_faces=detected_faces,
-            matcher=_multi_signal_matcher,
-            use_body=True,
-            use_tattoo=True,
-        )
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Multi-signal: signals={scene_signals_used}, tattoos_detected={scene_tattoos_detected} in {time.time()-t_ms:.1f}s")
-
     save_scene_signal_cache(
         scene_id_int,
         num_frames=num_frames,
@@ -1486,25 +1262,7 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         start_offset_pct=request.start_offset_pct,
         end_offset_pct=request.end_offset_pct,
         frames_analyzed=len(extraction_result.frames),
-        body_ratios=scene_body_ratios.to_dict() if scene_body_ratios else None,
-        tattoos_detected=scene_tattoos_detected,
     )
-    save_tattoo_signal_cache(scene_id_int, tattoo_cache_rows)
-
-    # Only feed a signal into re-ranking (score adjustment + the
-    # signals_used/tattoos_detected shown to the caller) if its Settings
-    # toggle is currently enabled -- extraction above ran independent of
-    # that, but usage for matching must respect it.
-    rerank_body_ratios = scene_body_ratios if request.use_body else None
-    rerank_tattoo_result = scene_tattoo_result if request.use_tattoo else None
-    rerank_tattoo_scores = scene_tattoo_scores if request.use_tattoo else None
-    rerank_tattoos_detected = scene_tattoos_detected if request.use_tattoo else 0
-    rerank_signals_used = ["face"]
-    if request.use_body and "body" in scene_signals_used:
-        rerank_signals_used.append("body")
-    if request.use_tattoo and "tattoo" in scene_signals_used:
-        rerank_signals_used.append("tattoo")
-    ms_used = len(rerank_signals_used) > 1
 
     # Choose matching mode
     t_match_end = 0.0
@@ -1512,18 +1270,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     _set_stage(request.scene_id, "matching_performers")
     persons = _cluster_and_match(all_results, request)
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching ({request.matching_mode}): {len(persons)} persons in {time.time()-t_match:.1f}s")
-
-    # Apply multi-signal re-ranking if signals were extracted
-    if ms_used and _multi_signal_matcher is not None:
-        persons = _rerank_scene_persons(
-            persons=persons,
-            matcher=_multi_signal_matcher,
-            body_ratios=rerank_body_ratios,
-            tattoo_result=rerank_tattoo_result,
-            tattoo_scores=rerank_tattoo_scores,
-            signals_used=rerank_signals_used,
-            tattoos_detected=rerank_tattoos_detected,
-        )
 
     t_match_end = time.time()
     top_names = [p.best_match.name for p in persons[:3] if p.best_match]
@@ -1580,19 +1326,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     print(f"[identify_scene] Timing: {timing_data}")
 
     response_errors = list(extraction_result.errors[:5]) if extraction_result.errors else []
-    if request.use_tattoo and not (_multi_signal_matcher and _multi_signal_matcher.tattoo_detector):
-        # use_tattoo=True is a request-level flag, but the detector itself
-        # is only ever constructed once at process startup (see main.py) --
-        # if the "Tattoo Detection" Settings toggle was off, or the model
-        # file wasn't installed, at that point, no per-request flag can
-        # activate it. Surface that explicitly rather than silently
-        # returning tattoos_detected=0 for every person, which looks
-        # identical to "detector ran and found nothing."
-        response_errors.append(
-            "use_tattoo=True was requested but the tattoo detector isn't loaded on this "
-            "sidecar (Settings > Signals > Tattoo Detection is off, or the tattoo_yolov5s "
-            "model isn't installed) -- restart the sidecar after enabling/installing it."
-        )
 
     _set_stage(request.scene_id, "done")
     return SceneIdentifyResponse(
@@ -1606,7 +1339,6 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
         fingerprint_saved=fingerprint_saved,
         fingerprint_error=fingerprint_error,
         timing=timing_data,
-        multi_signal_used=ms_used,
     )
 
 

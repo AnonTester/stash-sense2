@@ -18,16 +18,14 @@ router = APIRouter(tags=["health"])
 
 # Module-level globals set by init
 _recognizer = None
-_multi_signal_matcher = None
 _db_manifest = {}
 _db_updater = None
 
 
-def init_database_health_router(recognizer, multi_signal_matcher, db_manifest: dict, db_updater):
+def init_database_health_router(recognizer, db_manifest: dict, db_updater):
     """Initialize the database health router with runtime dependencies."""
-    global _recognizer, _multi_signal_matcher, _db_manifest, _db_updater
+    global _recognizer, _db_manifest, _db_updater
     _recognizer = recognizer
-    _multi_signal_matcher = multi_signal_matcher
     _db_manifest = db_manifest
     _db_updater = db_updater
 
@@ -35,13 +33,11 @@ def init_database_health_router(recognizer, multi_signal_matcher, db_manifest: d
 _UNSET = object()  # sentinel to distinguish "not provided" from None
 
 
-def update_database_health_globals(recognizer=_UNSET, multi_signal_matcher=_UNSET, db_manifest=_UNSET):
+def update_database_health_globals(recognizer=_UNSET, db_manifest=_UNSET):
     """Update globals after a database hot-swap or idle unload."""
-    global _recognizer, _multi_signal_matcher, _db_manifest
+    global _recognizer, _db_manifest
     if recognizer is not _UNSET:
         _recognizer = recognizer
-    if multi_signal_matcher is not _UNSET:
-        _multi_signal_matcher = multi_signal_matcher
     if db_manifest is not _UNSET:
         _db_manifest = db_manifest
 
@@ -56,7 +52,6 @@ class DatabaseInfo(BaseModel):
     face_count: int
     sources: list[str]
     created_at: Optional[str] = None
-    tattoo_embedding_count: Optional[int] = None
 
 
 class HealthResponse(BaseModel):
@@ -164,10 +159,6 @@ async def database_info():
     Returns manifest values when recognizer is lazily loaded but not yet
     initialized, so the UI always has database info available.
     """
-    tattoo_count = None
-    if _multi_signal_matcher is not None:
-        tattoo_count = len(_multi_signal_matcher.performers_with_tattoo_embeddings) or None
-
     # Use live counts from recognizer if loaded, otherwise fall back to manifest
     if _recognizer is not None:
         performer_count = len(_recognizer.performers)
@@ -182,7 +173,6 @@ async def database_info():
         face_count=face_count,
         sources=_db_manifest.get("sources", ["stashdb.org"]),
         created_at=_db_manifest.get("created_at"),
-        tattoo_embedding_count=tattoo_count,
     )
 
 

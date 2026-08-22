@@ -1,7 +1,7 @@
 """Resource manager for lazy loading and idle unloading of heavy resources.
 
-Manages resource groups (face recognition data, tattoo data, body proportions)
-with lazy loading on first access and automatic unloading after idle timeout.
+Manages resource groups (e.g. face recognition data) with lazy loading on
+first access and automatic unloading after idle timeout.
 
 Usage:
     # At startup

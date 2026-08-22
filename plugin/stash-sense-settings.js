@@ -478,7 +478,6 @@
       const dbVersion = (fpStatus && fpStatus.current_db_version) || dbInfo?.version || 'N/A';
       const performerCount = dbInfo?.performer_count || 0;
       const faceCount = dbInfo?.face_count || 0;
-      const tattooCount = dbInfo?.tattoo_embedding_count || 0;
 
       // Row 1: performer database (the ~2GB dataset downloaded via Database Update)
       performerStatsEl.className = 'ss-id-database-stats ss-id-database-stats-performer';
@@ -506,12 +505,6 @@
           <span class="ss-db-stat-value">${faceCount.toLocaleString()}</span>
           <span class="ss-db-stat-label">Faces</span>
         </div>
-        ${tattooCount > 0 ? `
-        <div class="ss-db-stat">
-          <span class="ss-db-stat-value">${tattooCount.toLocaleString()}</span>
-          <span class="ss-db-stat-label">Tattoos</span>
-        </div>
-        ` : ''}
       `;
 
       // Row 2: this scene library's own fingerprint coverage (stash_sense.db,
@@ -916,11 +909,10 @@
       <span class="ss-setting-desc">${setting.description}</span>
       ${key === 'detection_size' ? `
         <span class="ss-setting-warning">
-          ⚠️ Changing this invalidates the cached face/body/tattoo
-          signals used by Stash Sense's fingerprint fast-path. Every scene
-          will need to be fully re-fingerprinted (frame extraction +
-          detection + embedding, not just re-matched) to use the new
-          resolution.
+          ⚠️ Changing this invalidates the cached face signals used by
+          Stash Sense's fingerprint fast-path. Every scene will need to
+          be fully re-fingerprinted (frame extraction + detection +
+          embedding, not just re-matched) to use the new resolution.
         </span>
       ` : ''}
     `;
