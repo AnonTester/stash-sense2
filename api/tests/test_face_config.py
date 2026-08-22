@@ -1,8 +1,6 @@
 """Tests for face_config.py - face recognition constants."""
 
 from face_config import (
-    FACENET_WEIGHT,
-    ARCFACE_WEIGHT,
     MAX_DISTANCE,
     NUM_FRAMES,
     START_OFFSET_PCT,
@@ -11,11 +9,8 @@ from face_config import (
     MIN_FACE_CONFIDENCE,
     CLUSTER_THRESHOLD,
     TOP_K,
+    SPRITE_MAX_FRAMES,
 )
-
-
-def test_fusion_weights_sum_to_one():
-    assert FACENET_WEIGHT + ARCFACE_WEIGHT == 1.0
 
 
 def test_max_distance_in_valid_range():
@@ -42,3 +37,12 @@ def test_cluster_threshold_positive():
 
 def test_top_k_positive():
     assert TOP_K > 0
+
+
+def test_sprite_max_frames_covers_more_than_frame_sampling():
+    # Sprite tiles are cheap (no decode/seek) relative to NUM_FRAMES'
+    # extracted frames, so the sprite cap should never be the tighter
+    # bound -- otherwise sprite-sheet identification would see less of
+    # the scene than frame-extraction identification.
+    assert SPRITE_MAX_FRAMES > 0
+    assert SPRITE_MAX_FRAMES >= NUM_FRAMES

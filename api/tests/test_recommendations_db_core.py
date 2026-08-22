@@ -209,7 +209,7 @@ class TestGetRecommendations:
         returned_ids = [r.id for r in recs]
         assert set(returned_ids) == {id1, id2, id3}
 
-    def test_duplicate_scenes_ordered_by_confidence_desc_per_status_group(self, db):
+    def test_duplicate_scenes_pending_confidence_desc_others_recency_desc(self, db):
         # pending
         _make_rec(db, type="duplicate_scenes", target_type="scene", target_id="p_low", confidence=0.40)
         _make_rec(db, type="duplicate_scenes", target_type="scene", target_id="p_high", confidence=0.92)
@@ -226,8 +226,14 @@ class TestGetRecommendations:
         db.resolve_recommendation(r_high, action="accepted")
         db.resolve_recommendation(r_mid, action="accepted")
 
+        # Resolved/dismissed items sort by recency (resolved_at DESC, then
+        # id DESC as a tiebreak) -- not confidence, unlike pending items
+        # above. SQLite's datetime('now') is only second-precision, so
+        # rapid-fire calls within a test tie on timestamp and fall back to
+        # id DESC: since resolution order was low -> high -> mid, mid (the
+        # highest id, resolved last) sorts first.
         resolved = db.get_recommendations(type="duplicate_scenes", status="resolved")
-        assert [r.target_id for r in resolved] == ["r_high", "r_mid", "r_low"]
+        assert [r.target_id for r in resolved] == ["r_mid", "r_high", "r_low"]
 
         # dismissed
         d_low = _make_rec(db, type="duplicate_scenes", target_type="scene", target_id="d_low", confidence=0.10)
@@ -238,7 +244,7 @@ class TestGetRecommendations:
         db.dismiss_recommendation(d_mid, reason="test")
 
         dismissed = db.get_recommendations(type="duplicate_scenes", status="dismissed")
-        assert [r.target_id for r in dismissed] == ["d_high", "d_mid", "d_low"]
+        assert [r.target_id for r in dismissed] == ["d_mid", "d_high", "d_low"]
 
     def test_add_recommendation_target_dismissal_preserves_status(self, db):
         rec_id = _make_rec(
@@ -256,7 +262,7 @@ class TestGetRecommendations:
         assert rec.status == "pending"
         assert db.is_dismissed("duplicate_scenes", "scene", "42:77") is True
 
-    def test_scene_fingerprint_match_ordered_by_confidence_desc_per_status_group(self, db):
+    def test_scene_fingerprint_match_pending_confidence_desc_others_recency_desc(self, db):
         # pending
         _make_rec(db, type="scene_fingerprint_match", target_type="scene", target_id="p_low", confidence=0.40)
         _make_rec(db, type="scene_fingerprint_match", target_type="scene", target_id="p_high", confidence=0.92)
@@ -273,8 +279,10 @@ class TestGetRecommendations:
         db.resolve_recommendation(r_high, action="accepted")
         db.resolve_recommendation(r_mid, action="accepted")
 
+        # See the duplicate_scenes test above for why this is recency
+        # (id DESC tiebreak), not confidence, order.
         resolved = db.get_recommendations(type="scene_fingerprint_match", status="resolved")
-        assert [r.target_id for r in resolved] == ["r_high", "r_mid", "r_low"]
+        assert [r.target_id for r in resolved] == ["r_mid", "r_high", "r_low"]
 
         # dismissed
         d_low = _make_rec(db, type="scene_fingerprint_match", target_type="scene", target_id="d_low", confidence=0.10)
@@ -285,7 +293,7 @@ class TestGetRecommendations:
         db.dismiss_recommendation(d_mid, reason="test")
 
         dismissed = db.get_recommendations(type="scene_fingerprint_match", status="dismissed")
-        assert [r.target_id for r in dismissed] == ["d_high", "d_mid", "d_low"]
+        assert [r.target_id for r in dismissed] == ["d_mid", "d_high", "d_low"]
 
 
 # ==================== count_recommendations ====================

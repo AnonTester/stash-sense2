@@ -12,7 +12,8 @@ import pytest
 _ML_MODULES = [
     "cv2",
     "onnxruntime",
-    "voyager",
+    "usearch",
+    "usearch.index",
     "insightface",
     "insightface.app",
     "insightface.utils",

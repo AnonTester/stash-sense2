@@ -1353,13 +1353,10 @@ async def merge_source_into_duplicate_scene_match(request: MergeSourceIntoDuplic
                 "deleted_scene_id": other_match.scene_id,
             }
 
+            deleted = False
             try:
                 deleted = await stash.destroy_scene(other_match.scene_id, delete_file=False)
-                if deleted:
-                    scene_id = str(other_match.scene_id)
-                    db.delete_pending_scene_fingerprint_for_scene(scene_id=scene_id)
-                    db.delete_pending_duplicate_scene_recommendations_for_scene(scene_id=scene_id)
-                else:
+                if not deleted:
                     resolution_action = "closed_after_source_merge"
                     resolution_details["delete_error"] = "Delete returned false"
                     delete_failures.append({
@@ -1374,11 +1371,22 @@ async def merge_source_into_duplicate_scene_match(request: MergeSourceIntoDuplic
                     "error": str(exc),
                 })
 
+            # Resolve *before* the pending-only cleanup sweep below: this
+            # recommendation is still 'pending' at this point, and
+            # delete_pending_duplicate_scene_recommendations_for_scene()
+            # deletes any pending row referencing this scene -- including
+            # this one -- which would silently drop the resolution instead
+            # of recording what happened to it.
             db.resolve_recommendation(
                 other_match.recommendation_id,
                 action=resolution_action,
                 details=resolution_details,
             )
+
+            if deleted:
+                scene_id = str(other_match.scene_id)
+                db.delete_pending_scene_fingerprint_for_scene(scene_id=scene_id)
+                db.delete_pending_duplicate_scene_recommendations_for_scene(scene_id=scene_id)
 
         for scene_id in [str(request.source_scene_id), str(request.keeper_match_scene_id)]:
             db.delete_pending_duplicate_scene_recommendations_for_scene(scene_id=scene_id)

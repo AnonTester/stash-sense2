@@ -282,7 +282,14 @@ class TestAcceptAction:
 
     @pytest.mark.asyncio
     async def test_accept_dismisses_other_pending_matches_for_same_scene(self):
-        """Accepting one match dismisses sibling pending matches for the same local scene."""
+        """Accepting one match dismisses sibling pending matches for the same local scene.
+
+        _accept_fingerprint_match() delegates this to a single bulk
+        dismiss_pending_scene_fingerprint_for_scene() call (one SQL sweep
+        keyed on the local scene id, excluding the just-accepted rec) --
+        not per-sibling get_recommendations()/dismiss_recommendation()
+        calls.
+        """
         from recommendations_router import _accept_fingerprint_match
         from recommendations_db import Recommendation
 
@@ -294,22 +301,6 @@ class TestAcceptAction:
             confidence=0.8, source_analysis_id=None,
             created_at="2026-01-01", updated_at="2026-01-01",
         )
-        sibling_same_scene = Recommendation(
-            id=2, type="scene_fingerprint_match", status="pending",
-            target_type="scene", target_id="42|https://stashdb.org/graphql|sb-2",
-            details={"local_scene_id": "42"},
-            resolution_action=None, resolution_details=None, resolved_at=None,
-            confidence=0.6, source_analysis_id=None,
-            created_at="2026-01-01", updated_at="2026-01-01",
-        )
-        sibling_other_scene = Recommendation(
-            id=3, type="scene_fingerprint_match", status="pending",
-            target_type="scene", target_id="43|https://stashdb.org/graphql|sb-3",
-            details={"local_scene_id": "43"},
-            resolution_action=None, resolution_details=None, resolved_at=None,
-            confidence=0.6, source_analysis_id=None,
-            created_at="2026-01-01", updated_at="2026-01-01",
-        )
 
         mock_stash = AsyncMock()
         mock_stash.get_scene_by_id.return_value = {"id": "42", "stash_ids": []}
@@ -317,9 +308,8 @@ class TestAcceptAction:
 
         mock_db = MagicMock()
         mock_db.get_recommendation.return_value = accepted_rec
-        mock_db.get_recommendations.return_value = [sibling_same_scene, sibling_other_scene]
         mock_db.resolve_recommendation.return_value = True
-        mock_db.dismiss_recommendation.return_value = True
+        mock_db.dismiss_pending_scene_fingerprint_for_scene.return_value = 1
 
         await _accept_fingerprint_match(
             stash=mock_stash,
@@ -331,9 +321,10 @@ class TestAcceptAction:
         )
 
         mock_db.resolve_recommendation.assert_called_once_with(1, action="accepted")
-        mock_db.dismiss_recommendation.assert_called_once()
-        dismiss_call = mock_db.dismiss_recommendation.call_args
-        assert dismiss_call[0][0] == 2
+        mock_db.dismiss_pending_scene_fingerprint_for_scene.assert_called_once()
+        dismiss_call = mock_db.dismiss_pending_scene_fingerprint_for_scene.call_args
+        assert dismiss_call[1]["scene_id"] == "42"
+        assert dismiss_call[1]["exclude_rec_id"] == 1
         assert "Auto-dismissed after accepting scene fingerprint match" in dismiss_call[1]["reason"]
 
 

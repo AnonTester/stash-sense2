@@ -71,9 +71,18 @@ class TestResolution:
     def test_tier_default_cpu(self, mgr_cpu):
         assert mgr_cpu.get("embedding_batch_size") == 4
 
-    def test_tier_default_num_frames_differs(self, mgr_gpu_high, mgr_cpu):
+    def test_num_frames_same_across_tiers(self, mgr_gpu_high, mgr_cpu):
+        # Unlike pure throughput knobs (embedding_batch_size,
+        # frame_extraction_concurrency), num_frames and detection_size
+        # affect match accuracy -- deliberately kept equal across tiers
+        # rather than silently degrading results on weaker hardware (see
+        # settings.py's TIER_DEFAULTS "cpu" comment).
         assert mgr_gpu_high.get("num_frames") == 60
-        assert mgr_cpu.get("num_frames") == 30
+        assert mgr_cpu.get("num_frames") == 60
+
+    def test_frame_extraction_concurrency_differs_by_tier(self, mgr_gpu_high, mgr_cpu):
+        assert mgr_gpu_high.get("frame_extraction_concurrency") == 8
+        assert mgr_cpu.get("frame_extraction_concurrency") == 2
 
     def test_user_override_wins(self, mgr_gpu_high):
         mgr_gpu_high.set("embedding_batch_size", 64)

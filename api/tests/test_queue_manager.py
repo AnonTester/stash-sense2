@@ -16,7 +16,7 @@ class TestQueueManager:
 
     def test_default_resource_slots(self, mgr):
         assert mgr.resource_slots[ResourceType.GPU] == 1
-        assert mgr.resource_slots[ResourceType.NETWORK] == 2
+        assert mgr.resource_slots[ResourceType.NETWORK] == 1
         assert mgr.resource_slots[ResourceType.LIGHT] == 3
 
     def test_submit_job(self, mgr):

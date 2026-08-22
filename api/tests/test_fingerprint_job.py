@@ -22,6 +22,8 @@ class TestFingerprintJob:
         mock_progress.processed_scenes = 5
         mock_progress.total_scenes = 10
         mock_progress.status.value = "completed"
+        mock_progress.batch_completed = True
+        mock_progress.current_offset = 5
 
         async def fake_generate(**kwargs):
             yield mock_progress

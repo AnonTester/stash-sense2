@@ -1,5 +1,14 @@
 # Ruff linter configuration for stash-sense sidecar API
 #
+# `select` is pinned explicitly rather than left to ruff's built-in
+# default: that default has grown considerably across ruff releases (it
+# now includes dozens of opinionated style/security/refactor categories
+# like DTZ/TRY/PLR/RUF/S/SIM/UP), and CI installs `ruff` unpinned, so
+# relying on "whatever ruff considers default today" made CI's lint job
+# start failing on every single commit -- regardless of code changes --
+# the moment a newer ruff shipped a broader default. E4/E7/E9/F (pycodestyle
+# errors + pyflakes) is what this project has actually been targeting.
+#
 # Ignores pre-existing patterns across the codebase:
 # - E401: Multiple imports on one line
 # - E402: Module-level imports not at top (load_dotenv, sys.modules mocking)
@@ -9,4 +18,5 @@
 # - F841: Local variable assigned but never used (unpacking patterns)
 
 [lint]
+select = ["E4", "E7", "E9", "F"]
 ignore = ["E401", "E402", "F401", "F541", "F821", "F841"]

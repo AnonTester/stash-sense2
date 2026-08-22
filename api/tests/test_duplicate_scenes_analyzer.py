@@ -246,10 +246,12 @@ class TestDuplicateCandidatesDB:
             ).fetchone()
             assert row is not None
 
-    def test_schema_version_is_9(self, db):
+    def test_schema_version_matches_current(self, db):
+        from recommendations_db import SCHEMA_VERSION
+
         with db._connection() as conn:
             version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-            assert version == 9
+            assert version == SCHEMA_VERSION
 
     def test_insert_candidate(self, db):
         """Insert a candidate pair."""
@@ -809,6 +811,7 @@ class TestAnalysisJobRunId:
             class FakeAnalyzer:
                 type = "test_type"
                 _job_progress_callback = None
+                _items_total = None  # base.py default: no known upfront total
 
                 def __init__(self, stash, rec_db, run_id=None):
                     nonlocal captured_run_id

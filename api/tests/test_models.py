@@ -66,9 +66,8 @@ class TestDatabaseManifest:
             face_count=500,
             sources=["stashdb.org"],
         )
-        assert manifest.facenet_dim == 512
-        assert manifest.arcface_dim == 512
-        assert manifest.detector == "yolov8"
+        assert manifest.embedding_dim == 512
+        assert manifest.detector == "scrfd_10gf_buffalo_l"
         assert manifest.checksums == {}
 
     def test_custom_values(self):
@@ -78,10 +77,10 @@ class TestDatabaseManifest:
             performer_count=200,
             face_count=1000,
             sources=["stashdb.org", "fansdb.cc"],
-            facenet_dim=256,
+            embedding_dim=256,
             detector="retinaface",
         )
-        assert manifest.facenet_dim == 256
+        assert manifest.embedding_dim == 256
         assert manifest.detector == "retinaface"
         assert len(manifest.sources) == 2
 

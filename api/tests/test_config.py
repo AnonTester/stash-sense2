@@ -8,8 +8,7 @@ from config import (
     DatabaseConfig,
     get_stashbox_shortname,
     STASHBOX_ENDPOINTS,
-    FACENET_DIM,
-    ARCFACE_DIM,
+    EMBEDDING_DIM,
 )
 
 
@@ -31,9 +30,9 @@ class TestDatabaseConfig:
     def test_post_init_sets_paths(self, tmp_path):
         config = DatabaseConfig(data_dir=tmp_path)
 
-        assert config.facenet_index_path == tmp_path / "face_facenet.voy"
-        assert config.arcface_index_path == tmp_path / "face_arcface.voy"
-        assert config.adaface_index_path == tmp_path / "face_adaface.voy"
+        assert config.embedding_index_path == tmp_path / "face_embeddings.usearch"
+        assert config.local_embedding_index_path == tmp_path / "local_embeddings.usearch"
+        assert config.local_faces_json_path == tmp_path / "local_faces.json"
         assert config.sqlite_db_path == tmp_path / "performers.db"
         assert config.faces_json_path == tmp_path / "faces.json"
         assert config.performers_json_path == tmp_path / "performers.json"
@@ -46,11 +45,11 @@ class TestDatabaseConfig:
         assert config.data_dir == new_dir
 
     def test_custom_path_preserved(self, tmp_path):
-        custom_facenet = tmp_path / "custom_facenet.voy"
-        config = DatabaseConfig(data_dir=tmp_path, facenet_index_path=custom_facenet)
-        assert config.facenet_index_path == custom_facenet
+        custom_index = tmp_path / "custom_embeddings.usearch"
+        config = DatabaseConfig(data_dir=tmp_path, embedding_index_path=custom_index)
+        assert config.embedding_index_path == custom_index
         # Other paths should still use defaults
-        assert config.arcface_index_path == tmp_path / "face_arcface.voy"
+        assert config.local_embedding_index_path == tmp_path / "local_embeddings.usearch"
 
 
 class TestGetStashboxShortname:
@@ -84,5 +83,4 @@ class TestStashboxEndpointsDict:
         assert "https://theporndb.net/graphql" in STASHBOX_ENDPOINTS
 
     def test_dimensions(self):
-        assert FACENET_DIM == 512
-        assert ARCFACE_DIM == 512
+        assert EMBEDDING_DIM == 512

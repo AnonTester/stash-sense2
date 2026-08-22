@@ -429,7 +429,17 @@ class BaseUpstreamAnalyzer(BaseAnalyzer):
                         skip_local_ids.add(local_id)
                     continue
 
-                changed_fields = ", ".join(c["field"] for c in changes)
+                # changes is list[dict] per this class's own _diff_fields
+                # contract, but UpstreamSceneAnalyzer deliberately overrides
+                # that and returns a single dict instead (relational
+                # scene diffs don't fit the flat per-field list shape --
+                # see its _diff_fields docstring). Handle both rather than
+                # assuming list, or this debug line crashes on every scene
+                # change instead of just logging it.
+                if isinstance(changes, list):
+                    changed_fields = ", ".join(c["field"] for c in changes)
+                else:
+                    changed_fields = ", ".join(str(k) for k in changes)
                 logger.debug(
                     f"[{display_name}] '{entity_label}' (id={local_id}): "
                     f"{len(changes)} field(s) differ ({changed_fields})"

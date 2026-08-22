@@ -1,8 +1,17 @@
 """Tests for stash_client_unified.py - URL/header setup, sync execution, connection testing."""
 
+import json
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 import httpx
+
+
+def _mock_response(payload):
+    """_execute_sync reads response.content (raw bytes), not response.json()."""
+    mock_response = MagicMock()
+    mock_response.content = json.dumps(payload).encode("utf-8")
+    mock_response.raise_for_status = MagicMock()
+    return mock_response
 
 
 class TestClientInit:
@@ -53,11 +62,7 @@ class TestExecuteSync:
 
         client = StashClientUnified("http://localhost:9999")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "data": {"systemStatus": {"databaseSchema": 60}}
-        }
-        mock_response.raise_for_status = MagicMock()
+        mock_response = _mock_response({"data": {"systemStatus": {"databaseSchema": 60}}})
 
         with patch("httpx.Client") as MockClient:
             mock_instance = MagicMock()
@@ -76,9 +81,7 @@ class TestExecuteSync:
 
         client = StashClientUnified("http://localhost:9999")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"data": {"test": True}}
-        mock_response.raise_for_status = MagicMock()
+        mock_response = _mock_response({"data": {"test": True}})
 
         with patch("httpx.Client") as MockClient:
             mock_instance = MagicMock()
@@ -97,9 +100,7 @@ class TestExecuteSync:
 
         client = StashClientUnified("http://localhost:9999")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"data": {"findPerformer": {"id": "1"}}}
-        mock_response.raise_for_status = MagicMock()
+        mock_response = _mock_response({"data": {"findPerformer": {"id": "1"}}})
 
         with patch("httpx.Client") as MockClient:
             mock_instance = MagicMock()
@@ -119,11 +120,7 @@ class TestExecuteSync:
 
         client = StashClientUnified("http://localhost:9999")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "errors": [{"message": "Field not found"}]
-        }
-        mock_response.raise_for_status = MagicMock()
+        mock_response = _mock_response({"errors": [{"message": "Field not found"}]})
 
         with patch("httpx.Client") as MockClient:
             mock_instance = MagicMock()
@@ -160,9 +157,7 @@ class TestExecuteSync:
 
         client = StashClientUnified("http://localhost:9999", api_key="secret-123")
 
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"data": {"test": True}}
-        mock_response.raise_for_status = MagicMock()
+        mock_response = _mock_response({"data": {"test": True}})
 
         with patch("httpx.Client") as MockClient:
             mock_instance = MagicMock()

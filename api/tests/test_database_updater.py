@@ -79,14 +79,20 @@ def _make_release_zip(dest: Path, version: str = "2026.02.15", extra_files: dict
 
 
 def _github_release_json(tag: str = "2026.02.15", zip_url: str = "https://github.com/fake/download.zip"):
-    """Return a dict resembling a GitHub latest-release API response."""
+    """Return a dict resembling a GitHub latest-release API response.
+
+    Asset name must match check_update()'s exact naming convention
+    ("stash-sense2-data-<version>.zip") -- it deliberately doesn't match
+    "any .zip", since delta zips (stash-sense2-delta-*.zip) live on the
+    same release.
+    """
     return {
         "tag_name": tag,
         "name": f"Release {tag}",
         "published_at": "2026-02-15T00:00:00Z",
         "assets": [
             {
-                "name": "stash-sense-data.zip",
+                "name": f"stash-sense2-data-{tag}.zip",
                 "browser_download_url": zip_url,
                 "size": 12345,
             }
@@ -197,7 +203,8 @@ class TestCheckUpdate:
         mock_response.json.return_value = release_json
         mock_response.raise_for_status = MagicMock()
 
-        with patch("database_updater.httpx.AsyncClient") as MockClient:
+        with patch("database_updater.httpx.AsyncClient") as MockClient, \
+             patch("database_updater.find_delta_chain", AsyncMock(return_value=None)):
             client_instance = AsyncMock()
             client_instance.get.return_value = mock_response
             MockClient.return_value.__aenter__ = AsyncMock(return_value=client_instance)
@@ -206,7 +213,8 @@ class TestCheckUpdate:
             result1 = await updater.check_update()
             result2 = await updater.check_update()
 
-        # Should only make one HTTP request due to caching
+        # Should only make one HTTP request (for the release lookup) due to
+        # caching -- find_delta_chain is a separate concern, mocked out here.
         assert client_instance.get.call_count == 1
         assert result1 == result2
 
@@ -431,7 +439,12 @@ class TestSwapFiles:
         assert (data_dir / "custom_file.txt").read_text() == "keep me"
 
     def test_handles_optional_release_files(self, tmp_path):
-        """Optional release files (e.g. face_adaface.voy) are swapped if present in extract."""
+        """A RELEASE_FILES member that isn't in REQUIRED_FILES is swapped
+        if present in the extract dir, but its absence doesn't block an
+        update (see test_preserves_optional_files_absent_from_extract).
+        RELEASE_FILES == REQUIRED_FILES for every file this project
+        currently ships, so a synthetic optional filename stands in here
+        to exercise that distinction generically."""
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
@@ -444,12 +457,13 @@ class TestSwapFiles:
         extract_dir.mkdir()
         for fname in REQUIRED_FILES:
             (extract_dir / fname).write_text(f"new-{fname}")
-        # Include an optional file
-        (extract_dir / "face_adaface.voy").write_bytes(b"adaface-data")
+        # Include an optional (RELEASE_FILES but not REQUIRED_FILES) file
+        (extract_dir / "optional_extra_file.bin").write_bytes(b"optional-data")
 
-        updater._swap_files(extract_dir)
+        with patch("database_updater.RELEASE_FILES", REQUIRED_FILES | {"optional_extra_file.bin"}):
+            updater._swap_files(extract_dir)
 
-        assert (data_dir / "face_adaface.voy").read_bytes() == b"adaface-data"
+        assert (data_dir / "optional_extra_file.bin").read_bytes() == b"optional-data"
 
     def test_preserves_optional_files_absent_from_extract(self, tmp_path):
         """Files that exist locally but are neither in RELEASE_FILES nor
