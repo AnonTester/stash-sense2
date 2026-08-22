@@ -1,5 +1,16 @@
 ## 2026-08-22
 
+### 0.14.1
+- Fix: installed alongside v1 (stash-sense), this plugin silently read
+  v1's sidecar URL and drove v1's backend instead of its own -- Stash
+  derives a local plugin's id from its install folder name, but the JS
+  had `PLUGIN_ID` hardcoded to `'stash-sense'` (v1's id) instead of
+  `'stash-sense2'`, so every settings lookup and backend call was
+  unknowingly routed to v1. Also fixes the plugin's displayed name
+  ("Stash Sense" -> "Stash Sense 2") in Stash's plugin list and the
+  recommendations dashboard header, which had the same missing-"2"
+  problem and made the two impossible to tell apart in the UI.
+
 ### 0.14.0
 - Remove: tattoo and body-proportion identification signals, entirely.
   A real matching-accuracy benchmark (100 tattoo-tagged scenes, a real

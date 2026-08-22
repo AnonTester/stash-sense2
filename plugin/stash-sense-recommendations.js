@@ -493,7 +493,7 @@
     });
     appHeader.innerHTML = `
       <div class="ss-app-header-left">
-        <h1>Stash Sense</h1>
+        <h1>${SS.PLUGIN_NAME}</h1>
         <p class="ss-dashboard-subtitle">Library analysis and curation tools</p>
       </div>
       <div class="ss-app-header-right" id="ss-status-area"></div>
@@ -702,7 +702,7 @@
             </svg>
           </div>
           <h2>Connection Error</h2>
-          <p>Make sure the Stash Sense sidecar is running and configured correctly.</p>
+          <p>Make sure the ${SS.PLUGIN_NAME} sidecar is running and configured correctly.</p>
           <button class="ss-btn ss-btn-primary" id="ss-retry-btn">Retry</button>
         </div>
       `;

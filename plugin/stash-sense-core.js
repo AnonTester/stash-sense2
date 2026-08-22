@@ -6,9 +6,24 @@
   'use strict';
 
   // Plugin configuration
-  const PLUGIN_ID = 'stash-sense';
-  const PLUGIN_NAME = 'Stash Sense';
-  const PLUGIN_VERSION = '0.14.0';
+  //
+  // PLUGIN_ID must match the directory name this plugin is actually
+  // installed under in Stash (Stash derives a local plugin's id from its
+  // folder name, not from any field in the .yml manifest -- see
+  // stash-plugin-repo's own docs for the same rule on the distributed
+  // path). It's used both to look up this plugin's own saved settings
+  // (configuration.plugins[PLUGIN_ID] via GraphQL) and to route
+  // runPluginOperation calls to the right backend script. Getting this
+  // wrong doesn't error -- it silently reads/drives *whichever other
+  // plugin* happens to be installed under the stale id instead, which is
+  // exactly what happened here: this stayed 'stash-sense' (v1's id) while
+  // v2 was installed side-by-side under 'stash-sense2', so v2's UI was
+  // unknowingly reading v1's sidecar URL and invoking v1's backend the
+  // entire time. If you install this under a different local folder name,
+  // change this constant to match.
+  const PLUGIN_ID = 'stash-sense2';
+  const PLUGIN_NAME = 'Stash Sense 2';
+  const PLUGIN_VERSION = '0.14.1';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
