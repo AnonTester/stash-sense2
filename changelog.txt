@@ -1,3 +1,18 @@
+## 2026-08-23
+
+### 0.14.4
+- Fix: fingerprint generation aborted the entire overnight run on the
+  first Stash connectivity hiccup while fetching the next batch of
+  scenes -- a homeserver auto-update cron restarted the Stash container
+  mid-run, causing a ~20s outage that killed a job that had otherwise
+  been running fine for hours. Now retries through a Stash connectivity
+  outage (connect errors, timeouts) for up to 5 minutes before giving up,
+  covering brief restarts/network blips instead of dying on the first one.
+- Improvement: when the job does eventually give up, the error message
+  now specifically says it couldn't connect to the Stash instance (naming
+  the URL and how long it retried) instead of a generic "Network
+  connection failed".
+
 ## 2026-08-22
 
 ### 0.14.5

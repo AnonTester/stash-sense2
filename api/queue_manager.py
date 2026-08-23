@@ -18,8 +18,15 @@ logger = logging.getLogger(__name__)
 def _friendly_error_message(exc: Exception, job_row: Optional[dict]) -> str:
     """Convert a job exception into a short, user-readable error string."""
     import httpx
+    from fingerprint_generator import StashUnavailableError
     items = (job_row or {}).get("items_processed") or 0
     progress = f" ({items:,} items processed)" if items else ""
+    if isinstance(exc, StashUnavailableError):
+        # Already names Stash specifically and includes the retry budget
+        # spent (see fingerprint_generator._get_scenes_with_retry) --
+        # more useful here than the generic network messages below, which
+        # don't distinguish "can't reach Stash" from any other remote.
+        return f"{exc}{progress}"
     if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout)):
         return f"Network timeout after retries{progress}"
     if isinstance(exc, httpx.ConnectError):

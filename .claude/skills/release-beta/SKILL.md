@@ -7,6 +7,8 @@ description: Release a new sidecar beta version - bumps the sidecar's version fi
 
 This releases the **sidecar** (the Docker image built and published to GHCR). Plugin releases are a separate, independent track published through `AnonTester/stash-plugin-repo` — see `stash-sense-context`'s "Related Skills" note. Don't bump plugin files here unless the sidecar release is bundled with a plugin change too (in which case bump the plugin pair to whatever version makes sense for it, not necessarily matching this tag).
 
+**Only run this when the user explicitly asks for a release** — not routinely after a change, even a sidecar one. The tag push triggers a real GHCR image build (all 3 variants, ~30min for the ROCm one) and a public GitHub Release; see CLAUDE.md's "Cutting a sidecar release tag" note.
+
 ## Version Convention
 
 Beta versions follow this pattern: `X.Y.Z-beta.N`

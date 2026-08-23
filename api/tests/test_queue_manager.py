@@ -1,6 +1,7 @@
 """Tests for QueueManager."""
+import httpx
 import pytest
-from queue_manager import QueueManager
+from queue_manager import QueueManager, _friendly_error_message
 from job_models import ResourceType, JobPriority
 
 
@@ -177,3 +178,59 @@ class TestScheduleSeeding:
         mgr.seed_default_schedules()
         schedule = db.get_job_schedule("duplicate_performer")
         assert schedule["interval_hours"] == 999.0
+
+
+class TestFriendlyErrorMessage:
+    def test_stash_unavailable_names_stash_specifically(self):
+        from fingerprint_generator import StashUnavailableError
+
+        exc = StashUnavailableError(
+            "Could not connect to the Stash instance at http://192.168.1.2:9997 "
+            "after retrying for 5 minutes (12 attempts) -- last error: Connection refused"
+        )
+
+        message = _friendly_error_message(exc, job_row=None)
+
+        assert "Stash instance" in message
+        assert "192.168.1.2:9997" in message
+
+    def test_stash_unavailable_includes_items_processed(self):
+        from fingerprint_generator import StashUnavailableError
+
+        exc = StashUnavailableError("Could not connect to the Stash instance at http://x")
+        message = _friendly_error_message(exc, job_row={"items_processed": 42})
+
+        assert "42 items processed" in message
+
+    def test_connect_timeout_is_network_timeout(self):
+        message = _friendly_error_message(httpx.ConnectTimeout("timed out"), job_row=None)
+        assert message == "Network timeout after retries"
+
+    def test_read_timeout_is_network_timeout(self):
+        message = _friendly_error_message(httpx.ReadTimeout("timed out"), job_row=None)
+        assert message == "Network timeout after retries"
+
+    def test_connect_error_without_stash_context_is_generic(self):
+        # A plain httpx.ConnectError not wrapped in StashUnavailableError
+        # (e.g. from some other remote call) keeps the generic message --
+        # only the fingerprint generator's Stash-specific retry path
+        # raises StashUnavailableError.
+        message = _friendly_error_message(httpx.ConnectError("refused"), job_row=None)
+        assert message == "Network connection failed"
+
+    def test_http_status_error_includes_status_code(self):
+        request = httpx.Request("GET", "http://example.com")
+        response = httpx.Response(503, request=request)
+        exc = httpx.HTTPStatusError("error", request=request, response=response)
+
+        message = _friendly_error_message(exc, job_row=None)
+
+        assert message == "HTTP 503 from remote"
+
+    def test_generic_exception_falls_back_to_str(self):
+        message = _friendly_error_message(ValueError("something broke"), job_row=None)
+        assert message == "something broke"
+
+    def test_generic_exception_truncated_at_200_chars(self):
+        message = _friendly_error_message(ValueError("x" * 500), job_row=None)
+        assert len(message) == 200

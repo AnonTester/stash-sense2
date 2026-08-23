@@ -21,8 +21,10 @@ Usage:
         print(f"Progress: {progress.processed}/{progress.total}")
 """
 
+import asyncio
 import httpx
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional, AsyncIterator
 from enum import Enum
@@ -35,6 +37,17 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+# How long to keep retrying a Stash connectivity failure (container
+# restart, brief network blip) before giving up on the whole run --
+# see get_scenes_for_fingerprinting()'s own retry wrapper below. An
+# overnight batch run shouldn't die over an outage this short.
+STASH_RETRY_BUDGET_SECONDS = 300
+STASH_RETRY_INTERVAL_SECONDS = 15
+
+
+class StashUnavailableError(RuntimeError):
+    """Raised when Stash stays unreachable past STASH_RETRY_BUDGET_SECONDS."""
 
 
 class GeneratorStatus(str, Enum):
@@ -162,6 +175,36 @@ class SceneFingerprintGenerator:
             self._progress.status = GeneratorStatus.STOPPING
             logger.info("Stop requested, will finish current scene")
 
+    async def _get_scenes_with_retry(self, limit: int, offset: int) -> tuple[list, int]:
+        """Fetch a page of scenes from Stash, retrying through a brief
+        connectivity outage (Stash container restart, transient network
+        blip) instead of letting the whole overnight run die on the first
+        hiccup. Gives up after STASH_RETRY_BUDGET_SECONDS and raises
+        StashUnavailableError with a message that names Stash specifically,
+        not a generic network error.
+        """
+        deadline = time.monotonic() + STASH_RETRY_BUDGET_SECONDS
+        attempt = 0
+        while True:
+            try:
+                return await self.stash.get_scenes_for_fingerprinting(limit=limit, offset=offset)
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
+                attempt += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise StashUnavailableError(
+                        f"Could not connect to the Stash instance at {self.stash.base_url} "
+                        f"after retrying for {STASH_RETRY_BUDGET_SECONDS // 60} minutes "
+                        f"({attempt} attempts) -- last error: {e}"
+                    ) from e
+                wait = min(STASH_RETRY_INTERVAL_SECONDS, remaining)
+                logger.warning(
+                    "Stash unreachable while fetching scenes for fingerprinting "
+                    "(attempt %d, %.0fs left before giving up): %s -- retrying in %.0fs",
+                    attempt, remaining, e, wait,
+                )
+                await asyncio.sleep(wait)
+
     async def generate_all(
         self,
         refresh_outdated: bool = True,
@@ -195,7 +238,7 @@ class SceneFingerprintGenerator:
 
         try:
             # Get total scene count
-            _, total = await self.stash.get_scenes_for_fingerprinting(limit=1, offset=0)
+            _, total = await self._get_scenes_with_retry(limit=1, offset=0)
             self._progress.total_scenes = total
 
             if resuming:
@@ -216,7 +259,7 @@ class SceneFingerprintGenerator:
             offset = start_offset
             while offset < total and not self._stop_requested:
                 # Fetch batch of scenes
-                scenes, _ = await self.stash.get_scenes_for_fingerprinting(
+                scenes, _ = await self._get_scenes_with_retry(
                     limit=batch_size,
                     offset=offset,
                 )
