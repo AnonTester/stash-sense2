@@ -1,5 +1,18 @@
 ## 2026-08-23
 
+### 0.14.11 (plugin only)
+- Improvement: returning from a recommendation's detail view to its list
+  (any type -- Scene Stash-Box Tagger, Duplicate Performers/Scenes/Scene
+  Files, Upstream Performer/Tag/Studio/Scene Changes) no longer does a
+  full re-fetch + re-sort of the whole list, which visibly took several
+  seconds. The last-fetched page is now cached; plain Back (nothing
+  changed) reuses it instantly, and accepting/matching/dismissing/
+  resolving one recommendation -- or the existing stale-scene check
+  finding it's no longer available -- surgically drops just that one
+  entry from the cache instead of invalidating it, so the rest of the
+  list keeps its order and doesn't reload either. Any real change of
+  type, status filter, or page still fetches fresh as before.
+
 ### 0.14.9 (sidecar only)
 - Fix: AMD GPU VRAM detection (`hardware.py`'s `_probe_amd_gpu_vram_mb()`)
   picked the first `/sys/class/drm/card*/device/mem_info_vram_total`

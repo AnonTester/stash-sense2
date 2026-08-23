@@ -472,6 +472,13 @@
     page: 0,
     selectedRec: null,
     counts: null,
+    // Cache of the last-fetched list page, keyed by "type:status:page" --
+    // lets returning from a detail view (plain Back, or after resolving/
+    // dismissing/matching one recommendation) skip a full re-fetch +
+    // re-sort of the whole list. See renderList()'s cache-hit branch and
+    // removeFromListCache(). Any real change of type/status/page just
+    // naturally misses the cache since the key won't match.
+    listCache: null,
   };
 
   // (Polling for analysis/fingerprint progress now handled by Operations tab)
@@ -1344,21 +1351,63 @@
       });
     }
 
-    // Load recommendations and counts in parallel
+    // Load recommendations and counts -- reuse the cached last-fetched page
+    // instead of re-fetching and re-sorting from scratch when returning
+    // from a detail view with nothing to invalidate (plain Back button),
+    // or after a single recommendation was resolved/dismissed/matched
+    // there (removeFromListCache() already surgically removed it from the
+    // cache before navigating back). Any real change of type/status/page
+    // naturally misses the cache since the key below won't match.
+    const PAGE_SIZE = 25;
+    const cacheKey = `${currentState.type}:${currentState.status}:${currentState.page}`;
+    const cached = currentState.listCache;
     try {
-      const PAGE_SIZE = 25;
-      const [result, countsResult] = await Promise.all([
-        RecommendationsAPI.getList({
-          type: currentState.type,
-          status: currentState.status,
-          limit: PAGE_SIZE,
-          offset: currentState.page * PAGE_SIZE,
-        }),
-        RecommendationsAPI.getCounts(),
-      ]);
+      let recommendations, total, typeCounts;
+
+      if (cached && cached.key === cacheKey) {
+        ({ recommendations, total, typeCounts } = cached);
+      } else {
+        const [result, countsResult] = await Promise.all([
+          RecommendationsAPI.getList({
+            type: currentState.type,
+            status: currentState.status,
+            limit: PAGE_SIZE,
+            offset: currentState.page * PAGE_SIZE,
+          }),
+          RecommendationsAPI.getCounts(),
+        ]);
+
+        typeCounts = countsResult.counts?.[currentState.type] || {};
+        recommendations = result.recommendations;
+        total = result.total;
+
+        // Defensive client-side ordering for Scene Stash-Box Tagger:
+        // high-confidence first, then confidence descending.
+        if (currentState.type === 'scene_fingerprint_match') {
+          recommendations.sort((a, b) => {
+            const aHigh = a?.details?.high_confidence ? 1 : 0;
+            const bHigh = b?.details?.high_confidence ? 1 : 0;
+            if (aHigh !== bHigh) return bHigh - aHigh;
+            const aConf = Number(a?.confidence || 0);
+            const bConf = Number(b?.confidence || 0);
+            if (aConf !== bConf) return bConf - aConf;
+            return Number(b?.id || 0) - Number(a?.id || 0);
+          });
+        } else if (currentState.type === 'duplicate_scenes' && currentState.status === 'pending') {
+          // Defensive client-side ordering for pending items: high confidence first.
+          // Dismissed/resolved use server-side recency sort — don't override it.
+          recommendations.sort((a, b) => {
+            const aConf = getDuplicateSceneConfidencePercent(a);
+            const bConf = getDuplicateSceneConfidencePercent(b);
+            if (aConf !== bConf) return bConf - aConf;
+            return Number(b?.id || 0) - Number(a?.id || 0);
+          });
+        }
+
+        currentState.listCache = { key: cacheKey, recommendations, total, typeCounts };
+      }
 
       // Update tab labels with counts
-      const typeCounts = countsResult.counts?.[currentState.type] || {};
       container.querySelectorAll('.ss-filter-tab').forEach(tab => {
         const status = tab.dataset.status;
         const count = typeCounts[status] || 0;
@@ -1366,32 +1415,9 @@
         tab.textContent = `${label} (${count})`;
       });
 
-      // Defensive client-side ordering for Scene Stash-Box Tagger:
-      // high-confidence first, then confidence descending.
-      if (currentState.type === 'scene_fingerprint_match') {
-        result.recommendations.sort((a, b) => {
-          const aHigh = a?.details?.high_confidence ? 1 : 0;
-          const bHigh = b?.details?.high_confidence ? 1 : 0;
-          if (aHigh !== bHigh) return bHigh - aHigh;
-          const aConf = Number(a?.confidence || 0);
-          const bConf = Number(b?.confidence || 0);
-          if (aConf !== bConf) return bConf - aConf;
-          return Number(b?.id || 0) - Number(a?.id || 0);
-        });
-      } else if (currentState.type === 'duplicate_scenes' && currentState.status === 'pending') {
-        // Defensive client-side ordering for pending items: high confidence first.
-        // Dismissed/resolved use server-side recency sort — don't override it.
-        result.recommendations.sort((a, b) => {
-          const aConf = getDuplicateSceneConfidencePercent(a);
-          const bConf = getDuplicateSceneConfidencePercent(b);
-          if (aConf !== bConf) return bConf - aConf;
-          return Number(b?.id || 0) - Number(a?.id || 0);
-        });
-      }
-
       const listContent = container.querySelector('.ss-list-content');
 
-      if (result.recommendations.length === 0) {
+      if (recommendations.length === 0) {
         // Nothing pending to act on -- hide these rather than just disabling
         // them, since a greyed-out "Accept All"/"Dismiss All" reads as a
         // broken button rather than "there's nothing here."
@@ -1412,7 +1438,7 @@
 
       listContent.innerHTML = '';
 
-      for (const rec of result.recommendations) {
+      for (const rec of recommendations) {
         const card = renderRecommendationCard(rec);
         if (rec.status !== 'pending' && rec.updated_at) {
           const dateBadge = document.createElement('div');
@@ -1429,7 +1455,7 @@
       }
 
       // Pagination controls
-      const totalPages = Math.ceil(result.total / PAGE_SIZE);
+      const totalPages = Math.ceil(total / PAGE_SIZE);
       if (totalPages > 1) {
         const pagination = document.createElement('div');
         pagination.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0;';
@@ -1470,6 +1496,25 @@
           <p>Failed to load recommendations: ${e.message}</p>
         </div>
       `;
+    }
+  }
+
+  // Surgically drops one recommendation from the cached list page (see
+  // renderList()'s cache-hit branch) instead of invalidating the whole
+  // cache -- called right before navigating back to the list from a
+  // detail view whose recommendation was just resolved/dismissed/matched,
+  // or found stale (source/target no longer exists). No-ops harmlessly if
+  // there's no cache yet, or the id isn't on the cached page (e.g. it was
+  // resolved from a different page/filter than what's cached).
+  function removeFromListCache(recId) {
+    const cache = currentState.listCache;
+    if (!cache || recId == null) return;
+    const idx = cache.recommendations.findIndex(r => r.id === recId);
+    if (idx === -1) return;
+    cache.recommendations.splice(idx, 1);
+    cache.total = Math.max(0, cache.total - 1);
+    if (cache.typeCounts && cache.typeCounts[currentState.status] != null) {
+      cache.typeCounts[currentState.status] = Math.max(0, cache.typeCounts[currentState.status] - 1);
     }
   }
 
@@ -1746,6 +1791,7 @@
             : `Failed to open recommendation: ${msg}`,
           stale ? 'warning' : 'error',
         );
+        if (stale) removeFromListCache(rec.id);
         currentState.view = 'list';
         currentState.selectedRec = null;
         renderCurrentView(document.getElementById('ss-recommendations') || container);
@@ -1891,6 +1937,7 @@
         btn.disabled = true;
         btn.textContent = 'Dismissing...';
         await RecommendationsAPI.dismiss(rec.id, 'User dismissed');
+        removeFromListCache(rec.id);
         currentState.view = 'list';
         currentState.selectedRec = null;
         renderCurrentView(document.getElementById('ss-recommendations'));
@@ -2026,6 +2073,7 @@
         btn.disabled = true;
         btn.textContent = 'Dismissing...';
         await RecommendationsAPI.dismiss(rec.id, 'User dismissed');
+        removeFromListCache(rec.id);
         currentState.view = 'list';
         currentState.selectedRec = null;
         renderCurrentView(document.getElementById('ss-recommendations'));
@@ -2237,6 +2285,7 @@
     }
 
     function returnToRecommendationList() {
+      removeFromListCache(rec.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations') || container);
@@ -2857,6 +2906,11 @@
     buttonEl.textContent = successText;
     buttonEl.classList.add('ss-btn-success');
     setTimeout(() => {
+      // The action that got us here (accept/merge/resolve/etc.) already
+      // succeeded server-side -- drop this one recommendation from the
+      // cached list instead of invalidating it, so returning to the list
+      // is instant and doesn't reorder/reload everything else.
+      removeFromListCache(currentState.selectedRec?.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations'));
@@ -2990,6 +3044,7 @@
         try {
           await RecommendationsAPI.resolve(rec.id, 'auto_resolved', { note: 'Performer was deleted from Stash' });
         } catch (_) {}
+        removeFromListCache(rec.id);
         currentState.view = 'list';
         currentState.selectedRec = null;
         renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3007,6 +3062,7 @@
       try {
         await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', { note: 'All differences were cosmetic' });
       } catch (_) {}
+      removeFromListCache(rec.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3152,6 +3208,7 @@
         dismissToggle.textContent = 'Dismissing...';
         try {
           await RecommendationsAPI.dismissUpstream(rec.id, 'User dismissed', opt.permanent);
+          removeFromListCache(rec.id);
           currentState.view = 'list';
           currentState.selectedRec = null;
           renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3521,6 +3578,7 @@
       try {
         await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', { note: 'All differences were cosmetic' });
       } catch (_) {}
+      removeFromListCache(rec.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3633,6 +3691,7 @@
         dismissToggle.textContent = 'Dismissing...';
         try {
           await RecommendationsAPI.dismissUpstream(rec.id, 'User dismissed', opt.permanent);
+          removeFromListCache(rec.id);
           currentState.view = 'list';
           currentState.selectedRec = null;
           renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3816,6 +3875,7 @@
       try {
         await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', { note: 'All differences were cosmetic' });
       } catch (_) {}
+      removeFromListCache(rec.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations'));
@@ -3926,6 +3986,7 @@
         dismissToggle.textContent = 'Dismissing...';
         try {
           await RecommendationsAPI.dismissUpstream(rec.id, null, opt.permanent);
+          removeFromListCache(rec.id);
           currentState.view = 'list';
           currentState.selectedRec = null;
           renderCurrentView(document.getElementById('ss-recommendations'));
@@ -4201,6 +4262,7 @@
       try {
         await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', { note: 'All differences were cosmetic' });
       } catch (_) {}
+      removeFromListCache(rec.id);
       currentState.view = 'list';
       currentState.selectedRec = null;
       renderCurrentView(document.getElementById('ss-recommendations'));
@@ -4806,6 +4868,7 @@
         dismissToggle.textContent = 'Dismissing...';
         try {
           await RecommendationsAPI.dismissUpstream(rec.id, null, opt.permanent);
+          removeFromListCache(rec.id);
           currentState.view = 'list';
           currentState.selectedRec = null;
           renderCurrentView(document.getElementById('ss-recommendations'));
@@ -4951,6 +5014,7 @@
           const stale = /recommendation not found|recommendation removed because referenced scene no longer exists/i.test(msg);
           if (stale) {
             showToast('Recommendation removed because source/target scene no longer exists.', 'warning');
+            removeFromListCache(rec.id);
             currentState.view = 'list';
             currentState.selectedRec = null;
             renderCurrentView(document.getElementById('ss-recommendations') || container);
@@ -4974,6 +5038,7 @@
         const stale = /scene .*not found|removed stale upstream scene recommendation|recommendation removed because referenced scene no longer exists|recommendation not found/i.test(msg);
         if (stale) {
           showToast('Recommendation removed because source/target scene no longer exists.', 'warning');
+          removeFromListCache(rec.id);
           currentState.view = 'list';
           currentState.selectedRec = null;
           renderCurrentView(document.getElementById('ss-recommendations') || container);
@@ -5780,6 +5845,7 @@
       page: 0,
       selectedRec: null,
       counts: null,
+      listCache: null,
     };
 
     renderCurrentView(container);
@@ -5806,6 +5872,7 @@
       page: 0,
       selectedRec: null,
       counts: null,
+      listCache: null,
     };
 
     entityCache.clear();
