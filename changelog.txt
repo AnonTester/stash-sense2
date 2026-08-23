@@ -1,5 +1,16 @@
 ## 2026-08-23
 
+### 0.14.7
+- Fix: Operations tab progress bars for active jobs always rendered full
+  (100% width) regardless of actual progress, while the adjacent text
+  correctly showed the real `processed / total (pct%)` figures. Cause:
+  `createElement()`'s `styles` option (used only by the progress fill
+  bar) was never actually implemented, so the intended `width: {pct}%`
+  inline style was silently dropped every time; the bar's `<div>` then
+  just defaulted to filling its parent's full width like any other
+  block element. Not specific to resumed jobs -- affected every
+  determinate-progress job, always.
+
 ### 0.14.6
 - Improvement: changing Detection Resolution now shows a confirmation
   modal explaining that existing scene fingerprints are a frozen

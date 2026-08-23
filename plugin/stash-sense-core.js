@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.14.6';
+  const PLUGIN_VERSION = '0.14.7';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -487,6 +487,7 @@
         el.setAttribute(key, value);
       }
     }
+    if (options.styles) Object.assign(el.style, options.styles);
     if (options.events) {
       for (const [event, handler] of Object.entries(options.events)) {
         el.addEventListener(event, handler);
