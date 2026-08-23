@@ -74,11 +74,11 @@ class TestGetSingleSetting:
     """Test GET /settings/{key}."""
 
     def test_existing_setting(self, client):
-        resp = client.get("/settings/embedding_batch_size")
+        resp = client.get("/settings/detection_size")
         assert resp.status_code == 200
         data = resp.json()
-        assert data["key"] == "embedding_batch_size"
-        assert data["value"] == 32  # gpu-high default
+        assert data["key"] == "detection_size"
+        assert data["value"] == 640  # gpu-high default
         assert data["is_override"] is False
 
     def test_unknown_setting(self, client):
@@ -106,7 +106,7 @@ class TestUpdateSetting:
         assert resp.status_code == 404
 
     def test_update_out_of_range(self, client):
-        resp = client.put("/settings/embedding_batch_size", json={"value": 0})
+        resp = client.put("/settings/detection_size", json={"value": 0})
         assert resp.status_code == 422
 
     def test_update_bool(self, client):
@@ -149,14 +149,14 @@ class TestResetSetting:
 
     def test_reset_reverts_to_default(self, client):
         # Set override
-        client.put("/settings/embedding_batch_size", json={"value": 64})
-        resp = client.get("/settings/embedding_batch_size")
+        client.put("/settings/detection_size", json={"value": 320})
+        resp = client.get("/settings/detection_size")
         assert resp.json()["is_override"] is True
 
         # Reset
-        resp = client.delete("/settings/embedding_batch_size")
+        resp = client.delete("/settings/detection_size")
         assert resp.status_code == 200
-        assert resp.json()["value"] == 32  # gpu-high default
+        assert resp.json()["value"] == 640  # gpu-high default
         assert resp.json()["is_override"] is False
 
     def test_reset_unknown_setting(self, client):

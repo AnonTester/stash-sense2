@@ -66,27 +66,31 @@ class TestResolution:
         assert mgr_gpu_high.get("stash_api_rate") == 5.0
 
     def test_tier_default_gpu_high(self, mgr_gpu_high):
-        assert mgr_gpu_high.get("embedding_batch_size") == 32
+        assert mgr_gpu_high.get("gpu_enabled") is True
 
     def test_tier_default_cpu(self, mgr_cpu):
-        assert mgr_cpu.get("embedding_batch_size") == 4
+        assert mgr_cpu.get("gpu_enabled") is False
 
     def test_num_frames_same_across_tiers(self, mgr_gpu_high, mgr_cpu):
-        # Unlike pure throughput knobs (embedding_batch_size,
-        # frame_extraction_concurrency), num_frames and detection_size
-        # affect match accuracy -- deliberately kept equal across tiers
-        # rather than silently degrading results on weaker hardware (see
-        # settings.py's TIER_DEFAULTS "cpu" comment).
+        # num_frames and detection_size affect match accuracy, not just
+        # speed -- deliberately kept equal across tiers rather than
+        # silently degrading results on weaker hardware (see settings.py's
+        # TIER_DEFAULTS "cpu" comment).
         assert mgr_gpu_high.get("num_frames") == 60
         assert mgr_cpu.get("num_frames") == 60
 
-    def test_frame_extraction_concurrency_differs_by_tier(self, mgr_gpu_high, mgr_cpu):
-        assert mgr_gpu_high.get("frame_extraction_concurrency") == 8
-        assert mgr_cpu.get("frame_extraction_concurrency") == 2
+    def test_frame_extraction_concurrency_fixed_not_tier_scaled(self, mgr_gpu_high, mgr_cpu):
+        # Not in TIER_DEFAULTS at all -- measured on this project's own
+        # reference hardware to be a real throughput ceiling (ffmpeg decode
+        # contention), not something that scales with more CPU/GPU
+        # available. See its _define() fallback for the benchmark this is
+        # based on.
+        assert mgr_gpu_high.get("frame_extraction_concurrency") == 4
+        assert mgr_cpu.get("frame_extraction_concurrency") == 4
 
     def test_user_override_wins(self, mgr_gpu_high):
-        mgr_gpu_high.set("embedding_batch_size", 64)
-        assert mgr_gpu_high.get("embedding_batch_size") == 64
+        mgr_gpu_high.set("detection_size", 320)
+        assert mgr_gpu_high.get("detection_size") == 320
 
     def test_unknown_key_raises(self, mgr_gpu_high):
         with pytest.raises(KeyError, match="Unknown setting"):
@@ -101,10 +105,10 @@ class TestPersistence:
         assert mgr_gpu_high.get("stash_api_rate") == 10.0
 
     def test_delete_reverts_to_default(self, mgr_gpu_high):
-        mgr_gpu_high.set("embedding_batch_size", 64)
-        assert mgr_gpu_high.get("embedding_batch_size") == 64
-        mgr_gpu_high.delete("embedding_batch_size")
-        assert mgr_gpu_high.get("embedding_batch_size") == 32  # tier default
+        mgr_gpu_high.set("detection_size", 320)
+        assert mgr_gpu_high.get("detection_size") == 320
+        mgr_gpu_high.delete("detection_size")
+        assert mgr_gpu_high.get("detection_size") == 640  # tier default
 
     def test_delete_unknown_key_raises(self, mgr_gpu_high):
         with pytest.raises(KeyError):
@@ -137,8 +141,8 @@ class TestValidation:
     """Test type coercion and range validation."""
 
     def test_int_coercion(self, mgr_gpu_high):
-        mgr_gpu_high.set("embedding_batch_size", "16")
-        assert mgr_gpu_high.get("embedding_batch_size") == 16
+        mgr_gpu_high.set("detection_size", "320")
+        assert mgr_gpu_high.get("detection_size") == 320
 
     def test_float_coercion(self, mgr_gpu_high):
         mgr_gpu_high.set("stash_api_rate", "7.5")
@@ -154,19 +158,19 @@ class TestValidation:
 
     def test_below_minimum_raises(self, mgr_gpu_high):
         with pytest.raises(ValueError, match="below minimum"):
-            mgr_gpu_high.set("embedding_batch_size", 0)
+            mgr_gpu_high.set("detection_size", 159)
 
     def test_above_maximum_raises(self, mgr_gpu_high):
         with pytest.raises(ValueError, match="above maximum"):
-            mgr_gpu_high.set("embedding_batch_size", 200)
+            mgr_gpu_high.set("detection_size", 1281)
 
     def test_at_minimum_ok(self, mgr_gpu_high):
-        mgr_gpu_high.set("embedding_batch_size", 1)
-        assert mgr_gpu_high.get("embedding_batch_size") == 1
+        mgr_gpu_high.set("detection_size", 160)
+        assert mgr_gpu_high.get("detection_size") == 160
 
     def test_at_maximum_ok(self, mgr_gpu_high):
-        mgr_gpu_high.set("embedding_batch_size", 128)
-        assert mgr_gpu_high.get("embedding_batch_size") == 128
+        mgr_gpu_high.set("detection_size", 1280)
+        assert mgr_gpu_high.get("detection_size") == 1280
 
 
 class TestGetAll:

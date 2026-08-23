@@ -1,5 +1,25 @@
 ## 2026-08-23
 
+### 0.14.5
+- Fix: `frame_extraction_concurrency` (parallel ffmpeg processes for
+  frame extraction) scaled with hardware tier (8/6/2 for gpu-high/gpu-
+  low/cpu), implying more CPU/GPU means more useful ffmpeg concurrency.
+  It doesn't -- re-checked against a dedicated same-hardware worker-
+  scaling benchmark (`video-preview-matcher`'s `02_fingerprint.py`
+  matrix): CPU decode plateaus hard at 4 workers with zero further gain
+  through 16, and VAAPI decode peaks exactly at 4 and measurably
+  *degrades* on both sides of it (shared hardware decode block
+  contention). Fixed at 4 for all tiers now, not scaled by hardware.
+- Removed: `embedding_batch_size` ("Embedding Batch Size", exposed in
+  Settings with tier-scaled defaults 32/16/4) was completely dead code --
+  a leftover from the legacy dual-model (FaceNet512+ArcFace) pipeline,
+  where embedding was a separate batchable inference stage. buffalo_l
+  detects and embeds in one call per image with no separate batched
+  step for this to control; nothing in the codebase ever read this
+  setting. Removed rather than left as a misleading no-op knob, same as
+  the tattoo/body-proportion settings removed earlier in this project's
+  migration.
+
 ### 0.14.4
 - Fix: fingerprint generation aborted the entire overnight run on the
   first Stash connectivity hiccup while fetching the next batch of

@@ -81,12 +81,14 @@ def _define(
 
 
 # -- Performance --
-_define("embedding_batch_size", "Embedding Batch Size",
-        "Faces processed per GPU inference call",
-        "performance", SettingType.INT, fallback=16, min_val=1, max_val=128)
-
 _define("frame_extraction_concurrency", "Frame Extraction Workers",
-        "Parallel ffmpeg processes for frame extraction",
+        "Parallel ffmpeg processes for frame extraction. Fixed at 4 "
+        "regardless of hardware tier -- measured on this project's own "
+        "reference hardware to be the real throughput ceiling for "
+        "concurrent ffmpeg decode (CPU decode plateaus hard at 4 with no "
+        "further gain past it; VAAPI decode peaks exactly at 4 and "
+        "degrades on both sides of it), not something that scales further "
+        "with more CPU/GPU available.",
         "performance", SettingType.INT, fallback=4, min_val=1, max_val=16)
 
 _define("detection_size", "Detection Resolution",
@@ -171,31 +173,31 @@ _define("debug_logging_anonymize", "Anonymise Debug Log",
 
 TIER_DEFAULTS: dict[str, dict[str, Any]] = {
     "gpu-high": {
-        "embedding_batch_size": 32,
-        "frame_extraction_concurrency": 8,
         "detection_size": 640,
         "num_frames": 60,
         "gpu_enabled": True,
     },
     "gpu-low": {
-        "embedding_batch_size": 16,
-        "frame_extraction_concurrency": 6,
+        # Identical to gpu-high now that embedding_batch_size (the only
+        # setting that used to differ between them) is gone -- kept as its
+        # own tier for the hardware classification/display value, not
+        # because any setting here currently depends on the split.
         "detection_size": 640,
         "num_frames": 60,
         "gpu_enabled": True,
     },
     "cpu": {
-        "embedding_batch_size": 4,
-        "frame_extraction_concurrency": 2,
-        # Detection resolution and frame count both affect match accuracy,
-        # not just speed -- unlike batch size/concurrency (pure throughput
-        # knobs), defaulting these lower on CPU-only hardware silently
-        # degrades results. Keep them at the same 640/60 as the GPU tiers;
-        # users who want the speed tradeoff can still lower them explicitly.
+        # Detection resolution and frame count both affect match accuracy --
+        # defaulting these lower on CPU-only hardware silently degrades
+        # results. Keep them at the same 640/60 as the GPU tiers; users who
+        # want the speed tradeoff can still lower them explicitly.
         "detection_size": 640,
         "num_frames": 60,
         "gpu_enabled": False,
     },
+    # frame_extraction_concurrency is deliberately NOT tier-varied here --
+    # see its own _define() fallback below for why it's a fixed, measured
+    # constant rather than a hardware-scaled throughput knob.
 }
 
 
