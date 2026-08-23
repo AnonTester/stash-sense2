@@ -1,5 +1,21 @@
 ## 2026-08-23
 
+### 0.14.10 (sidecar only)
+- Fix: "Accept All Changes" for Upstream Studio Changes processed every
+  pending item but applied none of them. Studios do have an `aliases`
+  field in Stash's schema (already queried elsewhere, e.g.
+  `_resolve_stashbox_studio_to_local`'s alias-match lookup) -- but unlike
+  `update_performer_fields`/`update_tag_fields`, the `/actions/update-
+  studio` endpoint never translated the `_alias_add` meta-key (which
+  `computeBatchChanges` always attaches for a name-field change, "keep
+  old name as alias") into the real `aliases` field before calling
+  `stash.update_studio(**fields)`. `_alias_add` isn't a real
+  `StudioUpdateInput` field, so the mutation failed for every studio with
+  a name-normalization change -- which was effectively all of them, since
+  that's the most common upstream studio change. Now merges it into
+  `aliases` (deduped against the studio's existing aliases) the same way
+  the tag/performer endpoints already do.
+
 ### 0.14.11 (plugin only)
 - Improvement: returning from a recommendation's detail view to its list
   (any type -- Scene Stash-Box Tagger, Duplicate Performers/Scenes/Scene

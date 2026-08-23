@@ -53,6 +53,53 @@ class TestUpdateStudioEndpoint:
             })
             assert resp.status_code == 200
 
+    def test_update_studio_merges_alias_add_meta_key(self, app):
+        """Regression test: studios do have an aliases field (already
+        queried elsewhere, e.g. _resolve_stashbox_studio_to_local), but this
+        endpoint never translated the _alias_add meta-key into it like
+        update_tag_fields/update_performer_fields do -- it reached
+        stash.update_studio(**fields) unhandled, which isn't a real
+        StudioUpdateInput field, failing the whole mutation for every
+        studio name-normalization change sent through "Accept All"."""
+        with patch("recommendations_router.get_stash_client") as mock_get_stash:
+            mock_stash = MagicMock()
+            mock_stash.update_studio = AsyncMock(return_value={"id": "1"})
+            mock_stash._execute = AsyncMock(return_value={
+                "findStudio": {"id": "1", "name": "Old Name", "aliases": ["Existing Alias"]}
+            })
+            mock_get_stash.return_value = mock_stash
+
+            client = TestClient(app)
+            resp = client.post("/recommendations/actions/update-studio", json={
+                "studio_id": "1",
+                "fields": {"name": "New Name", "_alias_add": ["Old Name"]},
+                "endpoint": "https://stashdb.org/graphql",
+            })
+            assert resp.status_code == 200
+            assert resp.json()["success"] is True
+            call_kwargs = mock_stash.update_studio.call_args.kwargs
+            assert "_alias_add" not in call_kwargs
+            assert set(call_kwargs["aliases"]) == {"Existing Alias", "Old Name"}
+
+    def test_update_studio_alias_add_dedupes_case_insensitively(self, app):
+        with patch("recommendations_router.get_stash_client") as mock_get_stash:
+            mock_stash = MagicMock()
+            mock_stash.update_studio = AsyncMock(return_value={"id": "1"})
+            mock_stash._execute = AsyncMock(return_value={
+                "findStudio": {"id": "1", "name": "Studio", "aliases": ["Old Name"]}
+            })
+            mock_get_stash.return_value = mock_stash
+
+            client = TestClient(app)
+            resp = client.post("/recommendations/actions/update-studio", json={
+                "studio_id": "1",
+                "fields": {"_alias_add": ["old name"]},
+                "endpoint": "https://stashdb.org/graphql",
+            })
+            assert resp.status_code == 200
+            call_kwargs = mock_stash.update_studio.call_args.kwargs
+            assert call_kwargs["aliases"] == ["Old Name"]
+
     def test_update_studio_parent_found_locally(self, app):
         """When parent studio exists locally, resolve its ID."""
         with patch("recommendations_router.get_stash_client") as mock_get_stash:

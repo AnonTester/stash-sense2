@@ -2033,6 +2033,41 @@ async def update_studio_fields(request: UpdateStudioRequest):
     fields = dict(request.fields)
     studio_id = request.studio_id
 
+    current_studio: Optional[dict] = None
+
+    async def get_current_studio():
+        nonlocal current_studio
+        if current_studio is None:
+            query = """
+            query GetStudio($id: ID!) {
+              findStudio(id: $id) { id name aliases }
+            }
+            """
+            data = await stash._execute(query, {"id": studio_id})
+            current_studio = data.get("findStudio") or {}
+        return current_studio
+
+    # --- Alias merge (_alias_add meta-key) --- mirrors update_tag_fields/
+    # update_performer_fields: studios do have an `aliases` field (already
+    # queried elsewhere, e.g. _resolve_stashbox_studio_to_local's alias-match
+    # lookup below), this endpoint just never translated the meta-key into
+    # it -- _alias_add reached stash.update_studio(**fields) unhandled,
+    # which isn't a real StudioUpdateInput field, failing the whole
+    # mutation for every studio name-normalization change sent through
+    # "Accept All" (computeBatchChanges always attaches _alias_add for a
+    # name merge_type change, regardless of entity type).
+    alias_additions = fields.pop("_alias_add", None)
+    if alias_additions:
+        studio_data = await get_current_studio()
+        existing_aliases = studio_data.get("aliases") or []
+        seen = {a.lower() for a in existing_aliases}
+        merged = list(existing_aliases)
+        for alias in alias_additions:
+            if alias.lower() not in seen:
+                merged.append(alias)
+                seen.add(alias.lower())
+        fields["aliases"] = merged
+
     # --- Parent studio resolution ---
     parent_stashbox_id = fields.pop("parent_studio", None)
     if parent_stashbox_id:
