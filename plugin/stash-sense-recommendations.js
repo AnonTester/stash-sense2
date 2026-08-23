@@ -1455,6 +1455,19 @@
         currentState.listCache = { key: cacheKey, recommendations, total, typeCounts };
       }
 
+      // If every entry on the current page was surgically removed from the
+      // cache (removeFromListCache, e.g. resolving/dismissing items one by
+      // one) but recommendations still remain overall, the page index is now
+      // past the end -- snap back to the last valid page and re-render
+      // instead of showing a false "no recommendations" empty state. Applies
+      // to every recommendation type/status, since this is the one shared
+      // list renderer they all go through.
+      if (recommendations.length === 0 && total > 0 && currentState.page > 0) {
+        currentState.page = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+        currentState.listCache = null;
+        return renderList(container);
+      }
+
       // Update tab labels with counts
       container.querySelectorAll('.ss-filter-tab').forEach(tab => {
         const status = tab.dataset.status;

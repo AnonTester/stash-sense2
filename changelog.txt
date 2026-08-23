@@ -1,3 +1,19 @@
+## 2026-08-24
+
+### 0.14.13 (plugin only)
+- Fix: the recommendations list showed a false "No pending recommendations
+  found" on any page past the first once every entry on that page had been
+  surgically removed from the cache (resolving/dismissing items one at a
+  time via `removeFromListCache()`) even though earlier pages still had
+  pending entries left -- confirmed live with 172 still pending. The
+  empty-state check only looked at whether the current page's cached
+  recommendations list was empty, not whether the page index itself had
+  gone stale relative to the shrinking total. `renderList()` now detects
+  an empty page with a nonzero total, snaps back to the last valid page,
+  and re-fetches instead of showing the false empty state. Applies to
+  every recommendation type and status tab, since they all go through this
+  one shared list renderer.
+
 ## 2026-08-23
 
 ### 0.14.11 (sidecar only)
