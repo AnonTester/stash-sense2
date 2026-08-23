@@ -1,5 +1,15 @@
 ## 2026-08-24
 
+### 0.14.14 (plugin only)
+- Feature: Upstream Scene Changes now offers an "Update scene cover"
+  checkbox, right under the local scene's context summary, whenever the
+  stash-box side has a cover to offer. Ticked by default -- applying the
+  recommendation sets the scene's cover to the upstream one via
+  `cover_image` on the `sceneUpdate` mutation, same URL-passthrough
+  pattern already used for performer/studio/tag `image` fields. Unticking
+  it leaves the local cover untouched while the rest of the change still
+  applies normally.
+
 ### 0.14.13 (plugin only)
 - Fix: the recommendations list showed a false "No pending recommendations
   found" on any page past the first once every entry on that page had been

@@ -4405,6 +4405,24 @@
       wrapper.appendChild(contextDiv);
     }
 
+    // Scene cover update toggle -- ticked by default. Only offered when
+    // there's actually an upstream cover to set; unticking keeps the local
+    // cover untouched.
+    const upstreamCoverUrl = upstreamScenePreview?.cover_url || null;
+    let updateCoverCheckbox = null;
+    if (upstreamCoverUrl) {
+      const coverToggleLabel = document.createElement('label');
+      coverToggleLabel.className = 'ss-scene-cover-toggle';
+      coverToggleLabel.style.cssText = 'display:flex;align-items:center;gap:6px;margin:6px 0;';
+      updateCoverCheckbox = document.createElement('input');
+      updateCoverCheckbox.type = 'checkbox';
+      updateCoverCheckbox.checked = true;
+      updateCoverCheckbox.className = 'ss-scene-cover-cb';
+      coverToggleLabel.appendChild(updateCoverCheckbox);
+      coverToggleLabel.appendChild(document.createTextNode('Update scene cover'));
+      wrapper.appendChild(coverToggleLabel);
+    }
+
     // ===== Simple field diffs =====
     if (hasSimple) {
       const simpleSection = document.createElement('div');
@@ -5004,6 +5022,10 @@
           fields[fieldKey] = resultVal;
         }
       });
+
+      if (updateCoverCheckbox && updateCoverCheckbox.checked && upstreamCoverUrl) {
+        fields['cover_image'] = upstreamCoverUrl;
+      }
 
       // 2. Validate checked entities are created, collect performer IDs
       const uncreated = [];
