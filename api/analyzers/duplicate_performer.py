@@ -7,7 +7,11 @@ that should be merged.
 Ported from: stash-plugins/scripts/duplicate-performer-finder/
 """
 
+import logging
+
 from .base import BaseAnalyzer, AnalysisResult
+
+logger = logging.getLogger(__name__)
 
 
 def get_total_content_count(performer: dict) -> int:
@@ -44,7 +48,11 @@ class DuplicatePerformerAnalyzer(BaseAnalyzer):
 
         # Create recommendations
         created = 0
-        for (endpoint, stash_id), group in duplicates.items():
+        for i, ((endpoint, stash_id), group) in enumerate(duplicates.items()):
+            if self.is_stop_requested():
+                logger.warning("Stop requested after %d/%d duplicate groups checked", i, len(duplicates))
+                break
+
             # Sort by content count - suggest keeping the one with most content
             sorted_performers = sorted(
                 group,

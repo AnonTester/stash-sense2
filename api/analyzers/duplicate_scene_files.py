@@ -7,7 +7,11 @@ to choose which file(s) to keep and delete the rest.
 Ported from: stash-plugins/scripts/scene-file-deduper/
 """
 
+import logging
+
 from .base import BaseAnalyzer, AnalysisResult
+
+logger = logging.getLogger(__name__)
 
 
 def format_size(size_bytes: int) -> str:
@@ -79,7 +83,11 @@ class DuplicateSceneFilesAnalyzer(BaseAnalyzer):
         scenes = await self.stash.get_multi_file_scenes()
 
         created = 0
-        for scene in scenes:
+        for i, scene in enumerate(scenes):
+            if self.is_stop_requested():
+                logger.warning("Stop requested after %d/%d scenes checked", i, len(scenes))
+                break
+
             files = scene.get("files", [])
             if len(files) < 2:
                 continue  # Shouldn't happen with our filter, but be safe

@@ -73,6 +73,44 @@ class TestAnalysisJob:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_analyzer_stop_check_is_live_during_run(self, ctx, mock_stash, mock_db):
+        # Regression test: a stop requested *while* analyzer.run() is in
+        # flight (the real-world case -- the user clicks Stop on a job
+        # that's already running) must be visible to the analyzer's own
+        # self.is_stop_requested() calls made during that same run(), not
+        # just a stale snapshot taken before run() started (which is
+        # always False, since a stop can't have been requested before the
+        # job even started). Previously this wrapper only ever called
+        # analyzer.request_stop() once, before analyzer.run(), so it never
+        # actually propagated a mid-run stop -- see jobs/analysis_jobs.py.
+        mock_analyzer = MagicMock()
+        mock_analyzer._items_total = None
+        seen_mid_run = []
+
+        async def fake_run(incremental):
+            # Simulate what a real analyzer's loop does: check the flag,
+            # act on it. Not requested yet at this point.
+            seen_mid_run.append(mock_analyzer.is_stop_requested())
+            ctx.request_user_cancel()  # user clicks Stop mid-run
+            seen_mid_run.append(mock_analyzer.is_stop_requested())
+            result = MagicMock()
+            result.recommendations_created = 0
+            result.recommendations_updated = 0
+            result.items_processed = 1
+            return result
+
+        mock_analyzer.run = fake_run
+
+        with patch('jobs.analysis_jobs.ANALYZERS') as mock_reg, \
+             patch('jobs.analysis_jobs.get_rec_db', return_value=mock_db), \
+             patch('jobs.analysis_jobs.get_stash_client', return_value=mock_stash):
+            mock_reg.get.return_value = MagicMock(return_value=mock_analyzer)
+            job = AnalysisJob("upstream_performer_changes")
+            await job.run(ctx)
+
+        assert seen_mid_run == [False, True]
+
+    @pytest.mark.asyncio
     async def test_reports_analyzer_known_total_when_larger(self, ctx, mock_stash, mock_db):
         # analyzer.set_items_total() (base.py) lets an analyzer report an
         # upfront known total (e.g. total local entities) that can exceed

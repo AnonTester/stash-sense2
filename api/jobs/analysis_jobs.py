@@ -60,9 +60,14 @@ class AnalysisJob(BaseJob):
         analyzer._job_progress_callback = progress_callback
         analyzer._job_label_callback = label_callback
 
-        # Wire stop signal from job context to analyzer
-        if context.is_stop_requested():
-            analyzer.request_stop()
+        # Wire stop signal from job context to the analyzer LIVE -- context's
+        # flag can flip True at any point *during* analyzer.run() (the user
+        # clicking Stop mid-run), not just before it starts, so a one-time
+        # snapshot check here (as this used to be) would only ever see
+        # False, since a stop is never requested before the job has even
+        # started. Delegating means every self.is_stop_requested() call the
+        # analyzer makes reflects the live context state.
+        analyzer.is_stop_requested = context.is_stop_requested
 
         force_full = cursor == FULL_RUN_CURSOR
         incremental = not force_full

@@ -47,6 +47,10 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
         total_created = 0
 
         for conn in connections:
+            if self.is_stop_requested():
+                logger.warning("Stop requested, halting scene fingerprint scan before next endpoint")
+                break
+
             endpoint = conn["endpoint"]
             api_key = conn.get("api_key", "")
             endpoint_name = conn.get("name", endpoint)
@@ -93,6 +97,10 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
         linked_scene_ids: set[str] = set()
 
         while True:
+            if self.is_stop_requested():
+                logger.warning("[%s] Stop requested while fetching local scenes", endpoint_name)
+                break
+
             scenes, total = await self.stash.get_scenes_with_fingerprints(
                 updated_after=watermark_ts, limit=100, offset=offset,
             )
@@ -176,6 +184,13 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
         created = 0
 
         for batch_start in range(0, len(scenes_needing_match), BATCH_SIZE):
+            if self.is_stop_requested():
+                logger.warning(
+                    "[%s] Stop requested after %d/%d scenes scanned",
+                    endpoint_name, batch_start, len(scenes_needing_match),
+                )
+                break
+
             batch = scenes_needing_match[batch_start:batch_start + BATCH_SIZE]
             fp_sets = [item["fingerprints"] for item in batch]
 

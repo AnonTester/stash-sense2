@@ -222,6 +222,13 @@ class BaseUpstreamAnalyzer(BaseAnalyzer):
         )
 
         for conn in connections:
+            if self.is_stop_requested():
+                logger.warning(
+                    f"Stop requested, halting upstream {self.entity_type} analysis "
+                    f"before next endpoint"
+                )
+                break
+
             endpoint = conn["endpoint"]
             api_key = conn.get("api_key", "")
             endpoint_name = conn.get("name", endpoint)
@@ -305,6 +312,12 @@ class BaseUpstreamAnalyzer(BaseAnalyzer):
         skipped = 0
 
         for i, (stash_box_id, local_entity) in enumerate(local_lookup.items(), start=1):
+            if self.is_stop_requested():
+                logger.warning(
+                    f"[{display_name}] Stop requested after {processed}/{len(local_lookup)} checked"
+                )
+                break
+
             local_id = str(local_entity["id"])
             entity_label = local_entity.get("title") or local_entity.get("name") or ""
             processed = i

@@ -1,5 +1,27 @@
 ## 2026-08-23
 
+### 0.14.8 (sidecar only)
+- Fix: Stop/Force Cancel didn't actually stop most analysis-based queue
+  jobs (Upstream Performer/Tag/Studio/Scene Change Detection, Scene
+  Stash-Box Tagger, Duplicate Performer/Scene File Detection). Root
+  cause was in `jobs/analysis_jobs.py`'s generic `AnalysisJob` wrapper:
+  it bridged the queue's live stop signal into the analyzer's own
+  `is_stop_requested()` flag with a single snapshot check taken *before*
+  `analyzer.run()` started -- always False, since a user can't request a
+  stop before the job has even begun running. The bridge is now a live
+  delegation (`analyzer.is_stop_requested = context.is_stop_requested`),
+  so every check the analyzer makes during its run reflects the actual
+  current state. That alone wasn't enough, though: most of these
+  analyzers' own loops never called `self.is_stop_requested()` at all
+  (only Duplicate Scene Detection did) -- added the same check-and-break
+  pattern to each one's slow/paginated loop (the upstream endpoints'
+  per-entity diff loop, the scene fingerprint matcher's stash-box batch
+  loop, and the duplicate performer/scene-file scanners' result loops),
+  so a Stop now actually halts these mid-run instead of only ever taking
+  effect via Force Cancel (which kills the whole asyncio task outright,
+  and did already work, just with no graceful/resumable option before
+  this).
+
 ### 0.14.10 (plugin only)
 - Improvement: Identification Database settings now has a real "Download
   Database" / "Update Database" button when no database has been
