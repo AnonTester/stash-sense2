@@ -1,5 +1,29 @@
 ## 2026-08-23
 
+### 0.14.12 (plugin only)
+- Fix: after "Accept All Changes" / "Dismiss All" / "Accept All High-
+  Confidence" / the tag-only and performer-URL-only bulk-accept buttons
+  finished, the list kept showing the pre-bulk-action count and cards
+  until a manual refresh -- a regression from 0.14.11's list-page cache:
+  those handlers refreshed the view afterward but never invalidated the
+  cache, so it served the stale pre-action snapshot right back. All bulk
+  handlers now invalidate the cache before refreshing.
+- Fix: "Accept All Changes" on Upstream Performer/Tag/Studio Changes
+  silently skipped recommendations where a real local/upstream
+  difference exists (so they're not cosmetic-only and never auto-
+  resolve on their own either) but the smart default still resolves to
+  "keep local" (e.g. upstream cleared a field local already has a value
+  for -- intentionally never overwritten with emptiness). These had
+  nothing to add to the batch, but were never accounted for anywhere,
+  so they stayed pending forever regardless of how many times Accept
+  All ran -- confirmed live: of 30 pending Upstream Studio Changes, 27
+  were stuck this way, permanently excluded from both Accept All and
+  the per-item auto-resolve check. These are now resolved as
+  accepted_no_changes as part of Accept All, same as the existing
+  cosmetic-only auto-resolve. Also added console logging of individual
+  failure reasons for the remaining genuine failures, matching the
+  other bulk handlers.
+
 ### 0.14.10 (sidecar only)
 - Fix: "Accept All Changes" for Upstream Studio Changes processed every
   pending item but applied none of them. Studios do have an `aliases`

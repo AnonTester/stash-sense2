@@ -723,6 +723,15 @@
     }
 
     const results = [];
+    // Recs where filterRealChanges() found a real local/upstream difference,
+    // but every field's smart default still resolves to "keep local" (e.g.
+    // upstream cleared a field local already has a value for -- smartDefault
+    // deliberately never overwrites local with emptiness). Nothing to apply,
+    // but unlike genuinely no-diff recs, these never hit the single-item
+    // detail view's own filterRealChanges()===0 auto-resolve either, so
+    // they'd otherwise sit pending forever, never touched by Accept All or
+    // anything else. Caller resolves these as accepted_no_changes.
+    const noOpRecIds = [];
 
     for (const rec of recommendations) {
       // Scenes use a dedicated per-rec accept endpoint with full relational resolution;
@@ -796,10 +805,12 @@
 
       if (fieldSummaries.length > 0) {
         results.push({ rec, entityName, entityType, entityId, fields, changes: fieldSummaries });
+      } else {
+        noOpRecIds.push(rec.id);
       }
     }
 
-    return results;
+    return { batchChanges: results, noOpRecIds };
   }
 
   function showAcceptAllModal(batchChanges) {
@@ -1075,6 +1086,7 @@
               acceptAllBtn.classList.add('ss-btn-success');
             }
 
+            invalidateListCache();
             setTimeout(() => {
               renderCurrentView(document.getElementById('ss-recommendations'));
             }, 1500);
@@ -1097,11 +1109,36 @@
           });
 
           RecommendationsAPI.bulkAcceptStats(currentState.type).catch(() => null);
-          const batchChanges = computeBatchChanges(allPending.recommendations);
+          const { batchChanges, noOpRecIds } = computeBatchChanges(allPending.recommendations);
+
+          // Recs with a real local/upstream difference but nothing the smart
+          // default would actually change (e.g. upstream cleared a field
+          // local already has a value for) never show up in the batch and
+          // never auto-resolve on their own -- without this they'd sit
+          // pending forever, permanently excluded from both Accept All and
+          // the per-item auto-resolve check. Clear them out silently; there's
+          // nothing to confirm since nothing is being applied.
+          let autoResolved = 0;
+          if (noOpRecIds.length > 0) {
+            const results = await Promise.allSettled(
+              noOpRecIds.map(id => RecommendationsAPI.resolve(id, 'accepted_no_changes', {
+                note: 'Upstream had no additional information over the local value',
+                batch: true,
+              }))
+            );
+            autoResolved = results.filter(r => r.status === 'fulfilled').length;
+          }
 
           if (batchChanges.length === 0) {
-            acceptAllBtn.textContent = 'No changes to apply';
-            setTimeout(() => { acceptAllBtn.textContent = 'Accept All Changes'; acceptAllBtn.disabled = false; }, 2000);
+            acceptAllBtn.textContent = autoResolved > 0
+              ? `${autoResolved} had nothing new, marked reviewed`
+              : 'No changes to apply';
+            invalidateListCache();
+            setTimeout(() => {
+              acceptAllBtn.textContent = 'Accept All Changes';
+              acceptAllBtn.disabled = false;
+              renderCurrentView(document.getElementById('ss-recommendations'));
+            }, 2000);
             return;
           }
 
@@ -1109,6 +1146,10 @@
           if (!confirmed) {
             acceptAllBtn.textContent = 'Accept All Changes';
             acceptAllBtn.disabled = false;
+            if (autoResolved > 0) {
+              invalidateListCache();
+              renderCurrentView(document.getElementById('ss-recommendations'));
+            }
             return;
           }
 
@@ -1117,14 +1158,17 @@
 
           overlay.remove();
 
+          const autoResolvedSuffix = autoResolved > 0 ? `, ${autoResolved} had nothing new` : '';
           if (result.failed.length === 0) {
-            acceptAllBtn.textContent = `Done! ${result.succeeded} applied`;
+            acceptAllBtn.textContent = `Done! ${result.succeeded} applied${autoResolvedSuffix}`;
             acceptAllBtn.classList.add('ss-btn-success');
           } else {
-            acceptAllBtn.textContent = `${result.succeeded} applied, ${result.failed.length} failed`;
+            acceptAllBtn.textContent = `${result.succeeded} applied${autoResolvedSuffix}, ${result.failed.length} failed`;
             acceptAllBtn.classList.add('ss-btn-error');
+            console.warn('[Stash Sense] Accept all changes failures:', result.failed);
           }
 
+          invalidateListCache();
           setTimeout(() => {
             renderCurrentView(document.getElementById('ss-recommendations'));
           }, 2000);
@@ -1146,6 +1190,7 @@
           const result = await RecommendationsAPI.acceptAllFingerprintMatches();
           acceptAllFpBtn.textContent = `Accepted ${result.accepted_count}!`;
           acceptAllFpBtn.classList.add('ss-btn-success');
+          invalidateListCache();
           setTimeout(() => {
             renderCurrentView(document.getElementById('ss-recommendations'));
           }, 1500);
@@ -1249,6 +1294,7 @@
             acceptAllTagOnlyBtn.classList.add('ss-btn-success');
           }
 
+          invalidateListCache();
           setTimeout(() => {
             renderCurrentView(document.getElementById('ss-recommendations'));
           }, 1500);
@@ -1296,6 +1342,7 @@
             acceptAllPerformerUrlBtn.textContent = `Accepted ${accepted}`;
             acceptAllPerformerUrlBtn.classList.add('ss-btn-success');
           }
+          invalidateListCache();
           setTimeout(() => {
             renderCurrentView(document.getElementById('ss-recommendations'));
           }, 1500);
@@ -1334,6 +1381,7 @@
             overlay.remove();
             dismissAllBtn.textContent = `Dismissed ${result.dismissed_count}!`;
             dismissAllBtn.disabled = true;
+            invalidateListCache();
             setTimeout(() => {
               renderCurrentView(document.getElementById('ss-recommendations'));
             }, 1500);
@@ -1516,6 +1564,14 @@
     if (cache.typeCounts && cache.typeCounts[currentState.status] != null) {
       cache.typeCounts[currentState.status] = Math.max(0, cache.typeCounts[currentState.status] - 1);
     }
+  }
+
+  // Bulk actions (Accept All / Dismiss All) change an unknown, unbounded
+  // number of recommendations server-side in one go -- surgical per-item
+  // removal doesn't scale to that, so just drop the whole cached page and
+  // let the next renderList() do a real fetch.
+  function invalidateListCache() {
+    currentState.listCache = null;
   }
 
   function renderRecommendationCard(rec) {
