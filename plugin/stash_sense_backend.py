@@ -149,7 +149,14 @@ def log(message):
 # failures are queued to a local retry-cache file and flushed opportunistically
 # on a later successful hook call.
 
-PLUGIN_ID = "stash-sense"
+# Must match the directory name this plugin is actually installed under in
+# Stash (see PLUGIN_ID's comment in stash-sense-core.js for the full story --
+# this had the same v1-id bug: _get_sidecar_url() below reads
+# configuration.plugins[PLUGIN_ID] to resolve the sidecar URL for a hook
+# call, so while this stayed 'stash-sense' the hook silently synced
+# performer changes into v1's sidecar instead of v2's whenever both were
+# installed side by side).
+PLUGIN_ID = "stash-sense2"
 PENDING_SYNC_FILENAME = "pending_local_sync.json"
 HOOK_SYNC_TIMEOUT = 3
 HOOK_FLUSH_LIMIT = 20

@@ -1,5 +1,15 @@
 ## 2026-08-23
 
+### 0.14.9 (plugin only)
+- Fix: `stash_sense_backend.py`'s `PLUGIN_ID` was still `"stash-sense"`
+  (v1's plugin id), not `"stash-sense2"` -- unlike the JS-side constant
+  in `stash-sense-core.js`, already fixed. This one drives
+  `_get_sidecar_url()`, which the local-performer-sync hook
+  (Performer.Create/Update/Destroy.Post) uses to resolve the sidecar URL
+  via `configuration.plugins[PLUGIN_ID]`. While v1 and v2 were both
+  installed side by side, every hook-triggered performer sync silently
+  read v1's saved settings and posted to *v1's* sidecar instead of v2's.
+
 ### 0.14.7 (sidecar) / 0.14.8 (plugin)
 - Fix: the `gpu_enabled` setting ("Use GPU for face detection and
   embedding. Disable to force CPU mode") was defined and shown in

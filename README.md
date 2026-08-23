@@ -165,6 +165,21 @@ docker compose -f docker-compose.cuda.yml build && docker compose -f docker-comp
 
 Your recommendation history and settings are stored separately from the face database and persist across both types of updates.
 
+### Migrating from v1
+
+If you're coming from the original [stash-sense](https://github.com/carrotwaxr/stash-sense) (v1), your recommendation history, resolved/dismissed items, duplicate-detection results, job schedules, and settings all live in one SQLite file — `stash_sense.db` — that's independent of the face database itself. v1 and v2 share the same continuous schema-migration lineage for this file (v2 is a fork of v1, not a rewrite, and the model change to buffalo_l/usearch never touched this file), so v2 upgrades it in place automatically on first startup — no manual migration step:
+
+1. **Stop the v1 container first.** Copying a live SQLite file mid-write risks a torn snapshot.
+2. **Back up `stash_sense.db` before copying it anywhere** — this is the only copy of that history.
+3. Copy it into v2's data directory as `stash_sense.db` (wherever your compose file's data volume points, e.g. `./api/data/stash_sense.db`).
+4. Start v2 normally. `RecommendationsDB` detects the existing (older) schema version in the copied file and runs every migration step up to current automatically, the first time it opens the file.
+
+This does **not** apply to the face recognition database itself (`performers.db`/`face_embeddings.usearch`) — v1's FaceNet512/ArcFace embeddings are fundamentally incompatible with v2's buffalo_l model, so that part is a fresh download via **Settings → Database → Update** rather than something to carry over.
+
+**Don't copy over an already-populated v2 `stash_sense.db`** — that overwrites existing v2 data rather than merging it; only do this for a fresh v2 install with no prior history of its own.
+
+If you plan to run v1 and v2 side by side for a while during the switch (rather than a clean cutover), make sure both are on a version newer than 2026-08-23 — earlier v2 plugin builds had a local-plugin-id bug where some backend calls (notably the performer create/update/delete sync hook) resolved *v1's* saved sidecar URL instead of v2's own, silently cross-talking between the two while both were installed.
+
 ## Requirements
 
 | Component | Requirement |
