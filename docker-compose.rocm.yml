@@ -34,15 +34,16 @@ services:
       # `vaapi` is the natural pairing here (reuses the /dev/dri device
       # already mapped in below for VAAPI-accelerated decode).
       - FFMPEG_HWACCEL=vaapi
-      # Cards outside ROCm's officially-supported target list need this set
-      # to their nearest supported gfx version, or inference segfaults
-      # (see Dockerfile.rocm). Defaults to the value the reference
-      # deployment needs (Radeon 780M / gfx1103) -- override by setting
-      # HSA_OVERRIDE_GFX_VERSION in your shell or .env before `up`, or by
-      # editing this line directly, to match *your* card instead. Check
+      # Commented out by default -- most cards are on ROCm's officially
+      # supported target list and don't need this at all. Only cards
+      # OUTSIDE that list need it set to their nearest supported gfx
+      # version, or inference segfaults (see Dockerfile.rocm); forcing it
+      # on a card that doesn't need an override risks ROCm treating your
+      # GPU as a different architecture than it actually is. Check
       # `rocminfo`'s reported gfx version on your host if inference fails
-      # to initialize. Leave unset (remove this line) if your card is
-      # fully supported and doesn't need an override at all.
+      # to initialize, then uncomment and set this to match *your* card
+      # (not the value below, which is specific to the reference
+      # deployment's card).
       #
       # On gfx1103 (Radeon 780M), 11.0.0 alone caused intermittent
       # "GPU Hang" crashes on the reference deployment during MIOpen's
@@ -50,7 +51,7 @@ services:
       # parameter `amdgpu.cwsr_enable=0` (add to GRUB_CMDLINE_LINUX_DEFAULT,
       # `update-grub`, reboot) and bumping this to 11.0.3. If you hit the
       # same crash on this card, try that combination.
-      - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.3}
+      # - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.3}
     devices:
       - /dev/kfd
       - /dev/dri
