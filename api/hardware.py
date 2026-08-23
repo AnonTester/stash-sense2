@@ -150,19 +150,32 @@ def _probe_amd_gpu_vram_mb() -> Optional[int]:
     dedicated-VRAM figure for both discrete cards and APUs (the BIOS-
     configured carve-out, e.g. 4096MB on a Radeon 780M), unlike rocminfo's
     pool sizes which reflect shared/GTT memory on APUs. Multiple `card*`
-    entries can exist (headless render nodes, other GPUs); the first one
-    with a populated, non-zero vram_total wins.
+    entries can exist -- not just headless render nodes for the same GPU,
+    but a genuinely separate second device: many desktop boards pair a
+    dedicated GPU with the CPU's own integrated GPU, both amdgpu, both
+    enumerated here. Taking the first non-zero one found (sorted by card
+    number) previously picked whichever happened to enumerate first,
+    which is not necessarily the card actually meant for compute --
+    confirmed live on a dedicated-GPU system reporting the iGPU's small
+    ~1GB BIOS framebuffer carve-out instead of the dGPU's real VRAM. The
+    dedicated card's VRAM is essentially always the larger figure in this
+    two-GPU scenario, so take the max across every card found instead of
+    the first.
     """
     try:
         import glob
+        best_vram_mb: Optional[int] = None
         for path in sorted(glob.glob("/sys/class/drm/card*/device/mem_info_vram_total")):
             try:
                 vram_bytes = int(Path(path).read_text().strip())
             except (OSError, ValueError):
                 continue
-            if vram_bytes > 0:
-                return vram_bytes // (1024 * 1024)
-        return None
+            if vram_bytes <= 0:
+                continue
+            vram_mb = vram_bytes // (1024 * 1024)
+            if best_vram_mb is None or vram_mb > best_vram_mb:
+                best_vram_mb = vram_mb
+        return best_vram_mb
     except Exception as e:
         logger.debug("amdgpu sysfs VRAM probe failed: %s", e)
         return None

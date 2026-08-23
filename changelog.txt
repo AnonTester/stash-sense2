@@ -1,5 +1,16 @@
 ## 2026-08-23
 
+### 0.14.9 (sidecar only)
+- Fix: AMD GPU VRAM detection (`hardware.py`'s `_probe_amd_gpu_vram_mb()`)
+  picked the first `/sys/class/drm/card*/device/mem_info_vram_total`
+  entry it found, sorted by card number. Fine on a single-GPU system, but
+  a desktop board pairing the CPU's own integrated GPU with a dedicated
+  one enumerates both as separate amdgpu devices in sysfs -- confirmed
+  live reporting the iGPU's small ~1GB BIOS framebuffer carve-out instead
+  of the dGPU's real VRAM whenever the iGPU happened to sort first. Now
+  takes the max across every card found instead of the first, since the
+  dedicated card's VRAM is essentially always the larger figure.
+
 ### 0.14.8 (sidecar only)
 - Fix: Stop/Force Cancel didn't actually stop most analysis-based queue
   jobs (Upstream Performer/Tag/Studio/Scene Change Detection, Scene

@@ -229,6 +229,32 @@ class TestProbeAmdGpuVramMb:
 
         assert _probe_amd_gpu_vram_mb() == 4096
 
+    def test_dedicated_gpu_and_igpu_both_present_picks_larger(self, tmp_path, monkeypatch):
+        # A desktop board with a CPU-integrated GPU *and* a dedicated GPU
+        # enumerates both as amdgpu devices -- confirmed live reporting the
+        # iGPU's small ~1GB BIOS framebuffer carve-out instead of the
+        # dGPU's real VRAM when just taking the first (sorted) match. The
+        # dedicated card is essentially always the larger figure, so the
+        # max across all cards must win regardless of sort order.
+        igpu_file = tmp_path / "card0_vram_total"
+        igpu_file.write_text(str(1024 * 1024 * 1024))  # 1024MB iGPU carve-out
+        dgpu_file = tmp_path / "card1_vram_total"
+        dgpu_file.write_text(str(16 * 1024 * 1024 * 1024))  # 16384MB dedicated card
+        monkeypatch.setattr("glob.glob", lambda pattern: [str(igpu_file), str(dgpu_file)])
+
+        assert _probe_amd_gpu_vram_mb() == 16384
+
+    def test_dedicated_gpu_and_igpu_regardless_of_enumeration_order(self, tmp_path, monkeypatch):
+        # Same scenario, but the dGPU happens to sort first -- must still
+        # pick the max, not "the first non-zero one found".
+        dgpu_file = tmp_path / "card0_vram_total"
+        dgpu_file.write_text(str(16 * 1024 * 1024 * 1024))
+        igpu_file = tmp_path / "card1_vram_total"
+        igpu_file.write_text(str(1024 * 1024 * 1024))
+        monkeypatch.setattr("glob.glob", lambda pattern: [str(dgpu_file), str(igpu_file)])
+
+        assert _probe_amd_gpu_vram_mb() == 16384
+
     def test_unreadable_file_skipped(self, tmp_path, monkeypatch):
         missing = tmp_path / "does_not_exist"
         real_file = tmp_path / "card0_vram_total"
