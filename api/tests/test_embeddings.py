@@ -97,6 +97,41 @@ class TestDeviceSelection:
         generator = FaceEmbeddingGenerator(device="cpu")
         assert generator.device == "cpu"
 
+    def test_gpu_enabled_setting_false_forces_cpu_even_with_gpu_provider(self, monkeypatch):
+        monkeypatch.setattr(
+            sys.modules["onnxruntime"], "get_available_providers",
+            lambda: ["ROCMExecutionProvider", "CPUExecutionProvider"],
+        )
+        import settings
+        monkeypatch.setattr(settings, "get_setting", lambda key: False)
+        generator = FaceEmbeddingGenerator()
+        assert generator.device == "cpu"
+
+    def test_gpu_enabled_setting_true_allows_gpu_autodetect(self, monkeypatch):
+        monkeypatch.setattr(
+            sys.modules["onnxruntime"], "get_available_providers",
+            lambda: ["ROCMExecutionProvider", "CPUExecutionProvider"],
+        )
+        import settings
+        monkeypatch.setattr(settings, "get_setting", lambda key: True)
+        generator = FaceEmbeddingGenerator()
+        assert generator.device == "gpu"
+
+    def test_settings_not_initialized_falls_back_to_hardware_autodetect(self, monkeypatch):
+        """Standalone scripts/tests don't call init_settings() -- effective_device()
+        must not blow up, and should behave like gpu_enabled=True (today's
+        pre-fix behavior) rather than silently forcing CPU."""
+        monkeypatch.setattr(
+            sys.modules["onnxruntime"], "get_available_providers",
+            lambda: ["ROCMExecutionProvider", "CPUExecutionProvider"],
+        )
+        import settings
+        def _raise(key):
+            raise RuntimeError("Settings not initialized. Call init_settings() during startup.")
+        monkeypatch.setattr(settings, "get_setting", _raise)
+        generator = FaceEmbeddingGenerator()
+        assert generator.device == "gpu"
+
 
 class TestOrtProviders:
     def test_gpu_device_lists_gpu_providers_before_cpu_fallback(self):

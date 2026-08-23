@@ -277,7 +277,16 @@ class QueueManager:
         """Start a job — create task and track it."""
         from base_job import JobContext
         job_id = job_row["id"]
-        self._db.start_job(job_id)
+        resource_used = None
+        if defn.resource == ResourceType.GPU:
+            # GPU-classified job types don't always actually run on a GPU --
+            # that depends on the gpu_enabled setting and real GPU
+            # availability at the moment the job starts. Record what this
+            # specific run actually used so history stays accurate even if
+            # the setting changes later.
+            from embeddings import effective_device
+            resource_used = effective_device()
+        self._db.start_job(job_id, resource_used=resource_used)
         ctx = JobContext(job_id=job_id, db=self._db, queue_manager=self)
         self._running_contexts[job_id] = ctx
         task = asyncio.create_task(self._run_job(job_id, job_row, ctx))

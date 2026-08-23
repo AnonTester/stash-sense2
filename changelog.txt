@@ -1,6 +1,25 @@
 ## 2026-08-23
 
-### 0.14.7
+### 0.14.7 (sidecar) / 0.14.8 (plugin)
+- Fix: the `gpu_enabled` setting ("Use GPU for face detection and
+  embedding. Disable to force CPU mode") was defined and shown in
+  Settings but never actually read anywhere -- `FaceEmbeddingGenerator`
+  always auto-detected the device from ONNX Runtime's available
+  providers alone, so disabling it did nothing. New `embeddings.
+  effective_device()` combines the setting with real provider
+  availability and is now what auto-detect (`device=None`) actually uses.
+- Fix: Operations tab resource badges (Fingerprint Generation, Local
+  Performer Sync) always showed GPU, even on the CPU sidecar or with GPU
+  acceleration disabled -- they reflected the job type's static
+  concurrency-slot classification, not what a run would actually use.
+  Quick-action buttons and queued jobs now show `/queue/types`'s new
+  `effective_resource` (current gpu_enabled + provider availability);
+  active and completed jobs show a new `resource_used` field recorded
+  on the job itself when it started, so job history stays accurate for
+  a specific run even if the setting is changed afterward for
+  comparison.
+
+### 0.14.7 (plugin only)
 - Fix: Operations tab progress bars for active jobs always rendered full
   (100% width) regardless of actual progress, while the adjacent text
   correctly showed the real `processed / total (pct%)` figures. Cause:

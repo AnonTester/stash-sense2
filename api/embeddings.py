@@ -49,6 +49,37 @@ warnings.filterwarnings(
 MODELS_DIR = Path(__file__).parent / "models"
 DATA_MODELS_DIR = Path(os.environ.get("DATA_DIR", "./data")) / "models"
 
+GPU_PROVIDERS = {"CUDAExecutionProvider", "ROCMExecutionProvider", "MIGraphXExecutionProvider"}
+
+
+def _onnxruntime_has_gpu_provider() -> bool:
+    """Whether ONNX Runtime actually has a GPU execution provider available
+    in this process. The CPU-only image ships onnxruntime built with no GPU
+    providers at all, regardless of what the underlying host hardware is --
+    this is a process-level check, not a host-hardware check (see
+    hardware.py's HardwareProfile.gpu_available for that)."""
+    import onnxruntime as ort
+    return bool(GPU_PROVIDERS & set(ort.get_available_providers()))
+
+
+def effective_device() -> str:
+    """The device face-recognition inference will actually use right now:
+    "gpu" only if both the gpu_enabled setting is on AND a GPU execution
+    provider is actually available in this process; "cpu" otherwise.
+    Shared by FaceEmbeddingGenerator's own auto-detect and by callers that
+    need to know/display which device a job will run on before/without
+    constructing a generator (e.g. queue job resource badges)."""
+    try:
+        from settings import get_setting
+        gpu_enabled = get_setting("gpu_enabled")
+    except RuntimeError:
+        # Settings not initialized (e.g. standalone script/test) -- fall
+        # back to hardware-only detection.
+        gpu_enabled = True
+    if not gpu_enabled:
+        return "cpu"
+    return "gpu" if _onnxruntime_has_gpu_provider() else "cpu"
+
 
 @dataclass
 class DetectedFace:
@@ -84,10 +115,7 @@ class FaceEmbeddingGenerator:
                 then falls back to ./models (local development).
         """
         if device is None:
-            import onnxruntime as ort
-            providers = ort.get_available_providers()
-            gpu_providers = {"CUDAExecutionProvider", "ROCMExecutionProvider", "MIGraphXExecutionProvider"}
-            self.device = "gpu" if gpu_providers & set(providers) else "cpu"
+            self.device = effective_device()
         else:
             self.device = device
 

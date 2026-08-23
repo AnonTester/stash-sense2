@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from job_models import JOB_REGISTRY, JobPriority
+from job_models import JOB_REGISTRY, JobPriority, ResourceType
 
 router = APIRouter(prefix="/queue", tags=["queue"])
 
@@ -77,11 +77,21 @@ async def get_queue_status():
 async def get_job_types():
     types = []
     for defn in JOB_REGISTRY.values():
+        # GPU-classified types don't always actually run on a GPU -- that
+        # depends on the gpu_enabled setting and real GPU availability.
+        # effective_resource reflects what a *new* run would use right
+        # now (for quick-action buttons); a job's own resource_used, once
+        # it has actually started, is the authoritative per-run value.
+        effective_resource = defn.resource.value
+        if defn.resource == ResourceType.GPU:
+            from embeddings import effective_device
+            effective_resource = effective_device()
         types.append({
             "type_id": defn.type_id,
             "display_name": defn.display_name,
             "description": defn.description,
             "resource": defn.resource.value,
+            "effective_resource": effective_resource,
             "default_priority": int(defn.default_priority),
             "supports_incremental": defn.supports_incremental,
             "schedulable": defn.schedulable,

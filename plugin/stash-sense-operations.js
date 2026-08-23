@@ -199,10 +199,14 @@
         },
       });
 
-      // Resource badge
+      // Resource badge -- effective_resource reflects what a new run would
+      // actually use right now (GPU types can run CPU-only, depending on
+      // the gpu_enabled setting and real GPU availability); falls back to
+      // the static classification for non-GPU types.
+      const resource = type.effective_resource || type.resource;
       const badge = SS.createElement('span', {
-        className: `ss-resource-badge ss-resource-${type.resource}`,
-        textContent: type.resource.toUpperCase(),
+        className: `ss-resource-badge ss-resource-${resource}`,
+        textContent: resource.toUpperCase(),
       });
       btn.appendChild(document.createTextNode(type.display_name + ' '));
       btn.appendChild(badge);
@@ -241,11 +245,16 @@
       textContent: displayName,
     }));
 
-    // Resource badge
+    // Resource badge -- job.resource_used is the actual device that
+    // specific run used (recorded when it started; frozen from then on,
+    // so history stays accurate even if the setting changes later).
+    // Falls back to effective_resource for a not-yet-started queued job,
+    // then the static classification for non-GPU types.
     if (typeInfo) {
+      const resource = job.resource_used || typeInfo.effective_resource || typeInfo.resource;
       headerRow.appendChild(SS.createElement('span', {
-        className: `ss-resource-badge ss-resource-${typeInfo.resource}`,
-        textContent: typeInfo.resource.toUpperCase(),
+        className: `ss-resource-badge ss-resource-${resource}`,
+        textContent: resource.toUpperCase(),
       }));
     }
 

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -344,6 +344,7 @@ class RecommendationsDB:
                 error_message TEXT,
                 result_summary TEXT,
                 progress_label TEXT,
+                resource_used TEXT,
                 triggered_by TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 started_at TEXT,
@@ -552,6 +553,13 @@ class RecommendationsDB:
 
         if from_version < 12:
             conn.executescript(SCENE_SIGNAL_CACHE_SCHEMA + "UPDATE schema_version SET version = 12;")
+
+        if from_version < 13:
+            conn.executescript("""
+                ALTER TABLE job_queue ADD COLUMN resource_used TEXT;
+
+                UPDATE schema_version SET version = 13;
+            """)
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2240,12 +2248,19 @@ class RecommendationsDB:
                 "SELECT * FROM job_queue WHERE status = 'queued' ORDER BY priority ASC, created_at ASC"
             ).fetchall()]
 
-    def start_job(self, job_id: int):
-        """Mark a job as running."""
+    def start_job(self, job_id: int, resource_used: Optional[str] = None):
+        """Mark a job as running. `resource_used` records which device
+        ("gpu"/"cpu") this specific run actually used, for job types whose
+        resource classification (GPU) doesn't pin down the real device --
+        it depends on the gpu_enabled setting and actual GPU availability
+        at the moment the job started. Frozen at start time so history
+        reflects what a job actually ran with even if settings change
+        later (see embeddings.effective_device)."""
         with self._connection() as conn:
             conn.execute(
-                "UPDATE job_queue SET status = 'running', started_at = datetime('now') WHERE id = ?",
-                (job_id,)
+                "UPDATE job_queue SET status = 'running', started_at = datetime('now'), "
+                "resource_used = COALESCE(?, resource_used) WHERE id = ?",
+                (resource_used, job_id)
             )
 
     def complete_job(self, job_id: int, result_summary: Optional[str] = None):

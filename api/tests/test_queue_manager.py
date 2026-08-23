@@ -116,6 +116,48 @@ class TestQueueManager:
         assert mgr.is_shutting_down is True
 
 
+class TestStartJobRecordsResourceUsed:
+    """GPU-classified job types don't always actually run on a GPU -- see
+    embeddings.effective_device. _start_job must record what a run
+    actually used, for the Operations tab's per-job resource badge."""
+
+    @pytest.fixture
+    def db(self, tmp_path):
+        from recommendations_db import RecommendationsDB
+        return RecommendationsDB(str(tmp_path / "test.db"))
+
+    @pytest.fixture
+    def mgr(self, db):
+        return QueueManager(db)
+
+    async def _start_and_cleanup(self, mgr, job_row, defn):
+        mgr._start_job(job_row, defn)
+        task = mgr._running_tasks.pop(job_row["id"], None)
+        mgr._running_contexts.pop(job_row["id"], None)
+        if task:
+            task.cancel()
+            try:
+                await task
+            except BaseException:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_gpu_type_records_effective_device(self, mgr, db, monkeypatch):
+        import embeddings
+        monkeypatch.setattr(embeddings, "effective_device", lambda: "cpu")
+        job_id = db.submit_job(type="fingerprint_generation", priority=50, triggered_by="user")
+        job_row = db.get_job(job_id)
+        await self._start_and_cleanup(mgr, job_row, JOB_REGISTRY["fingerprint_generation"])
+        assert db.get_job(job_id)["resource_used"] == "cpu"
+
+    @pytest.mark.asyncio
+    async def test_non_gpu_type_leaves_resource_used_null(self, mgr, db):
+        job_id = db.submit_job(type="duplicate_performer", priority=50, triggered_by="user")
+        job_row = db.get_job(job_id)
+        await self._start_and_cleanup(mgr, job_row, JOB_REGISTRY["duplicate_performer"])
+        assert db.get_job(job_id)["resource_used"] is None
+
+
 from job_models import JOB_REGISTRY
 
 class TestJobFactory:

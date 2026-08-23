@@ -137,6 +137,22 @@ class TestQueueRouter:
         hours_list = [i["hours"] for i in dup["allowed_intervals"]]
         assert min(hours_list) >= 24
 
+    def test_job_types_non_gpu_effective_resource_matches_static(self, client):
+        resp = client.get("/queue/types")
+        types = resp.json()["types"]
+        dup = next(t for t in types if t["type_id"] == "duplicate_performer")
+        assert dup["resource"] == "light"
+        assert dup["effective_resource"] == "light"
+
+    def test_job_types_gpu_effective_resource_reflects_gpu_enabled_setting(self, client, monkeypatch):
+        import embeddings
+        monkeypatch.setattr(embeddings, "effective_device", lambda: "cpu")
+        resp = client.get("/queue/types")
+        types = resp.json()["types"]
+        fp = next(t for t in types if t["type_id"] == "fingerprint_generation")
+        assert fp["resource"] == "gpu"
+        assert fp["effective_resource"] == "cpu"
+
     def test_clear_history(self, client, db):
         # Submit and cancel a job to create history
         resp = client.post("/queue", json={"type": "duplicate_performer", "triggered_by": "user"})

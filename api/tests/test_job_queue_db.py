@@ -119,6 +119,28 @@ class TestStartJob:
         assert job["status"] == "running"
         assert job["started_at"] is not None
 
+    def test_start_job_records_resource_used(self, db):
+        job_id = db.submit_job("fingerprint_generation", priority=10, triggered_by="manual")
+        db.start_job(job_id, resource_used="cpu")
+        job = db.get_job(job_id)
+        assert job["resource_used"] == "cpu"
+
+    def test_start_job_without_resource_used_leaves_it_null(self, db):
+        job_id = db.submit_job("upstream_sync", priority=10, triggered_by="manual")
+        db.start_job(job_id)
+        job = db.get_job(job_id)
+        assert job["resource_used"] is None
+
+    def test_start_job_resource_used_updates_on_resume(self, db):
+        """A yielded/re-queued job goes through start_job again on resume --
+        resource_used should reflect the latest run, not the original."""
+        job_id = db.submit_job("fingerprint_generation", priority=10, triggered_by="manual")
+        db.start_job(job_id, resource_used="gpu")
+        db.set_job_status(job_id, "queued")
+        db.start_job(job_id, resource_used="cpu")
+        job = db.get_job(job_id)
+        assert job["resource_used"] == "cpu"
+
 
 class TestCompleteJob:
     def test_complete_job_sets_status_and_completed_at(self, db):
