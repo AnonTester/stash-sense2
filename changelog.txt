@@ -1,5 +1,20 @@
 ## 2026-08-23
 
+### 0.14.10 (plugin only)
+- Improvement: Identification Database settings now has a real "Download
+  Database" / "Update Database" button when no database has been
+  downloaded yet (fresh install) or a newer release is available --
+  previously the "vX available" text was a static, unclickable badge,
+  and the `/database/update`+`/database/update/status` endpoints and
+  their `RecommendationsAPI.startUpdate()`/`checkUpdateStatus()` JS
+  wrappers existed but were never actually called from anywhere. The
+  button now polls live progress (downloading/extracting/verifying/
+  applying/reloading, with percent) the same way the fingerprint-
+  generation trigger does, and disappears once the section refreshes
+  and the database is current. Also picks up an update already in
+  progress (started elsewhere, or from before this tab was reopened)
+  instead of showing a clickable button that would just 409.
+
 ### 0.14.9 (plugin only)
 - Fix: `stash_sense_backend.py`'s `PLUGIN_ID` was still `"stash-sense"`
   (v1's plugin id), not `"stash-sense2"` -- unlike the JS-side constant

@@ -57,6 +57,12 @@
     async checkUpdate() {
       return apiCall('db_check_update');
     },
+    async startDatabaseUpdate() {
+      return apiCall('db_update');
+    },
+    async getDatabaseUpdateStatus() {
+      return apiCall('db_update_status');
+    },
     async getLogs() {
       return apiCall('logs_list');
     },
@@ -481,11 +487,12 @@
     }
 
     try {
-      const [fpStatus, dbInfo, updateInfo, fpJobs] = await Promise.all([
+      const [fpStatus, dbInfo, updateInfo, fpJobs, dbUpdateStatus] = await Promise.all([
         SettingsAPI.getFingerprintStatus().catch(() => null),
         SettingsAPI.getDatabaseInfo().catch(() => null),
         SettingsAPI.checkUpdate().catch(() => null),
         SettingsAPI.getFingerprintJobs().catch(() => null),
+        SettingsAPI.getDatabaseUpdateStatus().catch(() => null),
       ]);
 
       const fpJobActive = !!(fpJobs && fpJobs.jobs || []).find(
@@ -498,22 +505,35 @@
       const performerCount = dbInfo?.performer_count || 0;
       const faceCount = dbInfo?.face_count || 0;
 
+      // No database downloaded yet (fresh install) vs. a newer one available --
+      // both cases need the same trigger, just different button copy.
+      const noDatabase = !updateInfo || !updateInfo.current_version;
+      const updateAvailable = updateInfo && updateInfo.update_available;
+      const dbUpdateActive = dbUpdateStatus
+        && !['idle', 'complete', 'failed'].includes(dbUpdateStatus.status);
+
       // Row 1: performer database (the ~2GB dataset downloaded via Database Update)
       performerStatsEl.className = 'ss-id-database-stats ss-id-database-stats-performer';
       performerStatsEl.innerHTML = `
         <div class="ss-db-stat">
-          <span class="ss-db-stat-value">${dbVersion}</span>
+          <span class="ss-db-stat-value">${noDatabase ? 'None' : dbVersion}</span>
           <span class="ss-db-stat-label">Version</span>
-          ${updateInfo && updateInfo.update_available ? `
+          ${(noDatabase || updateAvailable) ? `
             <div class="ss-update-badge">
-              <span class="ss-update-badge-text">v${updateInfo.latest_version} available${
-                updateInfo.delta_available
-                  ? ` \u2014 ${updateInfo.delta_download_size_mb} MB via delta (${updateInfo.delta_chain_length} release${updateInfo.delta_chain_length === 1 ? '' : 's'} behind)`
-                  : updateInfo.download_size_mb
-                    ? ` \u2014 ${updateInfo.download_size_mb} MB full download`
-                    : ''
+              <span class="ss-update-badge-text">${noDatabase
+                ? 'No database downloaded yet'
+                : `v${updateInfo.latest_version} available${
+                    updateInfo.delta_available
+                      ? ` \u2014 ${updateInfo.delta_download_size_mb} MB via delta (${updateInfo.delta_chain_length} release${updateInfo.delta_chain_length === 1 ? '' : 's'} behind)`
+                      : updateInfo.download_size_mb
+                        ? ` \u2014 ${updateInfo.download_size_mb} MB full download`
+                        : ''
+                  }`
               }</span>
             </div>
+            <button class="ss-update-btn ss-download-db-btn" id="ss-download-db-btn" ${dbUpdateActive ? 'disabled' : ''}>
+              ${dbUpdateActive ? 'Downloading\u2026' : (noDatabase ? 'Download Database' : 'Update Database')}
+            </button>
           ` : ''}
         </div>
         <div class="ss-db-stat">
@@ -525,6 +545,40 @@
           <span class="ss-db-stat-label">Faces</span>
         </div>
       `;
+
+      const downloadDbBtn = performerStatsEl.querySelector('#ss-download-db-btn');
+      if (downloadDbBtn) {
+        downloadDbBtn.addEventListener('click', async () => {
+          downloadDbBtn.disabled = true;
+          downloadDbBtn.textContent = 'Starting…';
+          try {
+            await SettingsAPI.startDatabaseUpdate();
+            pollDatabaseUpdate(downloadDbBtn);
+          } catch (e) {
+            const msg = String(e.message || '');
+            const alreadyRunning = msg.includes('409') || msg.includes('already in progress');
+            if (alreadyRunning) {
+              pollDatabaseUpdate(downloadDbBtn);
+            } else {
+              downloadDbBtn.textContent = 'Error';
+              downloadDbBtn.className = 'ss-btn ss-btn-danger ss-btn-sm ss-download-db-btn';
+              setTimeout(() => {
+                downloadDbBtn.textContent = noDatabase ? 'Download Database' : 'Update Database';
+                downloadDbBtn.className = 'ss-update-btn ss-download-db-btn';
+                downloadDbBtn.disabled = false;
+              }, 3000);
+            }
+          }
+        });
+
+        // A download already in progress (e.g. this tab was reopened, or the
+        // update was triggered elsewhere) -- pick up polling immediately
+        // rather than showing a clickable button that would just 409.
+        if (dbUpdateActive) {
+          downloadDbBtn.disabled = true;
+          pollDatabaseUpdate(downloadDbBtn);
+        }
+      }
 
       // Row 2: this scene library's own fingerprint coverage (stash_sense.db,
       // local to this install -- not part of the downloaded performer
@@ -582,6 +636,74 @@
     }
 
     return section;
+  }
+
+  // Poll /database/update/status while a download is running, updating
+  // `btn`'s label with live progress. On completion, refreshes the whole
+  // Identification Database section so the button/badge naturally
+  // disappears once the database is current -- same mechanism the
+  // "Missing" fingerprint count uses to update after a run finishes.
+  const DB_UPDATE_STATUS_LABELS = {
+    downloading: 'Downloading',
+    extracting: 'Extracting',
+    verifying: 'Verifying',
+    swapping: 'Applying',
+    reloading: 'Reloading',
+  };
+
+  function pollDatabaseUpdate(btn) {
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 30 * 60 * 1000; // large full downloads can take a while
+    const pollStart = Date.now();
+    let pollErrors = 0;
+
+    const interval = setInterval(async () => {
+      // The section may have been replaced from under us (e.g. user hit
+      // the section's own Refresh button) -- stop rather than touch a
+      // detached node or race a second poll loop.
+      if (!btn.isConnected) {
+        clearInterval(interval);
+        return;
+      }
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        clearInterval(interval);
+        btn.textContent = 'Timeout';
+        btn.className = 'ss-btn ss-btn-danger ss-btn-sm ss-download-db-btn';
+        btn.disabled = false;
+        return;
+      }
+
+      let status;
+      try {
+        status = await SettingsAPI.getDatabaseUpdateStatus();
+        pollErrors = 0;
+      } catch (e) {
+        pollErrors++;
+        if (pollErrors >= 5) {
+          clearInterval(interval);
+          btn.textContent = 'Error';
+          btn.className = 'ss-btn ss-btn-danger ss-btn-sm ss-download-db-btn';
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      if (status.status === 'complete') {
+        clearInterval(interval);
+        await refreshIdDatabaseSection();
+        return;
+      }
+      if (status.status === 'failed') {
+        clearInterval(interval);
+        btn.textContent = status.error ? `Error: ${status.error}` : 'Error';
+        btn.className = 'ss-btn ss-btn-danger ss-btn-sm ss-download-db-btn';
+        btn.disabled = false;
+        return;
+      }
+
+      const label = DB_UPDATE_STATUS_LABELS[status.status] || 'Downloading';
+      btn.textContent = `${label}… ${status.progress_pct}%`;
+    }, POLL_INTERVAL_MS);
   }
 
   // Re-fetch and swap in fresh stats without re-rendering the whole settings

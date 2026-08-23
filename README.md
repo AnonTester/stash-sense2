@@ -93,7 +93,7 @@ To update later: **Settings > Plugins > Installed Plugins**, click **Check for U
 
 Navigate to `/plugins/stash-sense2` in Stash to open the Stash Sense 2 dashboard. From the **Settings** tab:
 
-1. **Database** — Click **Update** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
+1. **Database** — Click **Download Database** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
 2. **Models** — Click **Download All** to download the required ONNX models (buffalo_l face recognition, ~200 MB)
 
 ## Configuration
