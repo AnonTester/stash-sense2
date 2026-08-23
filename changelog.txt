@@ -1,5 +1,23 @@
 ## 2026-08-23
 
+### 0.14.11 (sidecar only)
+- Fix: `_resolve_stashbox_studio_to_local()` (used to resolve a StashBox
+  parent-studio UUID to a local studio ID when applying an Upstream
+  Studio Change) could resolve a studio's parent right back to the same
+  studio being updated. Both its stash_id and name/alias lookup paths
+  matched against every local studio with no exclusion for the one the
+  resolution was *for* -- confirmed live: renaming "Devil's Film
+  (Network)" while StashBox reports its own parent as a studio also
+  named "Devil's Film (Network)" resolved to itself via the name-match
+  fallback. Stash's own `studioUpdate` mutation correctly rejects a
+  self-referential ancestor, but with no indication why, and the whole
+  update (including unrelated fields like the name change) failed
+  alongside it. Now excludes the studio being resolved for from both
+  lookups; if the only local holder of that name/alias is the excluded
+  studio itself (so a second studio can't be created under the same
+  name either, per Stash's unique-name constraint), the parent link is
+  now just left untouched rather than blocking the rest of the update.
+
 ### 0.14.12 (plugin only)
 - Fix: after "Accept All Changes" / "Dismiss All" / "Accept All High-
   Confidence" / the tag-only and performer-URL-only bulk-accept buttons

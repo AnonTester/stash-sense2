@@ -185,3 +185,131 @@ class TestResolveStashboxStudioToLocal:
         mock_stash.update_studio.assert_called_once()
         # Should NOT have tried to create a new studio
         assert not hasattr(mock_stash, 'create_studio') or not mock_stash.create_studio.called
+
+    @pytest.mark.asyncio
+    async def test_excludes_self_from_stash_id_match(self, app_and_db):
+        """Regression test: if the studio being resolved *for* already has
+        this exact stash_id linked (a bad/stale link), it must not be
+        returned as its own parent -- Stash rejects a studio being its own
+        ancestor, and previously this wasn't even checked."""
+        from recommendations_router import _resolve_stashbox_studio_to_local
+
+        mock_stash = MagicMock()
+        mock_stash._execute = AsyncMock(return_value={
+            "findStudios": {"studios": [{"id": "389", "name": "Devil's Film (Network)"}]}
+        })
+        mock_stash.search_studios = AsyncMock(return_value=[])
+        mock_stash.create_studio = AsyncMock(return_value={"id": "999"})
+
+        mock_sbc = MagicMock()
+        mock_sbc.get_studio = AsyncMock(return_value={
+            "name": "Devil's Film (Network)",
+            "urls": [],
+        })
+
+        with patch("stashbox_connection_manager.get_connection_manager") as mock_mgr:
+            mock_mgr.return_value.get_client.return_value = mock_sbc
+
+            result = await _resolve_stashbox_studio_to_local(
+                mock_stash, "parent-stashbox-uuid", "https://stashdb.org/graphql",
+                exclude_studio_id="389",
+            )
+
+        # Studio 389 was excluded from the stash_id match, so it falls
+        # through to name search (no results) then auto-import.
+        assert result == "999"
+        mock_stash.create_studio.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_excludes_self_from_name_match_and_returns_none_on_collision(self, app_and_db):
+        """Regression test: confirmed live -- renaming studio 389 ("Devil's
+        Film (Network)") whose StashBox parent is *also* named "Devil's
+        Film (Network)" resolved the parent back to studio 389 itself via
+        the name-match fallback, and Stash's studioUpdate correctly
+        rejected it ("studio cannot be an ancestor of itself") but gave no
+        indication why. The only local studio holding that name is the one
+        being excluded, and creating a second studio under the same name
+        would just collide with Stash's unique-name constraint instead --
+        so this must return None (caller leaves parent_id untouched)
+        rather than raising or self-referencing."""
+        from recommendations_router import _resolve_stashbox_studio_to_local
+
+        mock_stash = MagicMock()
+        mock_stash._execute = AsyncMock(return_value={"findStudios": {"studios": []}})
+        mock_stash.search_studios = AsyncMock(return_value=[
+            {"id": "389", "name": "Devil's Film (Network)", "aliases": [], "stash_ids": []},
+        ])
+        mock_stash.create_studio = AsyncMock(return_value={"id": "999"})
+
+        mock_sbc = MagicMock()
+        mock_sbc.get_studio = AsyncMock(return_value={
+            "name": "Devil's Film (Network)",
+            "urls": [],
+        })
+
+        with patch("stashbox_connection_manager.get_connection_manager") as mock_mgr:
+            mock_mgr.return_value.get_client.return_value = mock_sbc
+
+            result = await _resolve_stashbox_studio_to_local(
+                mock_stash, "parent-stashbox-uuid", "https://stashdb.org/graphql",
+                exclude_studio_id="389",
+            )
+
+        assert result is None
+        mock_stash.create_studio.assert_not_called()
+        mock_stash.update_studio.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_excludes_self_but_links_different_studio_with_same_name(self, app_and_db):
+        """When a *different* local studio also matches the upstream name
+        (not just the excluded one), it should still be linked normally --
+        exclusion only skips the studio being resolved for, not every
+        candidate."""
+        from recommendations_router import _resolve_stashbox_studio_to_local
+
+        mock_stash = MagicMock()
+        mock_stash._execute = AsyncMock(return_value={"findStudios": {"studios": []}})
+        mock_stash.search_studios = AsyncMock(return_value=[
+            {"id": "389", "name": "Devil's Film (Network)", "aliases": [], "stash_ids": []},
+            {"id": "42", "name": "Devil's Film (Network)", "aliases": [], "stash_ids": []},
+        ])
+        mock_stash.update_studio = AsyncMock(return_value={"id": "42"})
+
+        mock_sbc = MagicMock()
+        mock_sbc.get_studio = AsyncMock(return_value={
+            "name": "Devil's Film (Network)",
+            "urls": [],
+        })
+
+        with patch("stashbox_connection_manager.get_connection_manager") as mock_mgr:
+            mock_mgr.return_value.get_client.return_value = mock_sbc
+
+            result = await _resolve_stashbox_studio_to_local(
+                mock_stash, "parent-stashbox-uuid", "https://stashdb.org/graphql",
+                exclude_studio_id="389",
+            )
+
+        assert result == "42"
+        mock_stash.update_studio.assert_called_once()
+
+    def test_update_studio_skips_parent_id_when_resolution_returns_none(self, app):
+        """The update-studio endpoint must not set parent_id to None when
+        resolution can't find a distinct parent -- that would explicitly
+        clear any existing parent link, when the correct behavior is to
+        leave it untouched and still apply the other fields."""
+        with patch("recommendations_router.get_stash_client") as mock_get_stash, \
+             patch("recommendations_router._resolve_stashbox_studio_to_local", new=AsyncMock(return_value=None)):
+            mock_stash = MagicMock()
+            mock_stash.update_studio = AsyncMock(return_value={"id": "389"})
+            mock_get_stash.return_value = mock_stash
+
+            client = TestClient(app)
+            resp = client.post("/recommendations/actions/update-studio", json={
+                "studio_id": "389",
+                "fields": {"name": "Devil's Film", "parent_studio": "parent-stashbox-uuid"},
+                "endpoint": "https://stashdb.org/graphql",
+            })
+            assert resp.status_code == 200
+            call_kwargs = mock_stash.update_studio.call_args.kwargs
+            assert "parent_id" not in call_kwargs
+            assert call_kwargs["name"] == "Devil's Film"

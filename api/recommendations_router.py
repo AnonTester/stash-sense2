@@ -2072,9 +2072,12 @@ async def update_studio_fields(request: UpdateStudioRequest):
     parent_stashbox_id = fields.pop("parent_studio", None)
     if parent_stashbox_id:
         local_parent_id = await _resolve_stashbox_studio_to_local(
-            stash, parent_stashbox_id, request.endpoint
+            stash, parent_stashbox_id, request.endpoint, exclude_studio_id=studio_id
         )
-        fields["parent_id"] = local_parent_id
+        # None means no distinct studio could be resolved (self-reference
+        # case) -- leave parent_id untouched rather than clearing it.
+        if local_parent_id is not None:
+            fields["parent_id"] = local_parent_id
 
     try:
         result = await stash.update_studio(studio_id, **fields)
@@ -2087,16 +2090,36 @@ async def _resolve_stashbox_studio_to_local(
     stash: StashClientUnified,
     stashbox_id: str,
     endpoint: str,
-) -> str:
+    exclude_studio_id: Optional[str] = None,
+) -> Optional[str]:
     """Resolve a StashBox studio UUID to a local Stash studio ID.
 
     If the studio doesn't exist locally, import it from StashBox
     (name + first URL + stash_ids link) and return the new local ID.
+
+    `exclude_studio_id`: the studio this resolution is *for* (i.e. whose
+    parent_id is about to be set to whatever this returns), when known.
+    Both lookup paths below match on name/stash_id alone, with no
+    inherent reason they can't return that same studio -- confirmed live
+    when a studio's name coincided with its own StashBox-reported parent
+    name (e.g. renaming "Devil's Film (Network)" while StashBox reports
+    its parent as a studio also named "Devil's Film (Network)"), which
+    the name-match fallback resolved right back to the studio itself,
+    and Stash's own studioUpdate mutation correctly rejects ("studio
+    cannot be an ancestor of itself") but with no indication why to the
+    caller. Filtering self-matches here means a genuinely different
+    parent (existing or newly imported) gets used instead, rather than
+    the whole update failing. Returns None (rather than raising) in the
+    rarer case where the only local studio holding that name/alias *is*
+    the excluded one -- no distinct studio to link to, and creating a
+    second studio under the same name would just fail on Stash's own
+    unique-name constraint. Callers should leave parent_id untouched
+    (not set it to None) when this happens.
     """
     # Try to find locally by stash_box_id
     query = """
     query FindStudioByStashBoxID($studio_filter: StudioFilterType) {
-      findStudios(studio_filter: $studio_filter, filter: { per_page: 1 }) {
+      findStudios(studio_filter: $studio_filter, filter: { per_page: 10 }) {
         studios { id name }
       }
     }
@@ -2110,7 +2133,10 @@ async def _resolve_stashbox_studio_to_local(
             }
         }
     })
-    studios = data["findStudios"]["studios"]
+    studios = [
+        s for s in data["findStudios"]["studios"]
+        if exclude_studio_id is None or s["id"] != exclude_studio_id
+    ]
     if studios:
         return studios[0]["id"]
 
@@ -2132,19 +2158,41 @@ async def _resolve_stashbox_studio_to_local(
     # Try to find locally by exact name or alias match before creating
     local_matches = await stash.search_studios(upstream["name"], limit=10)
     upstream_name_lower = upstream["name"].strip().lower()
+    self_holds_this_name = False
     for match in local_matches:
         match_name = (match.get("name") or "").strip().lower()
         match_aliases = {a.strip().lower() for a in (match.get("aliases") or [])}
-        if match_name == upstream_name_lower or upstream_name_lower in match_aliases:
-            # Name or alias match — link the stash_id to the existing studio
-            existing_stash_ids = match.get("stash_ids") or []
-            existing_stash_ids.append({"endpoint": endpoint, "stash_id": stashbox_id})
-            await stash.update_studio(match["id"], stash_ids=existing_stash_ids)
-            logger.warning(
-                f"Linked existing studio '{match['name']}' (ID: {match['id']}) "
-                f"to StashBox {stashbox_id} on {endpoint}"
-            )
-            return match["id"]
+        is_name_match = match_name == upstream_name_lower or upstream_name_lower in match_aliases
+        if not is_name_match:
+            continue
+        if exclude_studio_id is not None and match["id"] == exclude_studio_id:
+            # The studio being resolved *for* is itself the only local
+            # holder of this name -- can't link to it (self-reference) and
+            # can't create a new studio under the same name either (Stash
+            # enforces unique studio names, so that would just swap one
+            # blocking error for another). Keep looking in case a
+            # *different* studio also matches; otherwise this parent link
+            # can't be resolved to a distinct studio at all right now.
+            self_holds_this_name = True
+            continue
+        # Name or alias match on a different studio — link the stash_id to it
+        existing_stash_ids = match.get("stash_ids") or []
+        existing_stash_ids.append({"endpoint": endpoint, "stash_id": stashbox_id})
+        await stash.update_studio(match["id"], stash_ids=existing_stash_ids)
+        logger.warning(
+            f"Linked existing studio '{match['name']}' (ID: {match['id']}) "
+            f"to StashBox {stashbox_id} on {endpoint}"
+        )
+        return match["id"]
+
+    if self_holds_this_name:
+        logger.warning(
+            f"Parent studio {stashbox_id} on {endpoint} resolves to the same "
+            f"name ('{upstream['name']}') as the studio it would be set as "
+            f"parent of (local ID {exclude_studio_id}) -- skipping rather "
+            f"than self-reference or collide with it on create."
+        )
+        return None
 
     # No local match by name — auto-import from StashBox
     urls = []
@@ -2266,7 +2314,9 @@ async def _enrich_studio_after_create(
 
         parent = upstream.get("parent")
         if parent and parent.get("id"):
-            local_parent_id = await _resolve_stashbox_studio_to_local(stash, parent["id"], endpoint)
+            local_parent_id = await _resolve_stashbox_studio_to_local(
+                stash, parent["id"], endpoint, exclude_studio_id=studio_id
+            )
             if local_parent_id:
                 update_fields["parent_id"] = local_parent_id
 
