@@ -40,11 +40,13 @@ cp api/.env.example .env
 
 Pick the compose file matching your hardware:
 
-| Hardware | Compose file | GHCR image | Status |
-|----------|--------------|------------|--------|
-| CPU only | `docker-compose.yml` | `ghcr.io/anontester/stash-sense2` | Tested, most portable |
-| AMD GPU (ROCm) | `docker-compose.rocm.yml` | `ghcr.io/anontester/stash-sense2-rocm` | Tested (reference deployment: Radeon 780M / gfx1103) |
-| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+| Hardware | Compose file | GHCR image | Download size | Status |
+|----------|--------------|------------|----------------|--------|
+| CPU only | `docker-compose.yml` | `ghcr.io/anontester/stash-sense2` | ~0.6GB | Tested, most portable |
+| AMD GPU (ROCm) | `docker-compose.rocm.yml` | `ghcr.io/anontester/stash-sense2-rocm` | ~5.2GB | Tested (reference deployment: Radeon 780M / gfx1103) |
+| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | ~2.9GB | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+
+Download size is the compressed image pulled from GHCR; the GPU variants are larger mainly because they bundle their vendor's GPU runtime libraries (ROCm/CUDA) alongside the app itself.
 
 Each compose file's `image:` already points at its GHCR image, so `up -d` alone pulls and runs it — `build:` is also there if you'd rather build locally instead.
 
