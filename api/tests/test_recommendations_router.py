@@ -920,3 +920,27 @@ class TestFindLinkedEntityAction:
         assert data["result"]["id"] == "11"
         assert data["result"]["name"] == "Jane Doe"
         assert data["result"]["aliases"] == ["JD"]
+
+
+class TestFingerprintReset:
+    """POST /fingerprints/reset -- backs up + marks all scene fingerprints
+    for refresh. Used by the Settings UI's Detection Resolution change
+    modal (see stash-sense-settings.js's showDetectionSizeChangeModal)."""
+
+    def test_backs_up_and_marks_all_for_refresh(self, client, db):
+        db.create_scene_fingerprint(stash_scene_id=1, total_faces=2, frames_analyzed=60, db_version="2026.01.01")
+        db.create_scene_fingerprint(stash_scene_id=2, total_faces=1, frames_analyzed=60, db_version="2026.01.01")
+
+        resp = client.post("/recommendations/fingerprints/reset")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["fingerprints_backed_up"] == 2
+        assert data["marked_for_refresh"] == 2
+        assert db.get_scene_fingerprint(stash_scene_id=1)["db_version"] is None
+
+    def test_empty_database_ok(self, client, db):
+        resp = client.post("/recommendations/fingerprints/reset")
+
+        assert resp.status_code == 200
+        assert resp.json()["fingerprints_backed_up"] == 0

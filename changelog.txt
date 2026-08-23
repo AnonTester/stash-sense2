@@ -1,5 +1,17 @@
 ## 2026-08-23
 
+### 0.14.6
+- Improvement: changing Detection Resolution now shows a confirmation
+  modal explaining that existing scene fingerprints are a frozen
+  snapshot -- nothing tracks which detection_size produced a given
+  fingerprint (only db_version is tracked), so the change alone never
+  retroactively improves already-fingerprinted scenes. The modal offers
+  three choices: reset the fingerprint database (backs up to timestamped
+  tables first, then marks everything for reprocessing), apply the new
+  resolution only to scenes fingerprinted from now on, or cancel and
+  revert to the default. New sidecar endpoint:
+  `POST /recommendations/fingerprints/reset`.
+
 ### 0.14.5
 - Fix: `frame_extraction_concurrency` (parallel ffmpeg processes for
   frame extraction) scaled with hardware tier (8/6/2 for gpu-high/gpu-

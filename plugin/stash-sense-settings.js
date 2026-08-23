@@ -51,6 +51,9 @@
     async getFingerprintJobs() {
       return apiCall('queue_list', { type: 'fingerprint_generation' });
     },
+    async resetFingerprintsWithBackup() {
+      return apiCall('fp_reset');
+    },
     async checkUpdate() {
       return apiCall('db_check_update');
     },
@@ -1002,12 +1005,23 @@
     if (setting.min !== undefined) input.setAttribute('min', setting.min);
     if (setting.max !== undefined) input.setAttribute('max', setting.max);
 
-    input.addEventListener('input', () => {
-      const val = setting.type === 'float' ? parseFloat(input.value) : parseInt(input.value, 10);
-      if (!isNaN(val)) {
-        debouncedSave(key, val, wrapper.closest('.ss-setting-row'));
-      }
-    });
+    if (key === 'detection_size') {
+      // Gated separately below (fires once on commit, not per keystroke --
+      // this setting needs a confirmation modal before saving, unlike the
+      // generic debounced-autosave path every other number input uses).
+      input.addEventListener('change', () => {
+        const val = parseInt(input.value, 10);
+        if (isNaN(val) || val === setting.value) return;
+        showDetectionSizeChangeModal(key, val, setting, input, wrapper.closest('.ss-setting-row'));
+      });
+    } else {
+      input.addEventListener('input', () => {
+        const val = setting.type === 'float' ? parseFloat(input.value) : parseInt(input.value, 10);
+        if (!isNaN(val)) {
+          debouncedSave(key, val, wrapper.closest('.ss-setting-row'));
+        }
+      });
+    }
 
     wrapper.appendChild(input);
 
@@ -1020,6 +1034,118 @@
     }
 
     return wrapper;
+  }
+
+  // detection_size changes the resolution faces are detected at -- but
+  // existing scene fingerprints are a frozen snapshot of a past
+  // identify_scene run, and nothing tracks which detection_size produced
+  // them (only db_version is tracked). Changing this setting alone never
+  // retroactively improves already-fingerprinted scenes; this modal makes
+  // that explicit and offers a way to force reprocessing instead of
+  // silently leaving old fingerprints stale relative to the new value.
+  function showDetectionSizeChangeModal(key, newVal, setting, input, row) {
+    const oldVal = setting.value;
+    const overlay = SS.createElement('div', { className: 'ss-modal-overlay' });
+    overlay.innerHTML = `
+      <div class="ss-modal-content" style="max-width:480px;padding:20px;">
+        <h3 style="margin:0 0 12px;">Change Detection Resolution?</h3>
+        <p style="margin:0 0 12px;color:#ccc;">
+          Detection Resolution only affects face detection for scenes identified
+          <strong>from now on</strong>. Existing scene fingerprints are a
+          snapshot of a past run at the old resolution (${oldVal}px) --
+          changing this setting does not retroactively improve them.
+        </p>
+        <p style="margin:0 0 16px;color:#ccc;">
+          To have already-fingerprinted scenes benefit from ${newVal}px, they
+          need to be reprocessed. You can reset the fingerprint database now
+          (a backup of the current data is kept first), or just apply the new
+          resolution going forward and leave existing fingerprints as-is.
+        </p>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <button class="ss-btn ss-btn-primary" id="ss-detsize-reset" style="width:100%;">
+            Reset fingerprint database (backs up first)
+          </button>
+          <button class="ss-btn ss-btn-secondary" id="ss-detsize-apply-new" style="width:100%;">
+            Apply only to new fingerprints
+          </button>
+          <button class="ss-btn ss-btn-secondary" id="ss-detsize-cancel" style="width:100%;">
+            Cancel (keep ${oldVal}px)
+          </button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const setButtonsDisabled = (disabled) => {
+      overlay.querySelectorAll('button').forEach((btn) => { btn.disabled = disabled; });
+    };
+
+    const cancelAndRevert = async () => {
+      input.value = String(oldVal);
+      overlay.remove();
+      // Explicit no-op guard: if the value somehow already equals the
+      // tier default, resetting again is harmless (SettingsAPI.reset is
+      // idempotent), so no special-case needed here.
+      try {
+        const result = await SettingsAPI.reset(key);
+        setting.value = result.value;
+        setting.is_override = false;
+        input.value = String(result.value);
+        showSaveIndicator(row, 'Reverted', false);
+      } catch (e) {
+        showSaveIndicator(row, 'Error', true);
+        console.error(`Failed to revert ${key}:`, e);
+      }
+    };
+
+    overlay.querySelector('#ss-detsize-cancel').addEventListener('click', cancelAndRevert);
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) cancelAndRevert();
+    });
+
+    overlay.querySelector('#ss-detsize-apply-new').addEventListener('click', async () => {
+      setButtonsDisabled(true);
+      try {
+        await SettingsAPI.update(key, newVal);
+        setting.value = newVal;
+        setting.is_override = true;
+        overlay.remove();
+        showSaveIndicator(row, 'Saved', false);
+      } catch (e) {
+        setButtonsDisabled(false);
+        console.error(`Failed to save ${key}:`, e);
+      }
+    });
+
+    overlay.querySelector('#ss-detsize-reset').addEventListener('click', async () => {
+      setButtonsDisabled(true);
+      overlay.querySelector('.ss-modal-content').innerHTML =
+        '<div class="ss-loading-inline"><div class="ss-spinner"></div></div>'
+        + '<p style="text-align:center;margin-top:0.5rem;">Backing up and resetting fingerprint database...</p>';
+      try {
+        const resetResult = await SettingsAPI.resetFingerprintsWithBackup();
+        await SettingsAPI.update(key, newVal);
+        setting.value = newVal;
+        setting.is_override = true;
+        overlay.remove();
+        showSaveIndicator(row, 'Saved', false);
+        // Reflect the reset immediately if the fingerprint stats section
+        // is on screen -- it's a stale snapshot otherwise (see its own
+        // Refresh button's rationale).
+        const idDbSection = document.querySelector('.ss-id-database-settings-section');
+        if (idDbSection) refreshIdDatabaseSection();
+        console.log(
+          `[${SS.PLUGIN_NAME}] Fingerprint database reset: ` +
+          `${resetResult.fingerprints_backed_up} backed up to ` +
+          `${resetResult.backup_fingerprints_table}, ` +
+          `${resetResult.marked_for_refresh} marked for refresh`
+        );
+      } catch (e) {
+        overlay.remove();
+        showSaveIndicator(row, 'Error', true);
+        console.error('Failed to reset fingerprint database:', e);
+      }
+    });
   }
 
   function renderTextInput(key, setting) {

@@ -1612,6 +1612,19 @@ async def mark_all_fingerprints_for_refresh(confirm: bool = False):
     }
 
 
+@router.post("/fingerprints/reset")
+async def reset_fingerprints_with_backup():
+    """Back up all scene fingerprints, then mark every one for refresh.
+
+    For a detection-affecting settings change (e.g. detection_size) where
+    the user wants existing fingerprints regenerated under the new
+    setting, but with a safety copy of the pre-change data first -- see
+    RecommendationsDB.reset_scene_fingerprints_with_backup().
+    """
+    db = get_rec_db()
+    return db.reset_scene_fingerprints_with_backup()
+
+
 # ==================== Local Performer Database ====================
 #
 # No dedicated "sync-all" endpoint here -- a full sync is just the

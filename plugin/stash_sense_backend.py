@@ -819,6 +819,16 @@ def fp_stop(sidecar_url):
     return sidecar_post(sidecar_url, "/recommendations/fingerprints/stop", {})
 
 
+def fp_reset(sidecar_url):
+    """Back up all scene fingerprints, then mark every one for refresh.
+
+    Used when a detection-affecting setting (e.g. detection_size) changes
+    and the user chooses to regenerate existing fingerprints rather than
+    only apply the new setting going forward.
+    """
+    return sidecar_post(sidecar_url, "/recommendations/fingerprints/reset", {})
+
+
 def handle_recommendations(mode, args, sidecar_url):
     """Handle recommendations-related operations."""
     if mode == "rec_counts":
@@ -1243,6 +1253,9 @@ def handle_recommendations(mode, args, sidecar_url):
 
     elif mode == "fp_stop":
         return fp_stop(sidecar_url)
+
+    elif mode == "fp_reset":
+        return fp_reset(sidecar_url)
 
     return None
 

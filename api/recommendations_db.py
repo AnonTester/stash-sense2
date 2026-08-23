@@ -9,6 +9,7 @@ See: docs/plans/2026-01-28-recommendations-engine-design.md
 
 import sqlite3
 import json
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -1793,6 +1794,41 @@ class RecommendationsDB:
                     scene_ids
                 )
             return cursor.rowcount
+
+    def reset_scene_fingerprints_with_backup(self) -> dict:
+        """Back up scene_fingerprints + scene_fingerprint_faces to
+        timestamped tables, then mark every fingerprint for refresh (same
+        effect as mark_fingerprints_for_refresh(None), so the next
+        fingerprint generation run fully reprocesses every scene).
+
+        For a detection-affecting settings change (e.g. detection_size) --
+        existing fingerprints were computed under the old setting and
+        won't reflect the new one until reprocessed; this gives a safety
+        copy of the pre-change data before kicking that off. The backup
+        tables are plain SQLite tables left in the same database (not
+        automatically pruned) -- old ones accumulate if this is used
+        repeatedly and would need manual cleanup.
+        """
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        backup_fp_table = f"scene_fingerprints_backup_{timestamp}"
+        backup_faces_table = f"scene_fingerprint_faces_backup_{timestamp}"
+        with self._connection() as conn:
+            conn.execute(f"CREATE TABLE {backup_fp_table} AS SELECT * FROM scene_fingerprints")
+            conn.execute(f"CREATE TABLE {backup_faces_table} AS SELECT * FROM scene_fingerprint_faces")
+            fingerprints_backed_up = conn.execute(f"SELECT COUNT(*) FROM {backup_fp_table}").fetchone()[0]
+            faces_backed_up = conn.execute(f"SELECT COUNT(*) FROM {backup_faces_table}").fetchone()[0]
+            cursor = conn.execute(
+                "UPDATE scene_fingerprints SET db_version = NULL, updated_at = datetime('now')"
+            )
+            marked_for_refresh = cursor.rowcount
+
+        return {
+            "backup_fingerprints_table": backup_fp_table,
+            "backup_faces_table": backup_faces_table,
+            "fingerprints_backed_up": fingerprints_backed_up,
+            "faces_backed_up": faces_backed_up,
+            "marked_for_refresh": marked_for_refresh,
+        }
 
     # ==================== Image Fingerprints ====================
 
