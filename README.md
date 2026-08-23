@@ -74,6 +74,8 @@ Each variant listens on port `6960` and persists its data under `./api/data` —
 curl http://localhost:6960/health
 ```
 
+> **`"status": "degraded"` at this point is expected, not an error.** The face recognition database and models load lazily on first use, not at container startup, so `/health` reports `degraded` until the first real identification request — or, on a brand-new install, until you've actually downloaded the database and models in step 4 below. It should flip to `healthy` the first time an identify request succeeds.
+
 ### 3. Install the Stash plugin
 
 In Stash, go to **Settings > Plugins > Available Plugins**, click **Add Source**, and add:
