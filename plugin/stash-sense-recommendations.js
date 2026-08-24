@@ -914,7 +914,7 @@
 
   // ==================== List View ====================
 
-  async function renderList(container) {
+  async function renderList(container, _retried = false) {
     const typeConfigs = {
       duplicate_performer: 'Duplicate Performers',
       duplicate_scenes: 'Duplicate Scenes',
@@ -1455,17 +1455,27 @@
         currentState.listCache = { key: cacheKey, recommendations, total, typeCounts };
       }
 
-      // If every entry on the current page was surgically removed from the
-      // cache (removeFromListCache, e.g. resolving/dismissing items one by
-      // one) but recommendations still remain overall, the page index is now
-      // past the end -- snap back to the last valid page and re-render
-      // instead of showing a false "no recommendations" empty state. Applies
+      // The current page came back empty but recommendations still remain
+      // overall -- either every entry on this page was surgically removed
+      // from the cache (removeFromListCache, e.g. resolving/dismissing
+      // items one by one) while the page index itself stayed 0 (the common
+      // case, since that's the default and where most people work), or this
+      // is a stale cache from a previous visit to this same type/status/page
+      // (e.g. Back to the dashboard and straight back into the same type,
+      // which doesn't reset page/status and so hits the exact same cache
+      // key). Either way, force a real re-fetch instead of showing a false
+      // "no recommendations" empty state -- snapping back to the last valid
+      // page first if the current page index is genuinely beyond the real
+      // total. _retried guards against ever looping more than once. Applies
       // to every recommendation type/status, since this is the one shared
       // list renderer they all go through.
-      if (recommendations.length === 0 && total > 0 && currentState.page > 0) {
-        currentState.page = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+      if (recommendations.length === 0 && total > 0 && !_retried) {
+        const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+        if (currentState.page > maxPage) {
+          currentState.page = maxPage;
+        }
         currentState.listCache = null;
-        return renderList(container);
+        return renderList(container, true);
       }
 
       // Update tab labels with counts

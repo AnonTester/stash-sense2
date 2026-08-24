@@ -1,5 +1,20 @@
 ## 2026-08-24
 
+### 0.14.15 (plugin only)
+- Fix: 0.14.13's false-empty-page fix only fired once `currentState.page`
+  was already > 0, but the stale-cache-page symptom shows up just as often
+  on page 0 -- the default page and where most people actually clear
+  items from -- so the guard never fired in the most common case.
+  Confirmed live: 93 pending recommendations, page 0 fully cleared, list
+  kept showing "No pending recommendations found." The same stale-cache
+  condition also reproduced by navigating Back to the dashboard and
+  straight back into the same type: `openType()` doesn't reset
+  `currentState.page`/`status`, so it re-hits the exact same (now-empty)
+  cache key and never re-fetches -- previously required a full browser
+  refresh to clear. `renderList()` now re-fetches whenever the current
+  page comes back empty with a nonzero total, regardless of page number,
+  with a one-shot retry guard against looping.
+
 ### 0.14.14 (plugin only)
 - Feature: Upstream Scene Changes now offers an "Update scene cover"
   checkbox, right under the local scene's context summary, whenever the
