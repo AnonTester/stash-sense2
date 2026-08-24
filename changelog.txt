@@ -1,5 +1,15 @@
 ## 2026-08-24
 
+### 0.14.16 (plugin only)
+- Feature: the Duplicate Scenes pending list now shows a checkbox in place
+  of each card's icon, letting you dismiss candidates in bulk without
+  opening them individually. Checking one or more cards reveals a "Dismiss
+  Selected" button next to "Dismiss All"; unchecking everything hides it
+  again. Each card can bundle multiple underlying recommendation rows (one
+  per candidate match, via `details.duplicate_matches`) -- dismissing a
+  selected card dismisses its whole bundle, the same as opening it and
+  using "Dismiss All" in the detail view.
+
 ### 0.14.15 (plugin only)
 - Fix: 0.14.13's false-empty-page fix only fired once `currentState.page`
   was already > 0, but the stale-cache-page symptom shows up just as often

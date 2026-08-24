@@ -1198,6 +1198,46 @@
   cursor: not-allowed;
 }
 
+.ss-dismiss-selected-btn {
+  padding: 8px 20px;
+  background: transparent;
+  color: #999;
+  border: 1px solid #555;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.ss-dismiss-selected-btn:hover:not(:disabled) {
+  background: rgba(220, 53, 69, 0.1);
+  color: #dc3545;
+  border-color: #dc3545;
+}
+
+.ss-dismiss-selected-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ss-dup-scene-select {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ss-dup-scene-select-cb {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
 /* Modal overlay */
 .ss-modal-overlay {
   position: fixed;

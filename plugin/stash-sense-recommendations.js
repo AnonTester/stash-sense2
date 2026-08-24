@@ -967,6 +967,10 @@
             ? '<button class="ss-accept-all-btn" id="ss-accept-all-performer-url-btn" style="display:none;">Accept All URL Only Changes</button>'
             : ''
           }
+          ${currentState.type === 'duplicate_scenes'
+            ? '<button class="ss-dismiss-selected-btn" id="ss-dismiss-selected-btn" style="display:none;">Dismiss Selected</button>'
+            : ''
+          }
           <button class="ss-dismiss-all-btn" id="ss-dismiss-all-btn" style="display:none;">Dismiss All</button>
         </div>
         ` : ''}
@@ -1517,12 +1521,55 @@
           dateBadge.textContent = formatRecTimestamp(rec.updated_at);
           card.appendChild(dateBadge);
         }
-        card.addEventListener('click', () => {
+        card.addEventListener('click', (e) => {
+          if (e.target.closest('.ss-dup-scene-select')) return;
           currentState.selectedRec = rec;
           currentState.view = 'detail';
           renderCurrentView(container);
         });
         listContent.appendChild(card);
+      }
+
+      // Duplicate-scenes bulk selection: toggle "Dismiss Selected" visibility
+      // as checkboxes change, and wire the dismiss action itself.
+      if (currentState.type === 'duplicate_scenes' && currentState.status === 'pending') {
+        const dismissSelectedBtn = container.querySelector('#ss-dismiss-selected-btn');
+        if (dismissSelectedBtn) {
+          listContent.addEventListener('change', (e) => {
+            if (!e.target.matches('.ss-dup-scene-select-cb')) return;
+            const anyChecked = listContent.querySelector('.ss-dup-scene-select-cb:checked') != null;
+            dismissSelectedBtn.style.display = anyChecked ? '' : 'none';
+          });
+
+          dismissSelectedBtn.addEventListener('click', async () => {
+            const checkedBoxes = Array.from(listContent.querySelectorAll('.ss-dup-scene-select-cb:checked'));
+            if (checkedBoxes.length === 0) return;
+
+            const allGroupIds = [];
+            checkedBoxes.forEach(cb => {
+              const recId = Number(cb.dataset.recId);
+              const rec = recommendations.find(r => r.id === recId);
+              allGroupIds.push(...(rec ? getDuplicateSceneGroupIds(rec) : [recId]));
+            });
+
+            dismissSelectedBtn.disabled = true;
+            dismissSelectedBtn.textContent = 'Dismissing...';
+            try {
+              const result = await RecommendationsAPI.dismissDuplicateSceneGroup(allGroupIds, 'User dismissed');
+              dismissSelectedBtn.textContent = `Dismissed ${result.dismissed_count}!`;
+              invalidateListCache();
+              setTimeout(() => {
+                renderCurrentView(document.getElementById('ss-recommendations'));
+              }, 1200);
+            } catch (e) {
+              dismissSelectedBtn.textContent = `Failed: ${e.message}`;
+              setTimeout(() => {
+                dismissSelectedBtn.textContent = 'Dismiss Selected';
+                dismissSelectedBtn.disabled = false;
+              }, 2000);
+            }
+          });
+        }
       }
 
       // Pagination controls
@@ -1568,6 +1615,21 @@
         </div>
       `;
     }
+  }
+
+  // A duplicate-scenes list card bundles multiple underlying recommendation
+  // rows (one per candidate match) into a single card via
+  // details.duplicate_matches -- dismissing "this card" means dismissing
+  // every row in that bundle, not just rec.id. Mirrors the fallback used in
+  // renderDuplicateScenesDetail() for recs with no duplicate_matches array.
+  function getDuplicateSceneGroupIds(rec) {
+    const details = rec.details || {};
+    const rawMatches = Array.isArray(details.duplicate_matches) && details.duplicate_matches.length > 0
+      ? details.duplicate_matches
+      : [{ recommendation_id: rec.id }];
+    return rawMatches
+      .map(m => Number(m && m.recommendation_id))
+      .filter(id => Number.isFinite(id));
   }
 
   // Surgically drops one recommendation from the cached list page (see
@@ -1664,14 +1726,21 @@
       const contextLine = contextParts.length ? contextParts.join(' · ') : `Scene ID: ${d.source_scene_id || d.scene_a_id}`;
       const matchCount = Math.max(1, Number(d.match_count || (d.duplicate_matches || []).length || 1));
       const duplicateLabel = `${matchCount} possible duplicate${matchCount !== 1 ? 's' : ''}`;
+      // Selection checkboxes only make sense where bulk-dismissing applies --
+      // swap in the plain icon on the Resolved/Dismissed tabs.
+      const iconHtml = currentState.status === 'pending'
+        ? `<label class="ss-rec-tag-icon ss-dup-scene-select">
+             <input type="checkbox" class="ss-dup-scene-select-cb" data-rec-id="${rec.id}" />
+           </label>`
+        : `<div class="ss-rec-tag-icon">
+             <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
+           </div>`;
 
       return SS.createElement('div', {
         className: 'ss-rec-card ss-rec-dup-scenes',
         innerHTML: `
           <div class="ss-rec-card-header">
-            <div class="ss-rec-tag-icon">
-              <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H8V4h12v12z"/></svg>
-            </div>
+            ${iconHtml}
             <div class="ss-rec-card-info">
               <div class="ss-rec-card-title">${SS.escapeHtml(titleA)}</div>
               <div class="ss-rec-card-subtitle">
