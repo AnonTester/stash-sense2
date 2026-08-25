@@ -1,3 +1,77 @@
+## 2026-08-25
+
+### 0.14.12 (sidecar only)
+- Feature: new "Scene Face Matches" job (Operations tab, GPU-classed like
+  Fingerprint Generation and Local Performer Sync, so it shares the same
+  one-at-a-time GPU concurrency slot). Scans scenes with zero performers
+  assigned and runs the same identify pipeline the manual scene "Identify"
+  button uses (`identify_scene`, now factored into a reusable
+  `_identify_scene_impl` both the route and the job call) -- including the
+  local performer index and sprite/VTT tile faces, matching the manual
+  flow's default behavior exactly. Uses the plain clustering match mode
+  (not the default frequency/hybrid modes), which is the one that doesn't
+  drop single-frame-appearance faces, and caps candidates at 5 per detected
+  person. Watermark-based incremental scans only rescan scenes that still
+  have zero performers -- once a scene gets any performer added (fully or
+  partially accepted), it naturally drops out of scope; a fully-rejected
+  scene stays in scope and gets rescanned for new candidates on future
+  runs. One recommendation per (scene, candidate performer) pair, so
+  accept/dismiss decisions are keyed by performer identity rather than by
+  this run's face-cluster numbering (which isn't stable across reruns) --
+  a dismissed candidate stays dismissed even after a future rescan
+  reclusters the scene's faces differently, while a genuinely new
+  candidate (e.g. after a database update) still surfaces normally.
+  New `/actions/accept-scene-face-matches` (adds selected candidates to the
+  scene, find-or-creating a local performer when needed, and dismisses the
+  rest of that scene's pending candidates), `/actions/reject-all-scene-
+  face-matches`, and `/actions/dismiss-scene-face-match` endpoints, plus
+  scene-grouped list/count views mirroring how Duplicate Scenes and Scene
+  Stash-Box Tagger already group multiple recommendation rows per scene.
+- Feature: `PerformerMatchResponse` gained `top_timestamps_sec` -- up to 4
+  timestamps (seconds) of a candidate's strongest-scoring frames, resolved
+  from data the clustering pipeline already tracked internally but
+  previously discarded. Only populated by the plain-clustering match mode
+  (what the new job above uses); empty for the default frequency/hybrid
+  modes the manual Identify button uses, so this is purely additive.
+
+### 0.14.17 (plugin only)
+- Feature: new "Scene Face Matches" recommendations card, listing scenes
+  with no performers assigned alongside the performers identified in them.
+  Detail view shows the scene's video player and an "Open in Stash" link,
+  then one column per detected person with its candidate performers --
+  cover image, confidence, a link to view the performer (on their
+  stash-box endpoint, as a local performer, or on their catalogue source's
+  profile/site, matching the existing manual-identify result view's link
+  conventions), and jump-to-timestamp buttons that seek the video straight
+  to that candidate's strongest frames when available. A candidate is only
+  pre-selected for accept if it's a person's best match *and* appeared in
+  more than 5 frames *and* scored at least 10% confidence, so a weak or
+  single-frame guess always needs a deliberate look before getting added
+  to a scene. "Accept Selected" adds every checked candidate to the scene
+  and dismisses the rest of that scene's pending candidates; "Reject All"
+  dismisses everything pending for the scene (it can still resurface later
+  if a rescan finds a genuinely new candidate). Per-candidate "Dismiss" is
+  also available without leaving the detail view.
+- Fix: the Pending/Resolved/Dismissed tab counts shown in a recommendation
+  type's list view could go stale after accepting or dismissing something
+  from a detail view. The single cached list page (`currentState.listCache`)
+  stored `typeCounts` alongside the row list, and the surgical single-item
+  removal used when returning from a detail view only knew how to
+  decrement the count for whichever status was currently being viewed --
+  never the status an item had just moved *into*, so e.g. accepting a
+  pending item left the Resolved tab's count exactly where it was.
+  Confirmed live. Tab counts are now always fetched fresh on every list
+  render regardless of whether the row list itself was cache-hit, since
+  that's a small, cheap request on its own -- decoupled entirely from the
+  row-list cache, which keeps its fast surgical-removal path for what it
+  was actually for (avoiding a full reload/reorder of visible cards).
+  Also closed two related staleness gaps in the same underlying cache:
+  returning to the dashboard (or switching back to the Recommendations tab
+  from Operations/Settings) and switching between filter tabs directly
+  both now invalidate the cached row-list page too, so re-opening the same
+  type/status/page later can't silently reuse a page cached from earlier
+  in the session.
+
 ## 2026-08-24
 
 ### 0.14.16 (plugin only)

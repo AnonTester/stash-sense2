@@ -1022,6 +1022,44 @@ class StashClientUnified:
         data = await self._execute(query, {"filter": filter_input, "scene_filter": scene_filter})
         return data["findScenes"]["scenes"], data["findScenes"]["count"]
 
+    async def get_scenes_without_performers(
+        self,
+        updated_after: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """
+        Get scenes with zero performers assigned, for Scene Face Matches.
+        Returns (scenes, total_count).
+        """
+        query = """
+        query ScenesWithoutPerformers($filter: FindFilterType, $scene_filter: SceneFilterType) {
+          findScenes(filter: $filter, scene_filter: $scene_filter) {
+            count
+            scenes {
+              id
+              title
+              updated_at
+              files {
+                id
+                duration
+              }
+            }
+          }
+        }
+        """
+        # Same stable-sort rationale as get_scenes_with_fingerprints: this is
+        # walked page-by-page across separate requests, so a deterministic
+        # order is required to avoid a scene appearing on more than one page.
+        filter_input = {"per_page": limit, "page": (offset // limit) + 1, "sort": "id", "direction": "ASC"}
+        scene_filter = {"performer_count": {"value": 0, "modifier": "EQUALS"}}
+
+        if updated_after:
+            scene_filter["updated_at"] = {"value": updated_after, "modifier": "GREATER_THAN"}
+
+        data = await self._execute(query, {"filter": filter_input, "scene_filter": scene_filter})
+        return data["findScenes"]["scenes"], data["findScenes"]["count"]
+
     async def get_scene_stream_url(self, scene_id: str) -> Optional[str]:
         """Get the stream URL for a scene."""
         query = """
@@ -1056,6 +1094,7 @@ class StashClientUnified:
             paths {
               screenshot
               preview
+              stream
             }
             studio {
               id

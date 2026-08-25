@@ -17,6 +17,7 @@ from recommendations_db import Recommendation, RecommendationsDB
 from stash_client_unified import StashClientUnified
 from analyzers import DuplicatePerformerAnalyzer, DuplicateSceneFilesAnalyzer, DuplicateScenesAnalyzer, UpstreamPerformerAnalyzer, UpstreamTagAnalyzer, UpstreamStudioAnalyzer, UpstreamSceneAnalyzer
 from analyzers.scene_fingerprint_match import SceneFingerprintMatchAnalyzer
+from analyzers.scene_face_match import SceneFaceMatchAnalyzer
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
@@ -465,6 +466,8 @@ def _extract_scene_ids_from_recommendation(rec) -> list[str]:
         add(rec.target_id)
     elif rec_type == "scene_fingerprint_match":
         add(_extract_scene_fp_local_scene_id(rec))
+    elif rec_type == "scene_face_match":
+        add(_extract_scene_face_match_scene_id(rec))
     elif str(rec.target_type or "") == "scene":
         add(rec.target_id)
 
@@ -638,6 +641,180 @@ def _group_duplicate_scene_recommendations(recs: list[Recommendation]) -> list[R
             reverse=True,
         )
     return grouped_recs
+
+
+def _extract_scene_face_match_scene_id(rec) -> Optional[str]:
+    """Extract local scene ID from a scene_face_match recommendation."""
+    try:
+        details = rec.details or {}
+        scene_id = str(details.get("scene_id", "")).strip()
+        if scene_id:
+            return scene_id
+    except Exception:
+        pass
+
+    try:
+        target_id = str(rec.target_id or "")
+        if "|" in target_id:
+            scene_id = target_id.split("|", 1)[0].strip()
+            return scene_id or None
+    except Exception:
+        pass
+
+    return None
+
+
+def _scene_face_match_candidate(rec: Recommendation) -> dict[str, Any]:
+    """Build one candidate entry (a single scene+performer recommendation row)
+    for the grouped scene_face_match view."""
+    details = rec.details or {}
+    return {
+        "recommendation_id": rec.id,
+        "person_id": details.get("person_id"),
+        "frame_count": details.get("frame_count"),
+        "is_best_match": bool(details.get("is_best_match")),
+        "universal_id": details.get("universal_id"),
+        "stashdb_id": details.get("stashdb_id"),
+        "name": details.get("name"),
+        "confidence": rec.confidence if rec.confidence is not None else details.get("confidence"),
+        "distance": details.get("distance"),
+        "country": details.get("country"),
+        "image_url": details.get("image_url"),
+        "endpoint": details.get("endpoint"),
+        "local_performer_id": details.get("local_performer_id"),
+        "source": details.get("source"),
+        "catalogue_url": details.get("catalogue_url"),
+        "profile_url": details.get("profile_url"),
+        "top_timestamps_sec": details.get("top_timestamps_sec") or [],
+        "status": rec.status,
+        "resolution_action": rec.resolution_action,
+    }
+
+
+def _group_scene_face_match_recommendations(recs: list[Recommendation]) -> list[Recommendation]:
+    """Group scene_face_match recommendations (one row per scene+performer
+    candidate) into one synthetic Recommendation per scene, with candidates
+    nested under their detected person/face-cluster. Mirrors
+    _group_duplicate_scene_recommendations's shape/conventions."""
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for rec in recs:
+        scene_id = _extract_scene_face_match_scene_id(rec)
+        if not scene_id:
+            continue
+
+        details = rec.details or {}
+        group_key = (str(rec.status or ""), scene_id)
+        group = grouped.setdefault(group_key, {
+            "scene_id": scene_id,
+            "scene_title": details.get("scene_title") or f"Scene {scene_id}",
+            "candidates": [],
+            "top_rec": None,
+            "top_confidence": -1.0,
+        })
+
+        candidate = _scene_face_match_candidate(rec)
+        group["candidates"].append(candidate)
+
+        confidence = float(candidate.get("confidence") or 0.0)
+        current_top = group["top_rec"]
+        if (
+            current_top is None
+            or confidence > group["top_confidence"]
+            or (confidence == group["top_confidence"] and rec.id > current_top.id)
+        ):
+            group["top_rec"] = rec
+            group["top_confidence"] = confidence
+
+    grouped_recs: list[Recommendation] = []
+    for group in grouped.values():
+        candidates = sorted(
+            group["candidates"],
+            key=lambda c: (int(c.get("person_id") or 0), -(float(c.get("confidence") or 0.0))),
+        )
+        if not candidates:
+            continue
+
+        persons: dict[int, dict[str, Any]] = {}
+        for c in candidates:
+            person_id = int(c.get("person_id") or 0)
+            person = persons.setdefault(person_id, {
+                "person_id": person_id,
+                "frame_count": c.get("frame_count"),
+                "candidates": [],
+            })
+            person["candidates"].append(c)
+
+        top_rec: Recommendation = group["top_rec"]
+        merged_details = deepcopy(top_rec.details or {})
+        merged_details.update({
+            "grouped": True,
+            "scene_id": group["scene_id"],
+            "scene_title": group["scene_title"],
+            "persons": [persons[pid] for pid in sorted(persons.keys())],
+            "candidates": candidates,
+            "candidate_count": len(candidates),
+            "top_confidence": group["top_confidence"],
+            "confidence": group["top_confidence"],
+        })
+
+        grouped_recs.append(Recommendation(
+            id=top_rec.id,
+            type=top_rec.type,
+            status=top_rec.status,
+            target_type=top_rec.target_type,
+            target_id=top_rec.target_id,
+            details=merged_details,
+            resolution_action=top_rec.resolution_action,
+            resolution_details=top_rec.resolution_details,
+            resolved_at=top_rec.resolved_at,
+            confidence=group["top_confidence"],
+            source_analysis_id=top_rec.source_analysis_id,
+            created_at=top_rec.created_at,
+            updated_at=top_rec.updated_at,
+        ))
+
+    first_status = grouped_recs[0].status if grouped_recs else None
+    if first_status in ("dismissed", "resolved"):
+        grouped_recs.sort(
+            key=lambda rec: (
+                rec.resolved_at or rec.updated_at or "",
+                int(rec.id or 0),
+            ),
+            reverse=True,
+        )
+    else:
+        grouped_recs.sort(
+            key=lambda rec: (
+                float(rec.details.get("top_confidence") or 0.0),
+                int(rec.id or 0),
+            ),
+            reverse=True,
+        )
+    return grouped_recs
+
+
+def _build_scene_face_match_group_for_recommendation(
+    db: RecommendationsDB,
+    rec: Recommendation,
+) -> Recommendation:
+    """Expand one scene_face_match recommendation into its grouped scene view."""
+    scene_id = _extract_scene_face_match_scene_id(rec)
+    if not scene_id:
+        return rec
+
+    grouped_recs = _group_scene_face_match_recommendations(
+        _load_all_recommendations(
+            db,
+            status=rec.status,
+            type="scene_face_match",
+            target_type=rec.target_type,
+        )
+    )
+    for grouped_rec in grouped_recs:
+        if _extract_scene_face_match_scene_id(grouped_rec) == scene_id:
+            return grouped_rec
+    return rec
 
 
 def _load_all_recommendations(
@@ -825,8 +1002,12 @@ async def list_recommendations(
 ):
     """List recommendations with optional filtering."""
     db = get_rec_db()
-    if type == "duplicate_scenes":
-        grouped = _group_duplicate_scene_recommendations(
+    if type in ("duplicate_scenes", "scene_face_match"):
+        group_fn = (
+            _group_duplicate_scene_recommendations if type == "duplicate_scenes"
+            else _group_scene_face_match_recommendations
+        )
+        grouped = group_fn(
             _load_all_recommendations(
                 db,
                 status=status,
@@ -922,6 +1103,12 @@ async def get_recommendation_counts():
         for rec in _group_duplicate_scene_recommendations(raw_duplicate_recs):
             grouped_duplicate_counts[rec.status] = grouped_duplicate_counts.get(rec.status, 0) + 1
         counts["duplicate_scenes"] = grouped_duplicate_counts
+    raw_sfm_recs = _load_all_recommendations(db, type="scene_face_match", target_type="scene")
+    if raw_sfm_recs:
+        grouped_sfm_counts: dict[str, int] = {}
+        for rec in _group_scene_face_match_recommendations(raw_sfm_recs):
+            grouped_sfm_counts[rec.status] = grouped_sfm_counts.get(rec.status, 0) + 1
+        counts["scene_face_match"] = grouped_sfm_counts
     total_pending = sum(
         type_counts.get("pending", 0)
         for type_counts in counts.values()
@@ -967,6 +1154,10 @@ async def get_recommendation(rec_id: int):
     if rec.type == "duplicate_scenes":
         rec = _build_duplicate_scene_group_for_recommendation(db, rec)
         if not rec.details.get("duplicate_matches"):
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+    elif rec.type == "scene_face_match":
+        rec = _build_scene_face_match_group_for_recommendation(db, rec)
+        if not rec.details.get("candidates"):
             raise HTTPException(status_code=404, detail="Recommendation not found")
 
     return RecommendationResponse(
@@ -1016,6 +1207,7 @@ ANALYZERS = {
     "upstream_studio_changes": UpstreamStudioAnalyzer,
     "upstream_scene_changes": UpstreamSceneAnalyzer,
     "scene_fingerprint_match": SceneFingerprintMatchAnalyzer,
+    "scene_face_match": SceneFaceMatchAnalyzer,
 }
 
 FORCE_FULL_SCAN_USER_ANALYSIS_TYPES = {"scene_fingerprint_match", "upstream_scene_changes"}
@@ -3291,6 +3483,126 @@ async def _accept_all_fingerprint_matches(
             logger.warning("Failed to accept rec %s: %s", rec.id, e)
 
     return accepted
+
+
+# ==================== Scene Face Matches ====================
+
+
+class SceneFaceMatchSelection(BaseModel):
+    recommendation_id: int
+
+
+class AcceptSceneFaceMatchesRequest(BaseModel):
+    scene_id: str
+    selections: list[SceneFaceMatchSelection]
+
+
+async def _resolve_scene_face_match_performer_id(stash, rec: Recommendation) -> str:
+    """Resolve one accepted scene_face_match candidate to a local Stash
+    performer id: use the already-linked local performer directly, or
+    find-or-create from the candidate's stashbox/catalogue identity (reusing
+    the same helper the upstream-performer-review flow uses)."""
+    details = rec.details or {}
+    local_performer_id = details.get("local_performer_id")
+    if local_performer_id:
+        return str(local_performer_id)
+
+    endpoint_domain = details.get("endpoint")
+    stashdb_id = details.get("stashdb_id")
+    name = details.get("name")
+    if not endpoint_domain or not stashdb_id or not name:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Recommendation {rec.id} is missing performer identity data",
+        )
+
+    # details.endpoint is the short domain form (from universal_id's
+    # "<domain>:<id>" split, see PerformerMatchResponse.endpoint) -- resolve
+    # to this deployment's actual configured GraphQL URL before storing it
+    # in stash_ids, matching the convention every other stash_ids write in
+    # this codebase uses (see stashbox_router.py's own endpoint_url
+    # resolution). Falls back to the bare domain if this Stash instance
+    # has no configured connection for it (still usable as a stash_ids
+    # value, just not matchable against a real configured endpoint later).
+    from stashbox_connection_manager import get_connection_manager
+    endpoint_url = get_connection_manager().get_endpoint_url(endpoint_domain) or endpoint_domain
+
+    performer = await _create_performer_from_stashbox(stash, {"name": name}, endpoint_url, stashdb_id)
+    return str(performer["id"])
+
+
+@router.post("/actions/accept-scene-face-matches", response_model=SuccessResponse)
+async def accept_scene_face_matches(request: AcceptSceneFaceMatchesRequest):
+    """Accept one or more identified performers for a scene: adds them to
+    the scene, resolves the selected recommendations, and dismisses the
+    rest of that scene's still-pending candidates (the scene is now
+    "handled" and should leave the pending queue)."""
+    if not request.selections:
+        raise HTTPException(status_code=422, detail="No selections provided")
+
+    stash = get_stash_client()
+    db = get_rec_db()
+
+    scene = await stash.get_scene_by_id(request.scene_id)
+    if not scene:
+        raise HTTPException(status_code=404, detail="Scene not found")
+    current_ids = [str(p["id"]) for p in (scene.get("performers") or [])]
+
+    resolved_ids: list[str] = []
+    accepted_rec_ids: list[int] = []
+    for selection in request.selections:
+        rec = db.get_recommendation(selection.recommendation_id)
+        if not rec or rec.status != "pending":
+            continue
+        performer_id = await _resolve_scene_face_match_performer_id(stash, rec)
+        resolved_ids.append(performer_id)
+        accepted_rec_ids.append(rec.id)
+
+    if not accepted_rec_ids:
+        raise HTTPException(status_code=422, detail="No valid pending selections to accept")
+
+    # SceneUpdateInput's performer_ids replaces the full list -- merge with
+    # whatever's already on the scene rather than clobbering it.
+    merged_ids = list(dict.fromkeys(current_ids + resolved_ids))
+    await stash.update_scene_performers(request.scene_id, merged_ids)
+
+    for rec_id in accepted_rec_ids:
+        db.resolve_recommendation(rec_id, action="accepted")
+
+    db.dismiss_pending_scene_face_match_for_scene(
+        scene_id=request.scene_id,
+        exclude_rec_ids=accepted_rec_ids,
+        reason=f"Auto-dismissed after accepting scene face matches for scene {request.scene_id}",
+    )
+
+    return {"success": True}
+
+
+class RejectAllSceneFaceMatchesRequest(BaseModel):
+    scene_id: str
+
+
+@router.post("/actions/reject-all-scene-face-matches", response_model=SuccessResponse)
+async def reject_all_scene_face_matches(request: RejectAllSceneFaceMatchesRequest):
+    """Dismiss every pending scene_face_match candidate for one scene."""
+    db = get_rec_db()
+    db.dismiss_pending_scene_face_match_for_scene(scene_id=request.scene_id)
+    return {"success": True}
+
+
+class DismissSceneFaceMatchRequest(BaseModel):
+    rec_id: int
+
+
+@router.post("/actions/dismiss-scene-face-match", response_model=SuccessResponse)
+async def dismiss_scene_face_match(request: DismissSceneFaceMatchRequest):
+    """Dismiss a single scene_face_match candidate (one person's one
+    performer guess), leaving the rest of that scene's candidates pending."""
+    db = get_rec_db()
+    ok = db.dismiss_recommendation(request.rec_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    return {"success": True}
 
 
 _SCENE_BULK_ALLOWED_SIMPLE_FIELDS = {"code", "urls"}

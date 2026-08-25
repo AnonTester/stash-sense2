@@ -9,6 +9,7 @@ This is a fork of [carrotwaxr/stash-sense](https://github.com/carrotwaxr/stash-s
 Stash Sense 2 is a sidecar service and Stash plugin that brings ML-powered analysis to your Stash library:
 
 - **Face Recognition** — Identify performers in scenes and images using InsightFace's buffalo_l model. Matches against a database of 150,000+ performers sourced from StashDB, ThePornDB, and other stash-box endpoints, plus non-stash-box catalogue sources
+- **Scene Face Matches** — Automatically scans scenes with no performers assigned and surfaces the performers it identifies in them for review, with a video player, jump-to-timestamp buttons for each candidate's strongest frames, and one-click accept/reject per scene
 - **Duplicate Scene Detection** — Find duplicate scenes using face fingerprints, stash-box IDs, and metadata overlap — catches duplicates that phash matching misses
 - **Upstream Sync** — Detect metadata changes on stash-box endpoints and review per-field merge controls to keep your library current
 - **Recommendations Dashboard** — A unified view of all suggestions: duplicates, unidentified scenes, missing stash-box links, and upstream updates

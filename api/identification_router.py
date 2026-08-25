@@ -136,6 +136,7 @@ class PerformerMatchResponse(BaseModel):
     source: Optional[str] = Field(None, description="Set only for catalogue (non-stash-box) matches, e.g. 'seekfans'")
     catalogue_url: Optional[str] = Field(None, description="Catalogue source's own profile page, set only for catalogue matches")
     profile_url: Optional[str] = Field(None, description="Link to the actual external content site (e.g. onlyfans.com), when the catalogue source has one")
+    top_timestamps_sec: list[float] = Field(default_factory=list, description="Up to 4 timestamps (seconds) of this match's strongest frames, for scene-player jump buttons. Only populated by scene identification's live ffmpeg-extraction path (matching_mode='cluster'); empty otherwise.")
 
 
 class FaceResult(BaseModel):
@@ -704,12 +705,18 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
 
 def _cluster_and_match(
     all_results: list[tuple[int, RecognitionResult]], request: "SceneIdentifyRequest",
+    frame_timestamps: Optional[dict[int, float]] = None,
 ) -> list["PersonResult"]:
     """Run the configured matching_mode (hybrid/frequency/cluster) over
     already-detected+embedded+matched results. Shared by the cache
     fast-path, the full ffmpeg pipeline, and sprite-only identification --
     factored out so all three stay in sync instead of duplicating this
-    dispatch/dedup logic three times."""
+    dispatch/dedup logic three times.
+
+    frame_timestamps (frame_index -> timestamp_sec) is only available from
+    the live ffmpeg-extraction path (identify_scene's main body) and is only
+    threaded into the plain "cluster" branch's aggregate_matches() call
+    below -- see aggregate_matches's own docstring for why."""
     if request.matching_mode == "hybrid":
         return hybrid_matching(
             all_results, _recognizer,
@@ -730,7 +737,7 @@ def _cluster_and_match(
     used_performers: set[str] = set()
     all_persons = []
     for person_id, cluster in enumerate(clusters):
-        aggregated_matches = aggregate_matches(cluster, top_k=request.top_k)
+        aggregated_matches = aggregate_matches(cluster, top_k=request.top_k, frame_timestamps=frame_timestamps)
         all_persons.append((len(cluster), PersonResult(
             person_id=person_id, frame_count=len(cluster),
             best_match=aggregated_matches[0] if aggregated_matches else None,
@@ -961,6 +968,15 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     Extracts full-resolution frames from the video stream using ffmpeg,
     detects faces, clusters them by person, and returns matches.
     """
+    return await _identify_scene_impl(request)
+
+
+async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyResponse":
+    """Actual scene-identify implementation, split out from the identify_scene
+    route so callers other than the HTTP route (e.g. the scene_face_match
+    analyzer's batch job) can invoke it directly without going through
+    FastAPI's Depends machinery. Callers must ensure face recognition is
+    available themselves first (see require_db_available)."""
     t_start = time.time()
 
     base_url = _stash_url.rstrip("/")
@@ -1268,7 +1284,8 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     t_match_end = 0.0
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    persons = _cluster_and_match(all_results, request)
+    frame_timestamps = {f.frame_index: f.timestamp_sec for f in extraction_result.frames}
+    persons = _cluster_and_match(all_results, request, frame_timestamps=frame_timestamps)
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching ({request.matching_mode}): {len(persons)} persons in {time.time()-t_match:.1f}s")
 
     t_match_end = time.time()

@@ -353,6 +353,7 @@ class TestJobRegistry:
             "fingerprint_generation",
             "database_update",
             "local_performer_sync",
+            "scene_face_match",
         }
         assert set(JOB_REGISTRY.keys()) == expected
 

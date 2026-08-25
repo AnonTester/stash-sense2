@@ -322,6 +322,21 @@
       });
     },
 
+    async acceptSceneFaceMatches(sceneId, recommendationIds) {
+      return apiCall('rec_accept_scene_face_matches', {
+        scene_id: sceneId,
+        selections: recommendationIds.map(id => ({ recommendation_id: id })),
+      });
+    },
+
+    async rejectAllSceneFaceMatches(sceneId) {
+      return apiCall('rec_reject_all_scene_face_matches', { scene_id: sceneId });
+    },
+
+    async dismissSceneFaceMatch(recId) {
+      return apiCall('rec_dismiss_scene_face_match', { rec_id: recId });
+    },
+
     async acceptAllSceneTagOnlyChanges() {
       return apiCall('rec_accept_all_scene_tag_only_changes', {});
     },
@@ -618,6 +633,11 @@
           title: 'Scene Stash-Box Tagger',
           icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M3.9 12c0-1.71 1.39-3.1 3.1-3.1h4V7H7c-2.76 0-5 2.24-5 5s2.24 5 5 5h4v-1.9H7c-1.71 0-3.1-1.39-3.1-3.1zM8 13h8v-2H8v2zm9-6h-4v1.9h4c1.71 0 3.1 1.39 3.1 3.1s-1.39 3.1-3.1 3.1h-4V17h4c2.76 0 5-2.24 5-5s-2.24-5-5-5z"/></svg>`,
           description: 'Searches untagged Scenes on all Stash-Box endpoints',
+        },
+        scene_face_match: {
+          title: 'Scene Face Matches',
+          icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4zm9-6l1.5-3L24 4l-1.5-1L21 0l-1 1.5L18 3l1.5 1L21 8zm-3.5-1.5L19 3l-1.5-.5L17 1l-.5 1.5L15 3l1.5.5L17 5z"/></svg>`,
+          description: 'Performers identified in scenes that have none assigned yet',
         },
       };
 
@@ -924,6 +944,7 @@
       upstream_studio_changes: 'Upstream Studio Changes',
       upstream_scene_changes: 'Upstream Scene Changes',
       scene_fingerprint_match: 'Scene Stash-Box Tagger',
+      scene_face_match: 'Scene Face Matches',
     };
 
     container.innerHTML = `
@@ -983,16 +1004,32 @@
       </div>
     `;
 
-    // Back button
+    // Back button -- returning to the main dashboard (as opposed to a
+    // detail view's own Back, which goes to 'list' and keeps the surgical
+    // single-item cache removal in showSuccessAndReturn/removeFromListCache
+    // for snappy re-entry into the *same* list) invalidates the cached list
+    // page. Otherwise re-opening this same type/status/page later would hit
+    // the exact same cache key and silently show stale rows/tab counts --
+    // e.g. a resolved/dismissed count that doesn't reflect actions taken
+    // since this page was first cached (only the currently-viewed status's
+    // count gets patched by removeFromListCache; the ones an item moved
+    // *into* never do). Dashboard itself always re-fetches counts fresh
+    // (renderDashboard), so this only needs to clear the list-row cache.
     container.querySelector('#ss-back-btn').addEventListener('click', () => {
+      invalidateListCache();
       currentState.view = 'dashboard';
       currentState.type = null;
       renderCurrentView(container);
     });
 
-    // Filter tabs
+    // Filter tabs -- switching status is a different list, not "the
+    // particular list you came from" (that's whatever status was active
+    // before), so it must not reuse a cache entry from an earlier visit to
+    // this status/page in the same session. Same principle as the dashboard
+    // Back button above, just triggered by a different navigation.
     container.querySelectorAll('.ss-filter-tab').forEach(tab => {
       tab.addEventListener('click', () => {
+        invalidateListCache();
         currentState.status = tab.dataset.status;
         currentState.page = 0;
         renderCurrentView(container);
@@ -1403,33 +1440,45 @@
       });
     }
 
-    // Load recommendations and counts -- reuse the cached last-fetched page
-    // instead of re-fetching and re-sorting from scratch when returning
-    // from a detail view with nothing to invalidate (plain Back button),
-    // or after a single recommendation was resolved/dismissed/matched
-    // there (removeFromListCache() already surgically removed it from the
-    // cache before navigating back). Any real change of type/status/page
+    // Load recommendations -- reuse the cached last-fetched page instead of
+    // re-fetching and re-sorting from scratch when returning from a detail
+    // view with nothing to invalidate (plain Back button), or after a
+    // single recommendation was resolved/dismissed/matched there
+    // (removeFromListCache() already surgically removed it from the cache
+    // before navigating back). Any real change of type/status/page
     // naturally misses the cache since the key below won't match.
+    //
+    // Tab counts are fetched fresh every time regardless of the row-list
+    // cache hit/miss above -- a surgical single-item removal only knows how
+    // to decrement the status you were just viewing (pending), never the
+    // status the item transitioned *into* (resolved/dismissed), so a count
+    // cached alongside the row list can never be trusted after any action.
+    // This is a small, cheap request on its own, so there's no real cost to
+    // always doing it live.
     const PAGE_SIZE = 25;
     const cacheKey = `${currentState.type}:${currentState.status}:${currentState.page}`;
     const cached = currentState.listCache;
     try {
       let recommendations, total, typeCounts;
+      const countsPromise = RecommendationsAPI.getCounts()
+        .then(r => r.counts?.[currentState.type] || {})
+        .catch(() => ({}));
 
       if (cached && cached.key === cacheKey) {
-        ({ recommendations, total, typeCounts } = cached);
+        ({ recommendations, total } = cached);
+        typeCounts = await countsPromise;
       } else {
-        const [result, countsResult] = await Promise.all([
+        const [result, resolvedTypeCounts] = await Promise.all([
           RecommendationsAPI.getList({
             type: currentState.type,
             status: currentState.status,
             limit: PAGE_SIZE,
             offset: currentState.page * PAGE_SIZE,
           }),
-          RecommendationsAPI.getCounts(),
+          countsPromise,
         ]);
 
-        typeCounts = countsResult.counts?.[currentState.type] || {};
+        typeCounts = resolvedTypeCounts;
         recommendations = result.recommendations;
         total = result.total;
 
@@ -1456,7 +1505,7 @@
           });
         }
 
-        currentState.listCache = { key: cacheKey, recommendations, total, typeCounts };
+        currentState.listCache = { key: cacheKey, recommendations, total };
       }
 
       // The current page came back empty but recommendations still remain
@@ -1640,15 +1689,14 @@
   // there's no cache yet, or the id isn't on the cached page (e.g. it was
   // resolved from a different page/filter than what's cached).
   function removeFromListCache(recId) {
+    // Row list only -- tab counts are never cached (always fetched fresh in
+    // renderList), so there's nothing to patch here for them.
     const cache = currentState.listCache;
     if (!cache || recId == null) return;
     const idx = cache.recommendations.findIndex(r => r.id === recId);
     if (idx === -1) return;
     cache.recommendations.splice(idx, 1);
     cache.total = Math.max(0, cache.total - 1);
-    if (cache.typeCounts && cache.typeCounts[currentState.status] != null) {
-      cache.typeCounts[currentState.status] = Math.max(0, cache.typeCounts[currentState.status] - 1);
-    }
   }
 
   // Bulk actions (Accept All / Dismiss All) change an unknown, unbounded
@@ -1902,6 +1950,34 @@
       });
     }
 
+    if (rec.type === 'scene_face_match') {
+      const d = details;
+      const personCount = (d.persons || []).length;
+      const candidateCount = d.candidate_count || (d.candidates || []).length;
+      const topNames = (d.candidates || [])
+        .filter(c => c.is_best_match)
+        .map(c => c.name)
+        .filter(Boolean);
+
+      return SS.createElement('div', {
+        className: 'ss-rec-card',
+        innerHTML: `
+          <div class="ss-rec-card-header">
+            <div class="ss-rec-tag-icon">
+              <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
+            </div>
+            <div class="ss-rec-card-info">
+              <div class="ss-rec-card-title">${escapeHtml(d.scene_title || 'Unknown Scene')}</div>
+              <div class="ss-rec-card-subtitle">
+                ${personCount} person${personCount !== 1 ? 's' : ''} detected &middot; ${candidateCount} candidate${candidateCount !== 1 ? 's' : ''}
+              </div>
+              ${topNames.length ? `<div class="ss-rec-card-fields">${escapeHtml(topNames.join(', '))}</div>` : ''}
+            </div>
+          </div>
+        `,
+      });
+    }
+
     // Fallback for unknown types
     return SS.createElement('div', {
       className: 'ss-rec-card',
@@ -1983,6 +2059,8 @@
       await renderUpstreamSceneDetail(content, rec);
     } else if (rec.type === 'scene_fingerprint_match') {
       await renderFingerprintMatchDetail(content, rec);
+    } else if (rec.type === 'scene_face_match') {
+      await renderSceneFaceMatchDetail(content, rec);
     } else {
       content.innerHTML = `<p>Unknown recommendation type: ${escapeHtml(rec.type)}</p>`;
     }
@@ -5696,6 +5774,206 @@
     });
   }
 
+  async function renderSceneFaceMatchDetail(container, rec) {
+    const d = rec.details || {};
+    const isPending = rec.status === 'pending';
+    const sceneId = String(d.scene_id || '');
+    const sceneHref = `/scenes/${sceneId}`;
+    const persons = d.persons || [];
+
+    container.innerHTML = '<div class="ss-loading">Loading scene details...</div>';
+
+    let scene = null;
+    try {
+      if (sceneId) scene = await RecommendationsAPI.getSceneDetail(sceneId);
+    } catch (_) {}
+
+    const streamUrl = relativeUrl(scene?.paths?.stream);
+    const sceneTitle = scene?.title || d.scene_title || `Scene ${sceneId}`;
+
+    // Same link-building convention the manual scene-identify result view
+    // uses (stash-sense.js's _matchLinksHtml/_stashboxPerformerUrl/
+    // _localPerformerUrl): catalogue sources link to their own profile/site,
+    // a local-index match always gets a "View local performer" link (plus a
+    // stashdb.org link too if it's *also* linked to a real StashDB id --
+    // two independently-verifiable signals), everything else gets a single
+    // "View on <endpoint>" stashbox link.
+    function sceneFaceMatchLinksHtml(c) {
+      const endpoint = c.endpoint || 'stashdb.org';
+      if (c.source) {
+        const href = c.profile_url || c.catalogue_url;
+        if (!href) return '';
+        const label = c.profile_url ? 'View profile' : `View on ${c.source}`;
+        return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" class="ss-link">${escapeHtml(label)}</a>`;
+      }
+      if (!c.local_performer_id) {
+        if (!c.stashdb_id) return '';
+        const stashboxUrl = `https://${endpoint}/performers/${c.stashdb_id}`;
+        return `<a href="${escapeHtml(stashboxUrl)}" target="_blank" rel="noopener" class="ss-link">View on ${escapeHtml(endpoint)}</a>`;
+      }
+      const localLink = `<a href="/performers/${encodeURIComponent(c.local_performer_id)}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>`;
+      const hasStashDbLink = c.stashdb_id && c.stashdb_id !== c.local_performer_id;
+      if (!hasStashDbLink) return localLink;
+      const stashDbUrl = `https://stashdb.org/performers/${c.stashdb_id}`;
+      return `<a href="${escapeHtml(stashDbUrl)}" target="_blank" rel="noopener" class="ss-link">View on stashdb.org</a> ${localLink}`;
+    }
+
+    function renderCandidate(c) {
+      const isCandidatePending = c.status === 'pending';
+      const jumpButtons = (c.top_timestamps_sec || []).slice(0, 4).map(t => (
+        `<button type="button" class="ss-btn ss-btn-tiny ss-sfm-jump-btn" data-time="${t}">${formatDuration(t)}</button>`
+      )).join('');
+      const linksHtml = sceneFaceMatchLinksHtml(c);
+      // Don't pre-select a weak match: 5 or fewer frames, or under 10%
+      // confidence, needs a deliberate look before it gets added to a scene.
+      const meetsPreselectThreshold = (c.frame_count || 0) > 5 && (c.confidence || 0) >= 0.10;
+      const preselect = c.is_best_match && meetsPreselectThreshold;
+      return `
+        <div class="ss-sfm-candidate${isCandidatePending ? '' : ' ss-sfm-candidate-inactive'}" data-rec-id="${c.recommendation_id}">
+          <label class="ss-sfm-candidate-select">
+            <input type="checkbox" class="ss-sfm-candidate-cb" data-rec-id="${c.recommendation_id}"
+              ${preselect ? 'checked' : ''} ${isCandidatePending ? '' : 'disabled'} />
+            <div class="ss-sfm-candidate-thumb">
+              ${c.image_url
+                ? `<img src="${escapeHtml(c.image_url)}" alt="${escapeHtml(c.name || '')}" loading="lazy" onerror="this.style.display='none'" />`
+                : '<div class="ss-no-image">No Image</div>'
+              }
+            </div>
+          </label>
+          <div class="ss-sfm-candidate-name">${escapeHtmlBreakable(c.name || 'Unknown')}</div>
+          <div class="ss-sfm-candidate-meta">
+            ${Math.round((c.confidence || 0) * 100)}% match
+            ${!isCandidatePending ? ` &middot; <span class="ss-sfm-candidate-status">${escapeHtml(c.status)}</span>` : ''}
+          </div>
+          ${linksHtml ? `<div class="ss-sfm-candidate-links">${linksHtml}</div>` : ''}
+          ${jumpButtons ? `<div class="ss-sfm-jump-row">${jumpButtons}</div>` : ''}
+          ${isPending && isCandidatePending
+            ? `<button type="button" class="ss-btn ss-btn-tiny ss-btn-secondary ss-sfm-dismiss-one-btn" data-rec-id="${c.recommendation_id}">Dismiss</button>`
+            : ''
+          }
+        </div>
+      `;
+    }
+
+    function renderPersonColumn(person) {
+      const frameCount = person.frame_count || 0;
+      return `
+        <div class="ss-sfm-person-column">
+          <div class="ss-sfm-person-header">
+            Person ${(person.person_id ?? 0) + 1}
+            <span class="ss-sfm-person-frames">(${frameCount} frame${frameCount === 1 ? '' : 's'})</span>
+          </div>
+          <div class="ss-sfm-person-candidates">
+            ${(person.candidates || []).map(renderCandidate).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    container.innerHTML = `
+      <div class="ss-sfm-detail">
+        <div class="ss-sfm-detail-header">
+          <h2>${escapeHtmlBreakable(sceneTitle)}</h2>
+          <a class="ss-detail-entity-link" href="${escapeHtml(sceneHref)}" target="_blank" rel="noopener">Open in Stash</a>
+        </div>
+
+        ${streamUrl
+          ? `<video class="ss-sfm-video" controls preload="metadata" src="${escapeHtml(streamUrl)}"></video>`
+          : '<div class="ss-no-image ss-sfm-no-video">No video preview available</div>'
+        }
+
+        <div class="ss-sfm-persons">
+          ${persons.map(renderPersonColumn).join('')}
+        </div>
+
+        ${isPending ? `
+          <div class="ss-sfm-detail-actions">
+            <button id="ss-sfm-accept-btn" class="ss-btn ss-btn-primary">Accept Selected</button>
+            <button id="ss-sfm-reject-all-btn" class="ss-btn ss-btn-secondary">Reject All</button>
+          </div>
+        ` : `
+          <div class="ss-fp-detail-status">
+            Status: <strong>${rec.status}</strong>
+          </div>
+        `}
+      </div>
+    `;
+
+    const videoEl = container.querySelector('.ss-sfm-video');
+    container.querySelectorAll('.ss-sfm-jump-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!videoEl) return;
+        const t = parseFloat(btn.dataset.time);
+        if (!Number.isNaN(t)) {
+          videoEl.currentTime = t;
+          videoEl.play().catch(() => {});
+        }
+      });
+    });
+
+    if (!isPending) return;
+
+    container.querySelectorAll('.ss-sfm-dismiss-one-btn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const recId = parseInt(btn.dataset.recId, 10);
+        btn.disabled = true;
+        try {
+          await RecommendationsAPI.dismissSceneFaceMatch(recId);
+          const card = btn.closest('.ss-sfm-candidate');
+          if (card) {
+            card.classList.add('ss-sfm-candidate-inactive');
+            const cb = card.querySelector('.ss-sfm-candidate-cb');
+            if (cb) { cb.checked = false; cb.disabled = true; }
+            btn.remove();
+          }
+          showToast('Candidate dismissed.', 'info');
+        } catch (e) {
+          showToast(`Failed to dismiss: ${e.message}`, 'error');
+          btn.disabled = false;
+        }
+      });
+    });
+
+    const acceptBtn = container.querySelector('#ss-sfm-accept-btn');
+    acceptBtn.addEventListener('click', async () => {
+      const selectedIds = Array.from(container.querySelectorAll('.ss-sfm-candidate-cb:checked'))
+        .map(cb => parseInt(cb.dataset.recId, 10));
+      if (selectedIds.length === 0) {
+        showToast('Select at least one performer to accept.', 'warning');
+        return;
+      }
+      acceptBtn.disabled = true;
+      acceptBtn.textContent = 'Accepting...';
+      try {
+        await RecommendationsAPI.acceptSceneFaceMatches(sceneId, selectedIds);
+        showSuccessAndReturn(acceptBtn, 'Accepted!');
+      } catch (e) {
+        acceptBtn.textContent = `Failed: ${e.message}`;
+        acceptBtn.classList.add('ss-btn-error');
+        acceptBtn.disabled = false;
+      }
+    });
+
+    const rejectBtn = container.querySelector('#ss-sfm-reject-all-btn');
+    rejectBtn.addEventListener('click', () => {
+      showConfirmModal(
+        'Reject all identified performers for this scene? It moves to the Dismissed tab, but may reappear if a future scan finds new matches.',
+        async () => {
+          rejectBtn.disabled = true;
+          rejectBtn.textContent = 'Rejecting...';
+          try {
+            await RecommendationsAPI.rejectAllSceneFaceMatches(sceneId);
+            showSuccessAndReturn(rejectBtn, 'Rejected!');
+          } catch (e) {
+            rejectBtn.textContent = `Failed: ${e.message}`;
+            rejectBtn.classList.add('ss-btn-error');
+            rejectBtn.disabled = false;
+          }
+        },
+      );
+    });
+  }
+
   /**
    * Create a search dropdown for linking a local entity to a stash-box ID.
    * @param {string} entityType - "performer", "tag", or "studio"
@@ -6066,8 +6344,13 @@
   }
 
   // Refresh type-card counts on the dashboard without a full re-render.
-  // Called by the settings module when switching back to the recommendations tab.
+  // Called by the settings module when switching back to the recommendations
+  // tab -- this is "returning to the main recommendations tab" from
+  // elsewhere in the plugin, same category of navigation as the in-page
+  // dashboard Back button, so it invalidates the cached list page too (see
+  // that Back handler's comment) rather than just refreshing card counts.
   async function refreshCounts() {
+    invalidateListCache();
     try {
       const countsResult = await RecommendationsAPI.getCounts();
       if (!countsResult) return;

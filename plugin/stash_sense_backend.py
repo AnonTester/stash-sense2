@@ -1149,6 +1149,30 @@ def handle_recommendations(mode, args, sidecar_url):
             },
         )
 
+    elif mode == "rec_accept_scene_face_matches":
+        return sidecar_post(
+            sidecar_url,
+            "/recommendations/actions/accept-scene-face-matches",
+            {
+                "scene_id": str(args.get("scene_id", "")),
+                "selections": args.get("selections", []),
+            },
+        )
+
+    elif mode == "rec_reject_all_scene_face_matches":
+        return sidecar_post(
+            sidecar_url,
+            "/recommendations/actions/reject-all-scene-face-matches",
+            {"scene_id": str(args.get("scene_id", ""))},
+        )
+
+    elif mode == "rec_dismiss_scene_face_match":
+        return sidecar_post(
+            sidecar_url,
+            "/recommendations/actions/dismiss-scene-face-match",
+            {"rec_id": args.get("rec_id")},
+        )
+
     elif mode == "rec_accept_all_fingerprint_matches":
         payload = {}
         endpoint = args.get("endpoint")

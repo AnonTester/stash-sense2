@@ -9,6 +9,7 @@ Provides algorithms for identifying performers across multiple video frames:
 
 import logging
 from collections import defaultdict
+from typing import Optional
 
 import numpy as np
 
@@ -149,6 +150,7 @@ def aggregate_matches(
     top_k: int = 3,
     _match_to_response=None,
     _distance_to_confidence=None,
+    frame_timestamps: Optional[dict[int, float]] = None,
 ) -> list:
     """
     Aggregate matches across multiple frames for a person.
@@ -161,6 +163,12 @@ def aggregate_matches(
         top_k: Maximum number of matches to return
         _match_to_response: Callback to convert PerformerMatch to response model
         _distance_to_confidence: Callback to convert distance to confidence score
+        frame_timestamps: Optional frame_index -> timestamp_sec mapping (from
+            the live ffmpeg extraction pass). When provided, each aggregated
+            match's 4 lowest-distance frames are resolved to timestamps and
+            attached as top_timestamps_sec, for "jump to this frame" UI.
+            Frame indices with no mapping entry (e.g. the -1/-2 screenshot/
+            sprite sentinels, or no mapping at all) are silently skipped.
     """
     # Lazy import to avoid circular dependency
     if _match_to_response is None:
@@ -170,11 +178,13 @@ def aggregate_matches(
 
     # Collect all matches across frames
     match_scores: dict[str, list[float]] = defaultdict(list)
+    match_frames: dict[str, list[tuple[int, float]]] = defaultdict(list)
     match_info: dict[str, PerformerMatch] = {}
 
-    for _, result in cluster:
+    for frame_idx, result in cluster:
         for match in result.matches:
             match_scores[match.stashdb_id].append(match.combined_score)
+            match_frames[match.stashdb_id].append((frame_idx, match.combined_score))
             match_info[match.stashdb_id] = match
 
     # Score by: average distance * (1 / appearance_ratio)
@@ -187,10 +197,22 @@ def aggregate_matches(
         adjusted_score = avg_score / (appearance_ratio ** 0.5)
 
         match = match_info[stashdb_id]
+
+        top_timestamps_sec: list[float] = []
+        if frame_timestamps:
+            best_frames = sorted(match_frames[stashdb_id], key=lambda fs: fs[1])[:4]
+            timestamps = {
+                frame_timestamps[frame_idx]
+                for frame_idx, _ in best_frames
+                if frame_idx in frame_timestamps
+            }
+            top_timestamps_sec = sorted(timestamps)
+
         aggregated.append(_match_to_response(
             match,
             confidence=_distance_to_confidence(adjusted_score),
             distance=adjusted_score,
+            top_timestamps_sec=top_timestamps_sec,
         ))
 
     # Sort by adjusted score (lower is better)

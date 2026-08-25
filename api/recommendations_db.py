@@ -900,6 +900,59 @@ class RecommendationsDB:
 
             return len(rec_ids)
 
+    def dismiss_pending_scene_face_match_for_scene(
+        self,
+        scene_id: str,
+        reason: Optional[str] = None,
+        exclude_rec_ids: Optional[list[int]] = None,
+    ) -> int:
+        """
+        Dismiss pending scene_face_match recommendations for one local scene.
+
+        Matches by target_id prefix: "<scene_id>|...". Like
+        dismiss_pending_scene_fingerprint_for_scene, but takes a list of ids
+        to exclude (not just one) -- needed for "accept selected candidates,
+        dismiss the rest of this scene's pending candidates" in one call.
+        Returns number of recommendations dismissed.
+        """
+        scene_prefix = f"{str(scene_id)}|%"
+        exclude_ids = [int(i) for i in (exclude_rec_ids or [])]
+
+        with self._connection() as conn:
+            query = (
+                "SELECT id, type, target_type, target_id "
+                "FROM recommendations "
+                "WHERE type = 'scene_face_match' "
+                "AND target_type = 'scene' "
+                "AND status = 'pending' "
+                "AND target_id LIKE ?"
+            )
+            params: list[Any] = [scene_prefix]
+            if exclude_ids:
+                query += f" AND id NOT IN ({','.join('?' * len(exclude_ids))})"
+                params.extend(exclude_ids)
+
+            rows = conn.execute(query, params).fetchall()
+            if not rows:
+                return 0
+
+            rec_ids = [row["id"] for row in rows]
+            conn.execute(
+                f"UPDATE recommendations SET status = 'dismissed', updated_at = datetime('now') WHERE id IN ({','.join('?' * len(rec_ids))})",
+                rec_ids,
+            )
+
+            for row in rows:
+                try:
+                    conn.execute(
+                        "INSERT INTO dismissed_targets (type, target_type, target_id, reason, permanent) VALUES (?, ?, ?, ?, ?)",
+                        (row["type"], row["target_type"], row["target_id"], reason, 0),
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+
+            return len(rec_ids)
+
     def delete_pending_scene_fingerprint_for_scene(
         self,
         scene_id: str,

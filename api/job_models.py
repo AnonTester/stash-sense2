@@ -284,6 +284,17 @@ _register(
 )
 
 _register(
+    "scene_face_match",
+    "Scene Face Matches",
+    "Identifies performers in scenes with no performers assigned",
+    ResourceType.GPU,
+    JobPriority.LOW,
+    supports_incremental=True,
+    schedulable=True,
+    allowed_intervals=INTERVALS_INFREQUENT,
+)
+
+_register(
     "local_performer_sync",
     "Local Performer Sync",
     "Builds/updates the local performer index from this Stash instance's own performer cover images",

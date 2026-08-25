@@ -3828,6 +3828,173 @@ a.ss-detail-entity-link:hover {
   }
 }
 
+/* ==================== Scene Face Matches ==================== */
+
+.ss-sfm-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.ss-sfm-detail-header h2 {
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.ss-sfm-video {
+  width: 100%;
+  max-height: 480px;
+  border-radius: 0.5rem;
+  background: #000;
+  display: block;
+}
+
+.ss-sfm-no-video {
+  width: 100%;
+  height: 200px;
+  border-radius: 0.5rem;
+  background: var(--bs-body-bg, #1a1a1a);
+}
+
+.ss-sfm-persons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1.25rem;
+}
+
+.ss-sfm-person-column {
+  flex: 1 1 220px;
+  min-width: 200px;
+  background: var(--bs-body-bg, #1a1a1a);
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+
+.ss-sfm-person-header {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--bs-body-color, #fff);
+  margin-bottom: 0.6rem;
+}
+
+.ss-sfm-person-frames {
+  font-weight: 400;
+  color: var(--bs-secondary-color, #888);
+  font-size: 12px;
+}
+
+.ss-sfm-person-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.ss-sfm-candidate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 0.35rem;
+  padding: 0.6rem;
+  background: var(--bs-secondary-bg, #242424);
+  border-radius: 0.4rem;
+  border: 1px solid transparent;
+}
+
+.ss-sfm-candidate:has(.ss-sfm-candidate-cb:checked) {
+  border-color: var(--bs-primary, #0d6efd);
+}
+
+.ss-sfm-candidate-inactive {
+  opacity: 0.5;
+}
+
+.ss-sfm-candidate-select {
+  display: block;
+  position: relative;
+  cursor: pointer;
+}
+
+.ss-sfm-candidate-select input[type="checkbox"] {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  z-index: 1;
+}
+
+.ss-sfm-candidate-thumb {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--bs-body-bg, #1a1a1a);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ss-sfm-candidate-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ss-sfm-candidate-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--bs-body-color, #fff);
+  overflow-wrap: break-word;
+}
+
+.ss-sfm-candidate-meta {
+  font-size: 12px;
+  color: var(--bs-secondary-color, #aaa);
+}
+
+.ss-sfm-candidate-status {
+  text-transform: capitalize;
+}
+
+.ss-sfm-candidate-links {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 11px;
+}
+
+.ss-sfm-jump-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.3rem;
+}
+
+.ss-btn-tiny {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+}
+
+.ss-sfm-detail-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--bs-border-color, #333);
+}
+
+@media (max-width: 600px) {
+  .ss-sfm-persons {
+    flex-direction: column;
+  }
+}
+
 /* Duplicate Scenes */
 .ss-dup-scenes-grid {
   display: grid;
