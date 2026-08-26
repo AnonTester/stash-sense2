@@ -54,8 +54,8 @@
     async resetFingerprintsWithBackup() {
       return apiCall('fp_reset');
     },
-    async checkUpdate() {
-      return apiCall('db_check_update');
+    async checkUpdate(force = false) {
+      return apiCall('db_check_update', force ? { force: true } : {});
     },
     async startDatabaseUpdate() {
       return apiCall('db_update');
@@ -447,7 +447,7 @@
     }
   }
 
-  async function renderIdDatabaseSection() {
+  async function renderIdDatabaseSection(forceCheck = false) {
     const section = SS.createElement('div', { className: 'ss-settings-category ss-id-database-settings-section' });
     section.innerHTML = `
       <div class="ss-settings-cat-header">
@@ -484,8 +484,14 @@
         // refreshIdDatabaseSection() replaces this whole section (including
         // this button) with a freshly-rendered one -- nothing to reset here
         // even on success; on failure, renderIdDatabaseSection()'s own
-        // try/catch swaps in error text instead of throwing.
-        await refreshIdDatabaseSection();
+        // try/catch swaps in error text instead of throwing. force=true
+        // here specifically: this is the one deliberate, infrequent,
+        // human-initiated trigger for this section -- every other call
+        // site (tab-switch, post-update, post-fingerprint-reset) uses the
+        // default cached check instead, see database_health_router.py's
+        // check_database_update() docstring for why that distinction
+        // matters (GitHub's 60/hour unauthenticated rate limit).
+        await refreshIdDatabaseSection(true);
       });
     }
 
@@ -493,7 +499,7 @@
       const [fpStatus, dbInfo, updateInfo, fpJobs, dbUpdateStatus, localPerformerStats] = await Promise.all([
         SettingsAPI.getFingerprintStatus().catch(() => null),
         SettingsAPI.getDatabaseInfo().catch(() => null),
-        SettingsAPI.checkUpdate().catch(() => null),
+        SettingsAPI.checkUpdate(forceCheck).catch(() => null),
         SettingsAPI.getFingerprintJobs().catch(() => null),
         SettingsAPI.getDatabaseUpdateStatus().catch(() => null),
         SettingsAPI.getLocalPerformerStats().catch(() => null),
@@ -721,10 +727,10 @@
   // these numbers would otherwise stay frozen at whatever they were on
   // first load -- e.g. still showing stale "Missing" count after switching
   // away to run fingerprint generation and back once it finishes.
-  async function refreshIdDatabaseSection() {
+  async function refreshIdDatabaseSection(forceCheck = false) {
     const existing = document.querySelector('#ss-settings .ss-id-database-settings-section');
     if (!existing) return;
-    const fresh = await renderIdDatabaseSection();
+    const fresh = await renderIdDatabaseSection(forceCheck);
     existing.replaceWith(fresh);
   }
 

@@ -68,7 +68,14 @@ def main():
     elif mode == "database_info":
         result = database_info(sidecar_url)
     elif mode == "db_check_update":
-        result = sidecar_get(sidecar_url, "/database/check-update")
+        # force=True only for the "Refresh" button's own explicit request --
+        # the default (routine page render) must use the sidecar's own
+        # cache, not hit GitHub's unauthenticated API (60 req/hour, shared
+        # across every source calling from this IP) on every load. See
+        # database_health_router.py's check_database_update() docstring
+        # for the live incident this caused before this default existed.
+        endpoint = "/database/check-update?force=true" if args.get("force") else "/database/check-update"
+        result = sidecar_get(sidecar_url, endpoint)
     elif mode == "db_update":
         result = sidecar_post(sidecar_url, "/database/update", timeout=10)
     elif mode == "db_update_status":

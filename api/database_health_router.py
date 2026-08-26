@@ -177,16 +177,30 @@ async def database_info():
 
 
 @router.get("/database/check-update", response_model=CheckUpdateResponse)
-async def check_database_update():
+async def check_database_update(force: bool = False):
     """Check GitHub for a newer database release.
 
-    Always performs a live GitHub API call (bypasses the 12-hour persistent
-    cache) so the user always sees up-to-date information when they click
-    "check for updates" manually.
+    `force=False` (default) uses check_update()'s own 10-min in-memory /
+    12-hour persistent cache when available -- this is what the Settings
+    tab calls on every render (including the automatic refresh after an
+    update completes), so it must not hit GitHub's API on every page
+    load. `force=True` (the "Refresh" button's own explicit request)
+    bypasses both caches for genuinely fresh info.
+
+    This endpoint unconditionally forcing a live call regardless of the
+    caller was a real, live bug (not hypothetical): GitHub's
+    unauthenticated REST API allows only 60 requests/hour per source IP,
+    and normal Settings-tab usage (reloading the tab, `renderIdDatabase
+    Section`'s own periodic re-render) burned through that budget in
+    well under an hour, after which every check silently 500'd and the
+    UI fell back to showing "Version: None / No database downloaded
+    yet" -- misleadingly implying no database was present at all, when
+    `/database/info` (a separate, unaffected call) still reported the
+    real performer/face counts correctly the whole time.
     """
     if _db_updater is None:
         raise HTTPException(status_code=503, detail="Updater not initialized")
-    result = await _db_updater.check_update(force=True)
+    result = await _db_updater.check_update(force=force)
     return CheckUpdateResponse(**result)
 
 

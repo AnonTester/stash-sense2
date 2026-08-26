@@ -1,5 +1,25 @@
 ## 2026-08-26
 
+### 0.14.16 (sidecar only)
+- Fix: `GET /database/check-update` unconditionally forced a live GitHub
+  API call, bypassing the 10-min/12-hour caches `database_updater.py`
+  already has specifically to avoid this. Confirmed live: normal Settings
+  tab usage (reopening the tab, switching back to it, an update
+  completing) burned through GitHub's 60-requests/hour unauthenticated
+  rate limit within the day, after which every check 500'd and the
+  Settings tab showed "Version: None / No database downloaded yet" --
+  misleadingly implying no database was present, when `/database/info`
+  (a separate, unaffected call) still reported the real performer/face
+  counts the whole time. Now defaults to using the cache (`force=false`);
+  only an explicit "Refresh" button click passes `force=true`.
+
+### 0.14.19 (plugin only)
+- Fix: the Settings tab's Identification Database section now only
+  forces a fresh GitHub check on an explicit "Refresh" button click --
+  every other trigger (opening the tab, switching back to it, an update
+  or fingerprint reset completing) uses the sidecar's own cache instead.
+  Companion to the sidecar-side fix above.
+
 ### 0.14.15 (sidecar only)
 - Fix: `/recommendations/local-performers/sync-one` (the performer
   create/update/destroy hook handler) constructed `LocalPerformerIndex`
