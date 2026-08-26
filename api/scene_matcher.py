@@ -187,33 +187,44 @@ def aggregate_matches(
             match_frames[match.stashdb_id].append((frame_idx, match.combined_score))
             match_info[match.stashdb_id] = match
 
-    # Rank by: average distance * (1 / sqrt(appearance_ratio)) -- this
-    # prefers performers who appear consistently with low scores, and is
-    # left alone for RANKING (deciding which candidates make top_k and in
-    # what order).
+    # Rank (and display) by: the best single frame's distance, with a
+    # modest bonus for appearing in more frames -- same
+    # min_distance-plus-frame_bonus philosophy clustered_frequency_matching
+    # and frequency_based_matching already use, applied here too so all
+    # three matching modes agree on both *which* candidate wins and *what
+    # confidence* gets shown for it.
     #
-    # But it must not be what's *displayed* as the match's confidence:
-    # match_scores[stashdb_id] holds one entry per frame where this
-    # performer was anywhere in that frame's returned candidate list (not
-    # just their best appearance), so avg_score dilutes a genuinely strong
-    # match with every weaker/borderline frame the same tracked person-
-    # cluster happens to include. Worse, dividing by sqrt(appearance_ratio)
-    # can push adjusted_score *above* 1.0 -- floored to 0% confidence by
-    # _distance_to_confidence -- purely because a performer appeared in a
-    # minority of the cluster's frames, even when their best single-frame
-    # match was excellent. Confirmed live: a correctly-identified 30+
-    # frame "Cristina Agave" cluster showed 0% this way. Displaying
-    # min_score (the actual best evidence for this identity, matching how
-    # the other two matching-mode functions -- clustered_frequency_matching
-    # and frequency_based_matching -- already show their winner) fixes
-    # this without touching which candidates get selected/ranked.
+    # This used to rank by avg_score / sqrt(appearance_ratio) instead --
+    # averaging in every weaker/borderline frame a tracked person-cluster
+    # happened to include, then dividing by how large a fraction of the
+    # cluster's frames this performer appeared in at all. Confirmed live,
+    # two distinct failures from that:
+    #   1. A correctly-identified 30+ frame "Cristina Agave" cluster whose
+    #      best frame matched well still displayed 0% confidence, because
+    #      dividing by sqrt(appearance_ratio) pushed the shown score above
+    #      the distance-1.0 floor purely for not appearing in *every*
+    #      frame.
+    #   2. Once (1) was fixed by displaying min_score without also fixing
+    #      ranking, the *displayed*, sorted-by-confidence candidate list
+    #      and the *pre-selected* (is_best_match) candidate could
+    #      disagree: a scene showed a 60%-confidence, first-listed pornbox
+    #      candidate left unchecked while a 56%-confidence stashdb/local
+    #      candidate sorted lower was the one pre-selected -- ranking was
+    #      still using the old averaged metric while display and list
+    #      order had already switched to min_score.
+    # No hard confidence threshold is applied here (unlike the other two
+    # matching modes' `if (1 - min_distance) < min_confidence: continue`)
+    # -- this mode's whole purpose is to still surface single-frame/weak
+    # matches rather than drop them outright (see TOP_K_PER_PERSON's
+    # comment in scene_face_match.py); a weak match's low confidence and
+    # zero frame_bonus already rank it near the bottom on its own.
     aggregated: list[tuple[object, float]] = []
     for stashdb_id, scores in match_scores.items():
-        avg_score = np.mean(scores)
         min_score = min(scores)
-        appearance_ratio = len(scores) / len(cluster)
-        # Boost score for performers that appear in more frames
-        adjusted_score = avg_score / (appearance_ratio ** 0.5)
+        appearances = len(scores)
+        confidence = max(0.0, 1.0 - min_score)
+        frame_bonus = 0.1 * (appearances - 1)
+        weighted_score = confidence * (1 + frame_bonus)
 
         match = match_info[stashdb_id]
 
@@ -233,11 +244,11 @@ def aggregate_matches(
             distance=min_score,
             top_timestamps_sec=top_timestamps_sec,
         )
-        aggregated.append((response, adjusted_score))
+        aggregated.append((response, weighted_score))
 
-    # Sort by adjusted score (lower is better) -- ranking stays
-    # avg/appearance-based even though display no longer is.
-    aggregated.sort(key=lambda pair: pair[1])
+    # Sort by weighted score (higher is better) -- same ordering
+    # principle now used for ranking, list order, and display.
+    aggregated.sort(key=lambda pair: pair[1], reverse=True)
     return [response for response, _ in aggregated[:top_k]]
 
 

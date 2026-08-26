@@ -1,5 +1,22 @@
 ## 2026-08-26
 
+### 0.14.19 (sidecar only)
+- Fix: `aggregate_matches` (the `matching_mode="cluster"` function the
+  Scene Face Matches recommendation job hardcodes) still showed 0%
+  confidence for correctly-identified performers after the previous
+  fix, because that fix only changed what got *displayed*, not what
+  decided *ranking* -- selection of the auto-pre-selected "best" match
+  per person remained based on the old averaged, appearance-ratio-
+  divided score, while the displayed confidence and candidate sort order
+  had already switched to each candidate's own best-frame distance.
+  Confirmed live: a scene showed a 60%-confidence, first-listed pornbox
+  candidate left unchecked, while a 56%-confidence stashdb/local
+  candidate sorted lower was the one actually pre-selected. Ranking now
+  uses the same best-frame-distance-plus-frame-count-bonus formula
+  already used for display and by the other two matching modes
+  (`clustered_frequency_matching`, `frequency_based_matching`), so
+  selection, pre-check, sort order, and displayed percentage all agree.
+
 ### 0.14.18 (sidecar only)
 - Fix: `GET /recommendations/{id}` only pruned the single row it was
   called with when a scene_face_match recommendation's referenced scene
