@@ -187,11 +187,30 @@ def aggregate_matches(
             match_frames[match.stashdb_id].append((frame_idx, match.combined_score))
             match_info[match.stashdb_id] = match
 
-    # Score by: average distance * (1 / appearance_ratio)
-    # This prefers performers who appear consistently with low scores
-    aggregated = []
+    # Rank by: average distance * (1 / sqrt(appearance_ratio)) -- this
+    # prefers performers who appear consistently with low scores, and is
+    # left alone for RANKING (deciding which candidates make top_k and in
+    # what order).
+    #
+    # But it must not be what's *displayed* as the match's confidence:
+    # match_scores[stashdb_id] holds one entry per frame where this
+    # performer was anywhere in that frame's returned candidate list (not
+    # just their best appearance), so avg_score dilutes a genuinely strong
+    # match with every weaker/borderline frame the same tracked person-
+    # cluster happens to include. Worse, dividing by sqrt(appearance_ratio)
+    # can push adjusted_score *above* 1.0 -- floored to 0% confidence by
+    # _distance_to_confidence -- purely because a performer appeared in a
+    # minority of the cluster's frames, even when their best single-frame
+    # match was excellent. Confirmed live: a correctly-identified 30+
+    # frame "Cristina Agave" cluster showed 0% this way. Displaying
+    # min_score (the actual best evidence for this identity, matching how
+    # the other two matching-mode functions -- clustered_frequency_matching
+    # and frequency_based_matching -- already show their winner) fixes
+    # this without touching which candidates get selected/ranked.
+    aggregated: list[tuple[object, float]] = []
     for stashdb_id, scores in match_scores.items():
         avg_score = np.mean(scores)
+        min_score = min(scores)
         appearance_ratio = len(scores) / len(cluster)
         # Boost score for performers that appear in more frames
         adjusted_score = avg_score / (appearance_ratio ** 0.5)
@@ -208,16 +227,18 @@ def aggregate_matches(
             }
             top_timestamps_sec = sorted(timestamps)
 
-        aggregated.append(_match_to_response(
+        response = _match_to_response(
             match,
-            confidence=_distance_to_confidence(adjusted_score),
-            distance=adjusted_score,
+            confidence=_distance_to_confidence(min_score),
+            distance=min_score,
             top_timestamps_sec=top_timestamps_sec,
-        ))
+        )
+        aggregated.append((response, adjusted_score))
 
-    # Sort by adjusted score (lower is better)
-    aggregated.sort(key=lambda m: m.distance)
-    return aggregated[:top_k]
+    # Sort by adjusted score (lower is better) -- ranking stays
+    # avg/appearance-based even though display no longer is.
+    aggregated.sort(key=lambda pair: pair[1])
+    return [response for response, _ in aggregated[:top_k]]
 
 
 def frequency_based_matching(
