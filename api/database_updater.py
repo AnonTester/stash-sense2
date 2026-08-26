@@ -399,12 +399,25 @@ class DatabaseUpdater:
         guarantees the data dir is fully applied or fully rolled back
         before it returns/raises, covering the whole chain as one unit.
         """
+        # Maps apply_delta_chain's phase names onto the same UpdateStatus
+        # enum the full-zip download path already reports through, so the
+        # two update paths look identical to anything reading get_status()
+        # -- "applying" -> SWAPPING since that's this enum's closest
+        # existing meaning (mutating the live data files), not because
+        # anything is literally being swapped file-for-file the way the
+        # full-zip path's own SWAPPING phase is.
+        _PHASE_STATUS = {
+            "downloading": UpdateStatus.DOWNLOADING,
+            "extracting": UpdateStatus.EXTRACTING,
+            "verifying": UpdateStatus.VERIFYING,
+            "applying": UpdateStatus.SWAPPING,
+        }
         try:
             self._state.status = UpdateStatus.DOWNLOADING
             self._state.progress_pct = 0
 
-            def _progress(pct: int) -> None:
-                self._state.status = UpdateStatus.SWAPPING
+            def _progress(phase: str, pct: int) -> None:
+                self._state.status = _PHASE_STATUS[phase]
                 self._state.progress_pct = pct
 
             result = await apply_delta_chain(chain, self._data_dir, progress_cb=_progress)

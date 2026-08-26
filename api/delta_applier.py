@@ -42,6 +42,7 @@ Lifecycle
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -63,6 +64,13 @@ logger = logging.getLogger(__name__)
 
 _DELTA_ASSET_RE = re.compile(r"^stash-sense2-delta-(?P<from_version>.+)-to-(?P<to_version>.+)\.zip$")
 _CHUNK_SIZE = 65_536
+# How often apply_delta_db reports progress -- every N rows across
+# performers+faces+catalogue_* combined, not per-table. Small enough to
+# feel live during a big catalogue delta (a few hundred ms between ticks
+# at typical SQLite/usearch insert rates), large enough not to make the
+# progress_cb call itself (a cross-thread attribute write) a meaningful
+# fraction of the per-row cost.
+_PROGRESS_TICK_ROWS = 200
 
 # Same set database_updater.py backs up/restores — kept identical so a
 # rollback here is indistinguishable from a rollback of the full-zip path.
@@ -284,10 +292,24 @@ def _upsert_catalogue_performer_url(conn: sqlite3.Connection, row: sqlite3.Row) 
         )
 
 
-def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
+def apply_delta_db(
+    delta_db_path: Path, data_dir: Path, progress_cb: Optional[Callable[[int], None]] = None,
+) -> dict[str, int]:
     """Apply one delta.db onto the live performers.db + usearch index in
     `data_dir`. Does not touch faces.json/performers.json/manifest.json —
     the caller regenerates those once after the whole chain is applied.
+
+    `progress_cb`, if given, is called with an int 0-99 periodically
+    (every _PROGRESS_TICK rows) across every table below combined -- this
+    function is plain synchronous row-at-a-time SQLite/usearch work with
+    no natural yield points, and for a catalogue-heavy delta that's tens
+    of thousands of individual operations (confirmed live: 104k+ for the
+    2026-08-26 pornbox catalogue delta) -- easily the single longest
+    phase of an update, and the one the user has the least visibility
+    into without this. Caller (apply_delta_chain) is expected to run this
+    whole function via asyncio.to_thread and have `progress_cb` be a
+    plain thread-safe attribute write (see database_updater.py's
+    _run_delta_update), not anything that itself needs the event loop.
     """
     conn = sqlite3.connect(data_dir / "performers.db")
     conn.execute("PRAGMA foreign_keys = ON")
@@ -299,6 +321,19 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
 
     delta_conn = sqlite3.connect(f"file:{delta_db_path}?mode=ro", uri=True)
     delta_conn.row_factory = sqlite3.Row
+
+    catalogue_tables_present = _has_table(delta_conn, "catalogue_performers")
+    progress_tables = ["performers", "faces", "removed_faces"]
+    if catalogue_tables_present:
+        progress_tables += ["catalogue_performers", "catalogue_performer_urls", "catalogue_faces"]
+    total_rows = sum(delta_conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in progress_tables)
+    processed = 0
+
+    def _tick() -> None:
+        nonlocal processed
+        processed += 1
+        if progress_cb and total_rows and processed % _PROGRESS_TICK_ROWS == 0:
+            progress_cb(min(99, int(100 * processed / total_rows)))
 
     touched_performers: set[int] = set()
     upserted = removed = faces_added = faces_removed = 0
@@ -313,11 +348,13 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
             pid = _upsert_performer(conn, p)
             upserted += 1
             touched_performers.add(pid)
+        _tick()
 
     for f in delta_conn.execute("SELECT * FROM faces"):
         performer_id = _get_performer_id(conn, f["endpoint"], f["stashbox_id"])
         if performer_id is None:
             logger.warning("Delta face for unknown performer %s:%s — skipping", f["endpoint"], f["stashbox_id"])
+            _tick()
             continue
         vec = np.frombuffer(f["embedding"], dtype=np.float32)
         index.add(f["embedding_index"], vec)
@@ -332,6 +369,7 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
         )
         touched_performers.add(performer_id)
         faces_added += 1
+        _tick()
 
     for r in delta_conn.execute("SELECT * FROM removed_faces"):
         idx = r["embedding_index"]
@@ -342,20 +380,23 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
         if row is not None:
             touched_performers.add(row[0])
         faces_removed += 1
+        _tick()
 
     # Catalogue-sourced (pornbox/seekfans/legacy-site) performers/faces --
     # see _has_table's docstring and stash-sense2-data-gen's
     # build/export_delta.py for why these are separate, additive tables
     # rather than folded into the loops above.
     catalogue_upserted = catalogue_faces_added = 0
-    if _has_table(delta_conn, "catalogue_performers"):
+    if catalogue_tables_present:
         for p in delta_conn.execute("SELECT * FROM catalogue_performers"):
             _upsert_catalogue_performer(conn, p)
             touched_performers.add(p["id"])
             catalogue_upserted += 1
+            _tick()
 
         for row in delta_conn.execute("SELECT * FROM catalogue_performer_urls"):
             _upsert_catalogue_performer_url(conn, row)
+            _tick()
 
         for f in delta_conn.execute("SELECT * FROM catalogue_faces"):
             vec = np.frombuffer(f["embedding"], dtype=np.float32)
@@ -371,6 +412,7 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
             )
             touched_performers.add(f["performer_id"])
             catalogue_faces_added += 1
+            _tick()
 
     for pid in touched_performers:
         _sync_face_count(conn, pid)
@@ -401,14 +443,26 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-async def _download(url: str, dest: Path) -> None:
+async def _download(url: str, dest: Path, progress_cb: Optional[Callable[[int], None]] = None) -> None:
+    """`progress_cb`, if given, is called with an int 0-100 as bytes
+    arrive -- mirrors database_updater.py's own full-zip `_download`,
+    which already does this; this one didn't, which is why a delta
+    download previously just sat at whatever pct the caller had last set
+    (typically 0) for the entire download regardless of size. Silently
+    skipped (no calls at all) if the server doesn't send Content-Length,
+    same as the full-zip path's own handling of that case."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     async with httpx.AsyncClient(follow_redirects=True) as client:
         async with client.stream("GET", url) as resp:
             resp.raise_for_status()
+            total = int(resp.headers.get("content-length", 0))
+            downloaded = 0
             with open(dest, "wb") as f:
                 async for chunk in resp.aiter_bytes(chunk_size=_CHUNK_SIZE):
                     f.write(chunk)
+                    downloaded += len(chunk)
+                    if progress_cb and total > 0:
+                        progress_cb(int(100 * downloaded / total))
 
 
 def _backup(data_dir: Path) -> Path:
@@ -430,12 +484,23 @@ def _rollback(data_dir: Path, backup_dir: Path) -> None:
 
 
 async def apply_delta_chain(
-    chain: list[dict[str, Any]], data_dir: Path, progress_cb: Optional[Callable[[int], None]] = None,
+    chain: list[dict[str, Any]], data_dir: Path,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> dict[str, Any]:
     """Download, verify, and apply every hop in `chain` (oldest-to-newest),
     then regenerate faces.json/performers.json and write a new manifest.
     Rolls back to the pre-chain state on any failure — nothing is left
     half-applied.
+
+    `progress_cb(phase, pct)`, if given, is called throughout with
+    `phase` one of "downloading"/"extracting"/"verifying"/"applying" and
+    `pct` 0-100 *within that phase* (not blended across the whole chain --
+    multi-hop chains are rare enough in practice, and restarting the
+    percentage per phase per hop is more legible than a single number
+    that means something different depending on chain length). The
+    caller (database_updater.py's _run_delta_update) maps `phase` onto
+    the same UpdateStatus enum the full-zip download path already uses,
+    so the two update paths report progress the same shape.
     """
     if not chain:
         return {"applied_hops": 0}
@@ -451,23 +516,65 @@ async def apply_delta_chain(
         for i, hop in enumerate(chain):
             zip_path = work_dir / f"delta_{i}.zip"
             extract_dir = work_dir / f"extracted_{i}"
-            await _download(hop["download_url"], zip_path)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(extract_dir)
 
+            await _download(
+                hop["download_url"], zip_path,
+                progress_cb=(lambda pct: progress_cb("downloading", pct)) if progress_cb else None,
+            )
+
+            if progress_cb:
+                progress_cb("extracting", 0)
+            # zipfile extraction is synchronous too (a 700MB+ full-db zip
+            # is not instant) -- threaded for the same event-loop-blocking
+            # reason as apply_delta_db below, just less likely to matter
+            # for a delta.db-only zip (small) than for a full-database one.
+            await asyncio.to_thread(lambda: zipfile.ZipFile(zip_path, "r").extractall(extract_dir))
+            if progress_cb:
+                progress_cb("extracting", 100)
+
+            if progress_cb:
+                progress_cb("verifying", 0)
             hop_manifest = json.loads((extract_dir / "delta_manifest.json").read_text())
             expected = hop_manifest["checksums"]["delta.db"].split(":", 1)[1]
-            actual = _sha256(extract_dir / "delta.db")
+            actual = await asyncio.to_thread(_sha256, extract_dir / "delta.db")
+            if progress_cb:
+                progress_cb("verifying", 100)
             if actual != expected:
                 raise ValueError(f"Checksum mismatch for delta {hop['from_version']}->{hop['to_version']}: "
                                   f"expected {expected[:16]}…, got {actual[:16]}…")
 
-            hop_result = apply_delta_db(extract_dir / "delta.db", data_dir)
+            # apply_delta_db is plain synchronous SQLite/usearch work (one
+            # row/vector at a time, no yield points) -- for a catalogue-
+            # heavy delta that's tens of thousands of individual
+            # operations, easily exceeding stash_sense_backend.py's 30s
+            # proxy timeout on the status-poll endpoint. Calling it
+            # directly here blocks the whole event loop for that entire
+            # duration, so the server can't answer its OWN
+            # /database/update/status poll meanwhile -- confirmed live:
+            # the plugin UI showed a red "Error" (the timed-out poll)
+            # partway through an otherwise fully successful update, which
+            # a subsequent poll/refresh (after the block cleared) then
+            # showed as complete with no error at all. Running it in a
+            # thread keeps the event loop free to keep answering status
+            # polls while this grinds through the actual work.
+            if progress_cb:
+                progress_cb("applying", 0)
+            # The lambda below runs ON THE WORKER THREAD (apply_delta_db's
+            # own _tick() calls it directly, synchronously, from inside
+            # asyncio.to_thread) -- safe here specifically because
+            # progress_cb (database_updater.py's `_progress`) only ever
+            # does plain attribute writes (self._state.status/.progress_pct),
+            # which CPython's GIL makes safe without an explicit
+            # call_soon_threadsafe/run_coroutine_threadsafe hop. Don't
+            # reuse this pattern for a callback that awaits anything.
+            hop_result = await asyncio.to_thread(
+                apply_delta_db, extract_dir / "delta.db", data_dir,
+                (lambda pct: progress_cb("applying", pct)) if progress_cb else None,
+            )
             for k in totals:
                 totals[k] += hop_result[k]
-
             if progress_cb:
-                progress_cb(int(100 * (i + 1) / len(chain)))
+                progress_cb("applying", 100)
 
         conn = sqlite3.connect(data_dir / "performers.db")
         try:

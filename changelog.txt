@@ -1,5 +1,29 @@
 ## 2026-08-26
 
+### 0.14.14 (sidecar only)
+- Fix: applying a delta update ran entirely synchronous, unyielding
+  SQLite/usearch work (`apply_delta_db`) directly on the FastAPI event
+  loop, blocking the server from answering ANY request -- including its
+  own `/database/update/status` poll -- for the whole duration. For a
+  large catalogue-heavy delta (tens of thousands of individual row/vector
+  operations) that routinely exceeded `stash_sense_backend.py`'s 30s
+  proxy timeout, surfacing as a red "Error" in the plugin UI partway
+  through an update that was actually completing successfully in the
+  background (confirmed live: the very next poll, once the block
+  cleared, showed the update as complete with no error at all). Moved
+  the blocking work onto a worker thread (`asyncio.to_thread`) so the
+  server stays responsive throughout.
+- Improvement: real progress reporting for delta updates, previously just
+  a single number that jumped from "downloading" all the way to done with
+  nothing in between regardless of how long each phase actually took.
+  Downloading now reports actual bytes-received percentage (matching
+  what the full-zip download path already did); extracting, checksum
+  verification, and applying the delta each get their own status and
+  percentage, with applying itself reporting incrementally (every 200
+  rows across performers/faces/catalogue tables combined) rather than a
+  single jump from 0 to 100 -- the phase that most needed it, since it's
+  routinely the slowest part of an update and previously the most opaque.
+
 ### 0.14.13 (sidecar only)
 - Fix: `delta_applier.py` only ever applied performer/face changes keyed
   on `(endpoint, stashbox_id)`, so a delta package covering a
