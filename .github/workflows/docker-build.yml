@@ -74,8 +74,22 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          # Registry cache, not GHA cache: the Actions cache API caps out
+          # at 10GB *shared across every cache entry in the repo*, and
+          # ROCm's own apt packages (installed twice -- build stage and
+          # runtime stage -- see Dockerfile.rocm) are large enough on
+          # their own to evict everything else (including the CPU/CUDA
+          # variants' caches, competing for the same 10GB budget) well
+          # before the next tag build reuses it. A registry-hosted cache
+          # image has no such cap -- each variant gets its own
+          # `:buildcache` tag in GHCR, so the 3 variants no longer fight
+          # each other for cache space either. First build after this
+          # change still pays full cost seeding the cache; every build
+          # after that should skip straight past the apt-get/pip stages
+          # to `COPY api/ ./` whenever Dockerfile.rocm/requirements.docker.txt
+          # haven't changed, which is most releases.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
 
   release:
     needs: build
