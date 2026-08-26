@@ -88,8 +88,16 @@ jobs:
           # after that should skip straight past the apt-get/pip stages
           # to `COPY api/ ./` whenever Dockerfile.rocm/requirements.docker.txt
           # haven't changed, which is most releases.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}:buildcache,mode=max
+          # github.repository_owner ("AnonTester") is mixed-case; Docker
+          # registry references must be all-lowercase. docker/metadata-
+          # action (the main image tags above) lowercases this
+          # automatically -- these cache refs are built by hand and don't
+          # get that treatment for free, confirmed live: the very first
+          # tag build after this cache backend switch failed outright with
+          # "repository name ... must be lowercase" on all 3 matrix
+          # variants, never even reaching a build step. toLower() fixes it.
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ toLower(github.repository_owner) }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ toLower(github.repository_owner) }}/${{ matrix.image }}:buildcache,mode=max
 
   release:
     needs: build
