@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.14.19';
+  const PLUGIN_VERSION = '0.14.20';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -52,7 +52,19 @@
   // Cached state
   let cachedSettings = null;
   let sidecarStatus = null; // null = unknown, true = connected, false = disconnected
-  let sidecarVersionInfo = null; // null = unknown, else { current, required, outdated }
+  // null = unknown, else { current, required, outdated, latestVersion,
+  // updateAvailable, changelog } -- `outdated`/`required` is the existing
+  // "this plugin needs a newer sidecar" (blocking) check; `latestVersion`/
+  // `updateAvailable` is the newer, non-blocking "a newer sidecar exists"
+  // notice; `changelog` is what's new since `current`, from the sidecar's
+  // own changelog.txt (see release_info.py server-side).
+  let sidecarVersionInfo = null;
+  // null = unknown, else { current, minRequired, tooOld, latestVersion,
+  // updateAvailable, changelog } -- the reverse direction: `tooOld` is
+  // this plugin build being below the *connected sidecar's own*
+  // min_plugin_version (blocking -- the sidecar may have shipped
+  // fields/endpoints this plugin doesn't know about yet).
+  let pluginVersionInfo = null;
 
   // ==================== Version Comparison ====================
 
@@ -186,16 +198,23 @@
       const settings = await getSettings();
       const result = await runPluginOperation('health', {
         sidecar_url: settings.sidecarUrl,
+        plugin_version: PLUGIN_VERSION,
       });
       if (result.error) {
         sidecarStatus = false;
         sidecarVersionInfo = null;
+        pluginVersionInfo = null;
         return null;
       }
       sidecarStatus = true;
       if (result.version) {
         const outdated = compareVersions(result.version, MIN_SIDECAR_VERSION) < 0;
-        sidecarVersionInfo = { current: result.version, required: MIN_SIDECAR_VERSION, outdated };
+        const latestVersion = result.latest_sidecar_version || null;
+        const updateAvailable = !!latestVersion && compareVersions(latestVersion, result.version) > 0;
+        sidecarVersionInfo = {
+          current: result.version, required: MIN_SIDECAR_VERSION, outdated,
+          latestVersion, updateAvailable, changelog: result.sidecar_changelog || [],
+        };
         if (outdated) {
           console.warn(
             `[${PLUGIN_NAME}] Sidecar is running v${result.version}, but this plugin (v${PLUGIN_VERSION}) `
@@ -206,10 +225,36 @@
       } else {
         sidecarVersionInfo = null; // older sidecar that predates /health reporting a version at all
       }
+
+      // Reverse direction: does the *connected sidecar* require a newer
+      // plugin than this one? Only known once a sidecar with
+      // min_plugin_version support has actually responded -- an older
+      // sidecar predating this field leaves pluginVersionInfo null, same
+      // "unknown, not false" treatment as sidecarVersionInfo above.
+      if (result.min_plugin_version) {
+        const tooOld = compareVersions(PLUGIN_VERSION, result.min_plugin_version) < 0;
+        const latestVersion = result.latest_plugin_version || null;
+        const updateAvailable = !!latestVersion && compareVersions(latestVersion, PLUGIN_VERSION) > 0;
+        pluginVersionInfo = {
+          current: PLUGIN_VERSION, minRequired: result.min_plugin_version, tooOld,
+          latestVersion, updateAvailable, changelog: result.plugin_changelog || [],
+        };
+        if (tooOld) {
+          console.warn(
+            `[${PLUGIN_NAME}] This plugin (v${PLUGIN_VERSION}) is older than the connected sidecar `
+            + `requires (v${result.min_plugin_version}+). Update the plugin from Settings > Plugins > `
+            + `Available Plugins to avoid broken or missing functionality.`
+          );
+        }
+      } else {
+        pluginVersionInfo = null;
+      }
+
       return result;
     } catch (e) {
       sidecarStatus = false;
       sidecarVersionInfo = null;
+      pluginVersionInfo = null;
       return null;
     }
   }
@@ -220,6 +265,10 @@
 
   function setSidecarStatus(status) {
     sidecarStatus = status;
+  }
+
+  function getPluginVersionInfo() {
+    return pluginVersionInfo;
   }
 
   /** Returns { current, required, outdated } from the last checkHealth() call, or null if unknown/unavailable. */
@@ -618,6 +667,7 @@
     getSidecarStatus,
     setSidecarStatus,
     getSidecarVersionInfo,
+    getPluginVersionInfo,
     compareVersions,
 
     // Stash GraphQL

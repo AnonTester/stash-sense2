@@ -117,6 +117,7 @@ ENV PATH="/app/venv/bin:$PATH"
 
 # Copy application code
 COPY api/ ./
+COPY changelog.txt ./
 
 # Create data directory mount point
 RUN mkdir -p /data

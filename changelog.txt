@@ -1,5 +1,22 @@
 ## 2026-08-26
 
+### 0.14.17 (sidecar only)
+- Feature: the sidecar now self-checks GitHub once an hour for the
+  latest sidecar release and the latest published plugin version (via
+  `stash-plugin-repo`'s `index.yml`, not another GitHub API call), and
+  serves the result through the existing `/health` poll -- no new
+  browser-side timers or GitHub requests per connected device. `/health`
+  now also accepts an optional `plugin_version` query param and, in
+  response, reports `latest_sidecar_version`, `min_plugin_version`,
+  `latest_plugin_version`, and per-side changelog excerpts (parsed from
+  this same `changelog.txt`) for whichever side is behind.
+- `MIN_PLUGIN_VERSION` (currently 0.14.19) lets the sidecar flag a
+  connected plugin as too old for it, mirroring the existing reverse
+  check the plugin already does against the sidecar.
+- A failed GitHub/plugin-index check logs a warning and keeps the last
+  known-good value rather than clearing it, so a single flaky background
+  check can't flicker the UI to "no update info."
+
 ### 0.14.16 (sidecar only)
 - Fix: `GET /database/check-update` unconditionally forced a live GitHub
   API call, bypassing the 10-min/12-hour caches `database_updater.py`
@@ -12,6 +29,29 @@
   (a separate, unaffected call) still reported the real performer/face
   counts the whole time. Now defaults to using the cache (`force=false`);
   only an explicit "Refresh" button click passes `force=true`.
+
+### 0.14.20 (plugin only)
+- Feature: the connection-status dot now distinguishes four states
+  instead of two -- connected, disconnected, a *required* version
+  mismatch (orange, existing), and a newer *optional* release available
+  for either the sidecar or this plugin (new, blue -- FYI rather than
+  action-needed). Hovering either button explains which side and what
+  version.
+- Feature: when a required mismatch is detected, a modal now pops up
+  automatically instead of only showing a passive badge:
+  - Plugin too old for the connected sidecar: dismissable, with a link
+    to Settings > Plugins > Available Plugins. Dismissing it is
+    remembered only until the mismatch itself changes (e.g. the sidecar
+    raises its required floor further).
+  - Sidecar too old for this plugin: non-dismissable, blocks the entire
+    interface behind a full-viewport overlay until the next periodic
+    health check (every 60s) sees the sidecar has been updated -- an
+    outdated sidecar container isn't something the browser side can fix,
+    and letting the user keep acting against one that predates behavior
+    this plugin build assumes risks real data loss, not just a degraded
+    UI.
+  Both modals show the relevant changelog entries fetched from the
+  sidecar's own `/health` response.
 
 ### 0.14.19 (plugin only)
 - Fix: the Settings tab's Identification Database section now only

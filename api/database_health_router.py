@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from frame_extractor import check_ffmpeg_available
+import release_info
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,14 @@ class HealthResponse(BaseModel):
     face_count: int = 0
     version: Optional[str] = None
     face_recognition_loading: bool = False
+    # Release/update info -- see release_info.py's own module docstring.
+    # All read from an in-memory cache a background task refreshes hourly;
+    # this endpoint makes no network calls of its own to populate them.
+    latest_sidecar_version: Optional[str] = None
+    min_plugin_version: Optional[str] = None
+    latest_plugin_version: Optional[str] = None
+    sidecar_changelog: list[dict] = Field(default_factory=list)
+    plugin_changelog: list[dict] = Field(default_factory=list)
 
 
 class CheckUpdateResponse(BaseModel):
@@ -97,12 +106,21 @@ class UpdateStatusResponse(BaseModel):
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check():
+async def health_check(plugin_version: Optional[str] = None):
     """Check API health and database status.
 
     Does NOT trigger lazy loading -- reports current state without
     side effects. The face recognition database loads on first
     /identify request.
+
+    `plugin_version`: the calling plugin's own PLUGIN_VERSION, passed on
+    every poll (the plugin already polls this endpoint every 60s for
+    connection status -- release_info fields piggyback on that same
+    call rather than needing a separate endpoint/timer of their own, see
+    release_info.py's module docstring). Used only to compute
+    `plugin_changelog` (what's new between this version and latest); the
+    release_info cache itself is refreshed by a background task, not by
+    this request, so passing it costs no extra I/O here.
     """
     from main import app as _app
     _version = getattr(_app, "version", None)
@@ -116,12 +134,15 @@ async def health_check():
     except RuntimeError:
         pass  # ResourceManager not initialized yet (very early startup)
 
+    release = release_info.get_cache().get_info(_version, plugin_version)
+
     if _recognizer is None:
         return HealthResponse(
             status="degraded",
             database_loaded=False,
             version=_version,
             face_recognition_loading=face_recognition_loading,
+            **release,
         )
 
     return HealthResponse(
@@ -131,6 +152,7 @@ async def health_check():
         face_count=len(_recognizer.faces),
         version=_version,
         face_recognition_loading=face_recognition_loading,
+        **release,
     )
 
 

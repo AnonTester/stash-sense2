@@ -67,6 +67,11 @@ COPY --from=build /app/venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 
 COPY api/ ./
+# changelog.txt lives at repo root, not under api/ -- release_info.py
+# reads it directly (both sidecar and plugin changelog sections) to
+# answer "what's new" without any network call. Same cache-invalidation
+# cost as the api/ layer above (changes on every version bump anyway).
+COPY changelog.txt ./
 
 RUN mkdir -p /data
 

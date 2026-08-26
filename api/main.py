@@ -33,6 +33,7 @@ from recommendations_router import router as recommendations_router, init_recomm
 from identification_router import router as identification_router, init_identification_router, update_identification_globals
 from stashbox_router import router as stashbox_router, init_stashbox_router
 from database_health_router import router as database_health_router, init_database_health_router, update_database_health_globals
+import release_info
 from database_updater import DatabaseUpdater
 from hardware import init_hardware
 from settings import init_settings, migrate_env_vars
@@ -337,6 +338,11 @@ async def lifespan(app: FastAPI):
     # Start background idle checker for resource manager
     idle_task = asyncio.create_task(_idle_checker(resource_mgr))
 
+    # Start background release-info checker (latest sidecar/plugin
+    # versions -- see release_info.py's own module docstring for why
+    # this lives here rather than being checked per-request).
+    release_info_task = asyncio.create_task(release_info.refresh_loop())
+
     if STASH_URL:
         print(f"Stash connection configured: {STASH_URL}")
     else:
@@ -351,6 +357,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # Graceful shutdown — cancel release-info checker
+    release_info_task.cancel()
+    try:
+        await release_info_task
+    except asyncio.CancelledError:
+        pass
+
     # Graceful shutdown — wait for jobs to checkpoint
     await queue_mgr.stop(timeout=30.0)
     logger.warning("Queue manager stopped")
@@ -362,7 +375,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.14.16",
+    version="0.14.17",
     lifespan=lifespan,
 )
 

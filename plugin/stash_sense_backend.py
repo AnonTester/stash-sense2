@@ -33,7 +33,7 @@ def main():
     sidecar_url = args.get("sidecar_url", "http://localhost:5000").rstrip("/")
 
     if mode == "health":
-        result = health_check(sidecar_url)
+        result = health_check(sidecar_url, args.get("plugin_version"))
     elif mode == "identify_scene":
         scene_id = args.get("scene_id")
         result = identify_scene(
@@ -313,10 +313,14 @@ def _flush_pending_sync(sidecar_url, pending_path, skip_performer_id=None):
         log(f"Local performer sync hook: flushed {flushed} pending sync(s) from retry cache")
 
 
-def health_check(sidecar_url):
-    """Check sidecar health."""
+def health_check(sidecar_url, plugin_version=None):
+    """Check sidecar health. `plugin_version` (this plugin's own
+    PLUGIN_VERSION) is forwarded so the sidecar can compute a
+    plugin_changelog slice -- see release_info.py's own docstring for
+    why this piggybacks on the health poll instead of a separate call."""
     try:
-        response = requests.get(f"{sidecar_url}/health", timeout=10)
+        params = {"plugin_version": plugin_version} if plugin_version else None
+        response = requests.get(f"{sidecar_url}/health", params=params, timeout=10)
         if response.ok:
             return response.json()
         return {"error": f"Health check failed: HTTP {response.status_code}"}

@@ -28,7 +28,16 @@
     // class/title, not just on the periodic health-check re-render.
     function statusIconClass(status) {
       const versionInfo = SS.getSidecarVersionInfo();
+      const pluginInfo = SS.getPluginVersionInfo();
       if (status === true && versionInfo && versionInfo.outdated) return 'ss-outdated';
+      if (status === true && pluginInfo && pluginInfo.tooOld) return 'ss-outdated';
+      // Non-required "a newer release exists" -- distinct, lower-alarm styling
+      // from the red required-update ss-outdated class (mirrors the existing
+      // .ss-db-stat-local vs .ss-db-stat-warning distinction elsewhere in this
+      // plugin: FYI vs action-needed).
+      if (status === true && ((versionInfo && versionInfo.updateAvailable) || (pluginInfo && pluginInfo.updateAvailable))) {
+        return 'ss-update-available';
+      }
       if (status === true) return 'ss-connected';
       if (status === false) return 'ss-disconnected';
       return '';
@@ -36,9 +45,21 @@
     function statusTitle(defaultTitle) {
       const status = SS.getSidecarStatus();
       const versionInfo = SS.getSidecarVersionInfo();
+      const pluginInfo = SS.getPluginVersionInfo();
       if (status === true && versionInfo && versionInfo.outdated) {
         return `${SS.PLUGIN_NAME}: sidecar v${versionInfo.current} is older than required `
           + `(v${versionInfo.required}+). Update the sidecar container to restore full functionality.`;
+      }
+      if (status === true && pluginInfo && pluginInfo.tooOld) {
+        return `${SS.PLUGIN_NAME}: this plugin (v${pluginInfo.current}) is older than the connected `
+          + `sidecar expects (v${pluginInfo.minRequired}+). Update via Settings > Plugins > Available Plugins.`;
+      }
+      if (status === true && versionInfo && versionInfo.updateAvailable) {
+        return `${SS.PLUGIN_NAME}: a newer sidecar release is available (v${versionInfo.latestVersion}).`;
+      }
+      if (status === true && pluginInfo && pluginInfo.updateAvailable) {
+        return `${SS.PLUGIN_NAME}: a newer plugin release is available (v${pluginInfo.latestVersion}). `
+          + `Update via Settings > Plugins > Available Plugins.`;
       }
       if (status === false) return `${SS.PLUGIN_NAME}: Not connected`;
       return defaultTitle;
@@ -2220,20 +2241,30 @@
 
       updateButtonStatus(connected) {
         const versionInfo = SS.getSidecarVersionInfo();
-        const outdated = connected === true && versionInfo && versionInfo.outdated;
+        const pluginInfo = SS.getPluginVersionInfo();
+        const outdated = connected === true
+          && ((versionInfo && versionInfo.outdated) || (pluginInfo && pluginInfo.tooOld));
+        const updateAvailable = connected === true && !outdated
+          && ((versionInfo && versionInfo.updateAvailable) || (pluginInfo && pluginInfo.updateAvailable));
         // Scoped to this plugin's own buttons (data-ss-plugin) -- v1 and v2
         // share the .ss-identify-btn class name, so an unscoped selector
         // would also flip v1's connection dot based on v2's sidecar status.
         document.querySelectorAll(`.ss-identify-btn[data-ss-plugin="${SS.PLUGIN_ID}"]`).forEach(btn => {
           const icon = btn.querySelector('.ss-btn-icon');
           if (!icon) return;
-          icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated');
+          icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated', 'ss-update-available');
           if (outdated) {
-            // Connected, but the sidecar container is running an older
-            // version than this plugin JS needs -- distinct from a plain
-            // "disconnected" so it's clear the fix is updating the
-            // sidecar, not troubleshooting connectivity.
+            // Connected, but either side is below the other's required
+            // floor -- distinct from a plain "disconnected" so it's clear
+            // the fix is a version mismatch, not connectivity.
             icon.classList.add('ss-outdated');
+            btn.title = statusTitle(btn.title);
+          } else if (updateAvailable) {
+            // Connected and both sides meet their required floors, but a
+            // newer (non-required) release exists for one of them --
+            // lower-alarm styling than ss-outdated, FYI rather than
+            // action-needed.
+            icon.classList.add('ss-update-available');
             btn.title = statusTitle(btn.title);
           } else if (connected === true) {
             icon.classList.add('ss-connected');
@@ -2688,11 +2719,147 @@
       });
     }
 
+    // ==================== Version Mismatch Modals ====================
+    //
+    // Two *required* (not just "newer exists") mismatches, each shown as
+    // its own auto-popup modal (never just a passive badge) per explicit
+    // request: this plugin below the connected sidecar's own
+    // min_plugin_version, and the connected sidecar below this plugin's
+    // MIN_SIDECAR_VERSION. The two are NOT symmetric in severity:
+    //
+    // - Plugin too old: dismissable prompt with a CTA to update via
+    //   Settings > Plugins > Available Plugins. The plugin can't fix
+    //   this itself, but continuing to use an old plugin against a
+    //   newer sidecar is "may render/behave oddly," not "may corrupt
+    //   data" -- the user can reasonably choose to proceed.
+    // - Sidecar too old: non-dismissable, BLOCKS the entire interface
+    //   (full-viewport overlay, no close button, backdrop doesn't
+    //   dismiss). There is nothing the browser side can do to fix an
+    //   outdated Docker container, and letting the user keep taking
+    //   actions (merges, identify-and-add, database operations) against
+    //   a sidecar that predates fields/behavior this plugin build
+    //   assumes risks real data loss/corruption, not just a degraded
+    //   UI -- so this one doesn't offer a way through, it just waits
+    //   for the next health poll to see the sidecar has been updated.
+    const VersionMismatch = {
+      _blockEl: null,
+      _promptEl: null,
+      _dismissedKey: null, // "<current>|<minRequired>" the prompt was last dismissed for
+
+      evaluate() {
+        const sidecarInfo = SS.getSidecarVersionInfo();
+        const pluginInfo = SS.getPluginVersionInfo();
+
+        if (sidecarInfo && sidecarInfo.outdated) {
+          this._showBlock(sidecarInfo);
+        } else {
+          this._hideBlock();
+        }
+
+        if (pluginInfo && pluginInfo.tooOld) {
+          const key = `${pluginInfo.current}|${pluginInfo.minRequired}`;
+          if (key !== this._dismissedKey) this._showPrompt(pluginInfo);
+        } else {
+          this._hidePrompt();
+          this._dismissedKey = null;
+        }
+      },
+
+      _backdropStyle: 'position:fixed;top:0;left:0;width:100%;height:100%;z-index:2147483000;'
+        + 'display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.75);',
+      _boxStyle: 'position:relative;background:var(--bs-body-bg, #1a1a1a);border-radius:8px;'
+        + 'width:90%;max-width:520px;max-height:85vh;overflow:auto;padding:24px;'
+        + 'box-shadow:0 8px 32px rgba(0,0,0,0.6);color:var(--bs-body-color, #fff);',
+
+      _renderChangelog(entries) {
+        if (!entries || !entries.length) return '';
+        const items = entries.map(e => `
+          <div style="margin-bottom:10px;">
+            <div style="font-weight:600;font-size:0.85rem;">v${e.version}${e.date ? ` <span style="font-weight:400;opacity:0.6;">(${e.date})</span>` : ''}</div>
+            <ul style="margin:4px 0 0 0;padding-left:18px;font-size:0.85rem;opacity:0.85;">
+              ${e.bullets.map(b => `<li>${SS.escapeHtml ? SS.escapeHtml(b) : b}</li>`).join('')}
+            </ul>
+          </div>
+        `).join('');
+        return `<div style="margin-top:14px;max-height:220px;overflow-y:auto;border-top:1px solid var(--bs-border-color, #333);padding-top:12px;">${items}</div>`;
+      },
+
+      _showBlock(info) {
+        if (this._blockEl) return; // already showing -- avoid re-render/flicker on every poll
+        const el = document.createElement('div');
+        el.id = 'ss-version-block';
+        el.style.cssText = this._backdropStyle;
+        el.innerHTML = `
+          <div style="${this._boxStyle}">
+            <h3 style="margin:0 0 10px 0;font-size:18px;">${SS.PLUGIN_NAME}: Sidecar update required</h3>
+            <p style="margin:0 0 8px 0;font-size:0.9rem;">
+              The connected sidecar is running <strong>v${info.current}</strong>, but this plugin
+              (v${SS.PLUGIN_VERSION}) requires at least <strong>v${info.required}</strong>.
+            </p>
+            <p style="margin:0;font-size:0.9rem;opacity:0.85;">
+              Continuing against an older sidecar risks acting on assumptions it doesn't actually meet
+              (missing fields, different behavior) -- the interface is disabled until the sidecar container
+              is rebuilt/updated to a newer version. This will resolve automatically once that happens
+              (checked every 60s).
+            </p>
+            ${this._renderChangelog(info.changelog)}
+          </div>
+        `;
+        document.body.appendChild(el);
+        this._blockEl = el;
+      },
+
+      _hideBlock() {
+        if (this._blockEl) {
+          this._blockEl.remove();
+          this._blockEl = null;
+        }
+      },
+
+      _showPrompt(info) {
+        this._hidePrompt(); // replace any stale one (e.g. minRequired changed) rather than stacking
+        const el = document.createElement('div');
+        el.id = 'ss-version-prompt';
+        el.style.cssText = this._backdropStyle;
+        el.innerHTML = `
+          <div style="${this._boxStyle}">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+              <h3 style="margin:0 0 10px 0;font-size:18px;">${SS.PLUGIN_NAME}: Plugin update recommended</h3>
+              <button class="ss-version-prompt-close" style="background:none;border:none;font-size:22px;color:var(--bs-secondary-color, #888);cursor:pointer;padding:0;line-height:1;" aria-label="Close">&times;</button>
+            </div>
+            <p style="margin:0 0 8px 0;font-size:0.9rem;">
+              This plugin (v${info.current}) is older than the connected sidecar expects
+              (v${info.minRequired}+). Some features may be missing or behave unexpectedly until it's
+              updated.
+            </p>
+            <p style="margin:0 0 14px 0;font-size:0.85rem;opacity:0.85;">
+              Update from <strong>Settings &gt; Plugins &gt; Available Plugins</strong> in Stash.
+            </p>
+            ${this._renderChangelog(info.changelog)}
+          </div>
+        `;
+        el.querySelector('.ss-version-prompt-close').addEventListener('click', () => {
+          this._dismissedKey = `${info.current}|${info.minRequired}`;
+          this._hidePrompt();
+        });
+        document.body.appendChild(el);
+        this._promptEl = el;
+      },
+
+      _hidePrompt() {
+        if (this._promptEl) {
+          this._promptEl.remove();
+          this._promptEl = null;
+        }
+      },
+    };
+
     async function init() {
       console.log(`[${SS.PLUGIN_NAME}] Initializing...`);
 
       // Check sidecar health
       const health = await SS.checkHealth();
+      VersionMismatch.evaluate();
       if (health) {
         console.log(`[${SS.PLUGIN_NAME}] Sidecar connected: ${health.performer_count} performers`);
       } else {
@@ -2714,7 +2881,19 @@
       if (window._ssHealthCheckInterval) {
         clearInterval(window._ssHealthCheckInterval);
       }
-      let lastOutdated = SS.getSidecarVersionInfo() ? SS.getSidecarVersionInfo().outdated : false;
+      // Tracks outdated/updateAvailable together (badgeKey) so a button
+      // re-render also fires on a pure "update became available" change,
+      // not just the required-outdated flip the old lastOutdated-only
+      // check covered.
+      function badgeKey() {
+        const info = SS.getSidecarVersionInfo();
+        const pluginInfo = SS.getPluginVersionInfo();
+        const outdated = (info && info.outdated) || (pluginInfo && pluginInfo.tooOld);
+        const updateAvailable = !outdated
+          && ((info && info.updateAvailable) || (pluginInfo && pluginInfo.updateAvailable));
+        return `${outdated}|${updateAvailable}`;
+      }
+      let lastBadgeKey = SS.getSidecarStatus() ? badgeKey() : 'false|false';
       window._ssHealthCheckInterval = setInterval(async () => {
         try {
           const health = await Promise.race([
@@ -2722,18 +2901,19 @@
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
           ]);
           const newStatus = health ? true : false;
-          const info = SS.getSidecarVersionInfo();
-          const newOutdated = newStatus && info ? info.outdated : false;
-          if (newStatus !== SS.getSidecarStatus() || newOutdated !== lastOutdated) {
+          const newBadgeKey = newStatus ? badgeKey() : 'false|false';
+          if (newStatus !== SS.getSidecarStatus() || newBadgeKey !== lastBadgeKey) {
             SS.setSidecarStatus(newStatus);
-            lastOutdated = newOutdated;
+            lastBadgeKey = newBadgeKey;
             FaceRecognition.updateButtonStatus(newStatus);
           }
+          VersionMismatch.evaluate();
         } catch (_) {
           if (SS.getSidecarStatus()) {
             SS.setSidecarStatus(false);
             FaceRecognition.updateButtonStatus(false);
           }
+          VersionMismatch.evaluate();
         }
       }, 60000);
 

@@ -129,6 +129,7 @@ COPY --from=build /app/venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
 
 COPY api/ ./
+COPY changelog.txt ./
 
 RUN mkdir -p /data
 

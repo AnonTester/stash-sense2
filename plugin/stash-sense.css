@@ -52,6 +52,13 @@
   background: #fd7e14;
 }
 
+/* Connected, both sides meet their required floor, but a newer (optional)
+   release exists -- lower-alarm blue, distinct from the orange/red
+   required-attention states above. */
+.ss-btn-icon.ss-update-available::after {
+  background: #0d6efd;
+}
+
 /* Floating button (fallback) */
 .ss-floating-btn {
   position: fixed;
