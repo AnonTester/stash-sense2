@@ -1,3 +1,26 @@
+## 2026-08-26
+
+### 0.14.13 (sidecar only)
+- Fix: `delta_applier.py` only ever applied performer/face changes keyed
+  on `(endpoint, stashbox_id)`, so a delta package covering a
+  catalogue-only performer source (pornbox.com, seekfans.com, legacy-site
+  crawls -- anything with no stash-box linkage) had nothing for it to
+  apply; an existing install pulling such a delta silently missed those
+  performers entirely rather than erroring. Added a second pass reading
+  new additive `catalogue_performers`/`catalogue_performer_urls`/
+  `catalogue_faces` tables (present only in a delta built by a
+  correspondingly updated stash-sense-data-gen), upserting with the
+  server-assigned performer id explicitly rather than local autoincrement
+  -- required since that raw id, not a stashbox pair, is this class of
+  performer's actual portable identity. `export_db_to_json.py` (used to
+  regenerate faces.json/performers.json after a delta chain applies) had
+  the same stashbox-only gap the data-gen pipeline's own server-side
+  export already fixed once; ported that same three-tier universal_id
+  fallback here so a post-delta local re-export stops dropping catalogue
+  performers all over again. Both changes are backward compatible: an
+  older delta.db simply lacks the new tables, and this code treats that
+  as "nothing to apply for that half," not an error.
+
 ## 2026-08-25
 
 ### 0.14.12 (sidecar only)
