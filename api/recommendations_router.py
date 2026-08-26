@@ -1851,8 +1851,7 @@ async def sync_one_local_performer(request: LocalPerformerSyncOneRequest):
     stash = get_stash_client()
     db_config = DatabaseConfig(data_dir=Path(os.environ.get("DATA_DIR", "./data")))
     index = LocalPerformerIndex(
-        db_config.local_facenet_index_path,
-        db_config.local_arcface_index_path,
+        db_config.local_embedding_index_path,
         db_config.local_faces_json_path,
     )
     generator = FaceEmbeddingGenerator()
@@ -1870,6 +1869,34 @@ async def sync_one_local_performer(request: LocalPerformerSyncOneRequest):
             pass  # not initialized / not currently loaded -- nothing to unload
 
     return {"performer_id": request.performer_id, "status": status}
+
+
+@router.get("/local-performers/stats")
+async def get_local_performer_stats():
+    """Count of performers currently in the local performer index (this
+    Stash instance's own performer cover images -- see
+    local_performer_index.py's module docstring), for the Settings tab's
+    Identification Database section. One vector per performer in this
+    index (unlike the main database, which has many faces per performer),
+    so performer count and face count are the same number here.
+
+    Reads the index fresh from disk rather than reusing recognizer.py's
+    in-memory copy deliberately -- face recognition is lazy-loaded (see
+    resource_manager.py) and this stat should be visible without forcing
+    that load just to report a count. The index itself is small (this
+    Stash instance's own performer library, not the ~450k-performer main
+    database), so a fresh read here is cheap."""
+    from config import DatabaseConfig
+    import os
+    from pathlib import Path
+
+    db_config = DatabaseConfig(data_dir=Path(os.environ.get("DATA_DIR", "./data")))
+    if not db_config.local_faces_json_path or not db_config.local_faces_json_path.exists():
+        return {"performer_count": 0}
+
+    from local_performer_index import LocalPerformerIndex
+    index = LocalPerformerIndex(db_config.local_embedding_index_path, db_config.local_faces_json_path)
+    return {"performer_count": len(index)}
 
 
 # ==================== Upstream Sync Actions ====================

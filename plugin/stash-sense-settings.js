@@ -63,6 +63,9 @@
     async getDatabaseUpdateStatus() {
       return apiCall('db_update_status');
     },
+    async getLocalPerformerStats() {
+      return apiCall('local_performer_stats');
+    },
     async getLogs() {
       return apiCall('logs_list');
     },
@@ -487,12 +490,13 @@
     }
 
     try {
-      const [fpStatus, dbInfo, updateInfo, fpJobs, dbUpdateStatus] = await Promise.all([
+      const [fpStatus, dbInfo, updateInfo, fpJobs, dbUpdateStatus, localPerformerStats] = await Promise.all([
         SettingsAPI.getFingerprintStatus().catch(() => null),
         SettingsAPI.getDatabaseInfo().catch(() => null),
         SettingsAPI.checkUpdate().catch(() => null),
         SettingsAPI.getFingerprintJobs().catch(() => null),
         SettingsAPI.getDatabaseUpdateStatus().catch(() => null),
+        SettingsAPI.getLocalPerformerStats().catch(() => null),
       ]);
 
       const fpJobActive = !!(fpJobs && fpJobs.jobs || []).find(
@@ -504,6 +508,7 @@
       const dbVersion = (fpStatus && fpStatus.current_db_version) || dbInfo?.version || 'N/A';
       const performerCount = dbInfo?.performer_count || 0;
       const faceCount = dbInfo?.face_count || 0;
+      const localFaceCount = localPerformerStats?.performer_count || 0;
 
       // No database downloaded yet (fresh install) vs. a newer one available --
       // both cases need the same trigger, just different button copy.
@@ -543,6 +548,10 @@
         <div class="ss-db-stat">
           <span class="ss-db-stat-value">${faceCount.toLocaleString()}</span>
           <span class="ss-db-stat-label">Faces</span>
+        </div>
+        <div class="ss-db-stat ss-db-stat-local" title="Faces indexed from this Stash instance's own performer library, not part of the downloaded external database.">
+          <span class="ss-db-stat-value">${localFaceCount.toLocaleString()}</span>
+          <span class="ss-db-stat-label">Local Faces</span>
         </div>
       `;
 

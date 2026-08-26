@@ -1,5 +1,28 @@
 ## 2026-08-26
 
+### 0.14.15 (sidecar only)
+- Fix: `/recommendations/local-performers/sync-one` (the performer
+  create/update/destroy hook handler) constructed `LocalPerformerIndex`
+  with 3 positional args referencing `local_facenet_index_path`/
+  `local_arcface_index_path` -- leftover from the pre-buffalo_l dual
+  FaceNet/ArcFace era. `DatabaseConfig` hasn't had those attributes since
+  the migration to a single unified index; every call to this endpoint
+  has been raising `AttributeError` unconditionally. Since the hook is
+  off by default (Settings > Local Performers), this was live and broken
+  without having been noticed. Fixed to the correct 2-arg constructor
+  already used correctly elsewhere (recognizer.py).
+- Feature: `GET /recommendations/local-performers/stats` -- performer
+  (= face, one vector per performer in this index) count in the local
+  performer index, for the new Settings tab stat box below.
+
+### 0.14.18 (plugin only)
+- Feature: Settings tab's Identification Database section gains a "Local
+  Faces" stat box alongside Version/Performers/Faces, showing how many
+  faces are indexed from this Stash instance's own performer library
+  (distinct from the downloaded external database) -- styled with a
+  distinct info-teal accent so it reads as a different data source at a
+  glance, not a subset of the external counts next to it.
+
 ### 0.14.14 (sidecar only)
 - Fix: applying a delta update ran entirely synchronous, unyielding
   SQLite/usearch work (`apply_delta_db`) directly on the FastAPI event

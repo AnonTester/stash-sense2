@@ -73,6 +73,8 @@ def main():
         result = sidecar_post(sidecar_url, "/database/update", timeout=10)
     elif mode == "db_update_status":
         result = sidecar_get(sidecar_url, "/database/update/status")
+    elif mode == "local_performer_stats":
+        result = sidecar_get(sidecar_url, "/recommendations/local-performers/stats", timeout=10)
     elif mode == "search_performers":
         query = args.get("query", "")
         result = sidecar_post(sidecar_url, "/stash/search-performers", {"query": query})

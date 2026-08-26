@@ -1843,6 +1843,20 @@
   color: #ffc107;
 }
 
+/* Distinguishes stats sourced from this Stash instance's own local
+   performer index (local_performer_index.py) from the main downloaded
+   external database -- same treatment as .ss-db-stat-warning above, just
+   info-teal instead of warning-amber, since this isn't a problem to fix,
+   just a different data source worth telling apart at a glance. */
+.ss-db-stat-local {
+  background: rgba(23, 162, 184, 0.12);
+  border: 1px solid rgba(23, 162, 184, 0.25);
+}
+
+.ss-db-stat-local .ss-db-stat-value {
+  color: var(--bs-info, #17a2b8);
+}
+
 .ss-start-fingerprinting-btn {
   align-self: center;
   white-space: nowrap;
