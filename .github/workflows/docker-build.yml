@@ -62,6 +62,18 @@ jobs:
             type=raw,value=latest,enable=${{ !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') }}
             type=raw,value=beta,enable=${{ contains(github.ref, 'beta') }}
 
+      # github.repository_owner ("AnonTester") is mixed-case; Docker
+      # registry references must be all-lowercase. docker/metadata-action
+      # above lowercases this automatically for the main image tags --
+      # GitHub Actions' own expression syntax has no toLower()/lowercase
+      # function to do the same for the hand-built cache refs below
+      # (confirmed live: a first attempt using a nonexistent toLower()
+      # call failed the workflow outright, before even reaching a build
+      # step), so this does it via bash parameter expansion instead.
+      - name: Lowercase repository owner
+        id: owner
+        run: echo "lower=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -88,16 +100,8 @@ jobs:
           # after that should skip straight past the apt-get/pip stages
           # to `COPY api/ ./` whenever Dockerfile.rocm/requirements.docker.txt
           # haven't changed, which is most releases.
-          # github.repository_owner ("AnonTester") is mixed-case; Docker
-          # registry references must be all-lowercase. docker/metadata-
-          # action (the main image tags above) lowercases this
-          # automatically -- these cache refs are built by hand and don't
-          # get that treatment for free, confirmed live: the very first
-          # tag build after this cache backend switch failed outright with
-          # "repository name ... must be lowercase" on all 3 matrix
-          # variants, never even reaching a build step. toLower() fixes it.
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ toLower(github.repository_owner) }}/${{ matrix.image }}:buildcache
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ toLower(github.repository_owner) }}/${{ matrix.image }}:buildcache,mode=max
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.owner.outputs.lower }}/${{ matrix.image }}:buildcache,mode=max
 
   release:
     needs: build
