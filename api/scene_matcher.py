@@ -316,13 +316,22 @@ def frequency_based_matching(
     performer_scores.sort(key=lambda p: p["weighted_score"], reverse=True)
 
     # Convert to PersonResult format
+    #
+    # min_distance, not avg_distance -- see clustered_frequency_matching's
+    # _to_match_response for the full explanation; same bug, same fix:
+    # selection/gating above is min_distance-based (this function's own
+    # comment at its definition already says "For display, use the match
+    # with the best (lowest) distance"), so displaying avg_distance here
+    # contradicted that and could show 0% for a correctly-identified,
+    # well-matched performer just because they were tracked across enough
+    # frames for weak ones to drag the mean past 1.0.
     persons = []
     for i, p in enumerate(performer_scores[:top_k]):
         match = p["best_match"]
         resp = _match_to_response(
             match,
-            confidence=_distance_to_confidence(p["avg_distance"]),
-            distance=p["avg_distance"],
+            confidence=_distance_to_confidence(p["min_distance"]),
+            distance=p["min_distance"],
         )
         persons.append(PersonResult(
             person_id=i,
@@ -467,12 +476,29 @@ def clustered_frequency_matching(
             continue
 
         # Build all_matches list: best first, then alternatives (up to top_k)
+        #
+        # Shows min_distance (the single best-matching frame), not
+        # avg_distance -- candidate selection above (min_confidence gate,
+        # weighted_score, frame_bonus) is entirely min_distance-based, so
+        # avg_distance here was displaying a number that had nothing to do
+        # with why this candidate won. It also actively fights frame_bonus:
+        # a person tracked across many frames (more chances for a weak/
+        # blurry/off-angle frame to drag the mean up) could show a WORSE
+        # confidence than the same identity tracked in only one or two
+        # clean frames, even though the ranking logic rewards more frames.
+        # Confirmed live: several correctly-identified 30+ frame clusters
+        # (same performer's own db entry, name matched) displayed 0%
+        # confidence via avg_distance > 1.0, while other scenes/frames of
+        # the identical performer/db-entry pairing showed 0.35-0.65
+        # confidence -- a correct identification made to look like a
+        # non-match purely because of how many frames happened to be
+        # tracked alongside the good one(s).
         def _to_match_response(c: dict):
             m = c["best_match"]
             return _match_to_response(
                 m,
-                confidence=_distance_to_confidence(c["avg_distance"]),
-                distance=c["avg_distance"],
+                confidence=_distance_to_confidence(c["min_distance"]),
+                distance=c["min_distance"],
                 already_tagged=c["is_tagged"],
             )
 

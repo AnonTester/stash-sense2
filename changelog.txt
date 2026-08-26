@@ -1,5 +1,40 @@
 ## 2026-08-26
 
+### 0.14.18 (sidecar only)
+- Fix: `GET /recommendations/{id}` only pruned the single row it was
+  called with when a scene_face_match recommendation's referenced scene
+  no longer existed in Stash -- every scene_face_match "entry" the UI
+  shows is actually several raw DB rows (one per detected person +
+  candidate) sharing the same scene_id, grouped into one synthetic
+  representative by `_group_scene_face_match_recommendations`. Deleting
+  only the clicked representative row left its siblings behind, still
+  `pending`, so the group reappeared (rebuilt from the survivors) on the
+  next list load even though the UI had already shown "removed because
+  scene no longer exists" and dropped it from view. Confirmed live:
+  scene 11231 ("ps.ct4") had 18 raw rows; opening it deleted exactly one
+  and left 17 behind. Fixed with a whole-group prune mirroring the one
+  `duplicate_scenes` recommendations already had.
+- Fix: scene face-match identification (`clustered_frequency_matching`,
+  the default `matching_mode="frequency"` used by both the Scene Face
+  Matches recommendation scan and manual scene identify, and
+  `frequency_based_matching`, reached via `matching_mode="hybrid"`)
+  displayed a person-cluster's *average* distance across every tracked
+  frame instead of the *best* frame's distance that had actually
+  qualified and ranked the candidate as the winner. A performer tracked
+  across many frames only needs one or two good matches to correctly win
+  identification (by design -- the gating/ranking logic is entirely
+  best-frame-based), but weaker frames elsewhere in the same cluster
+  (motion blur, side angles, partial occlusion) could drag the *average*
+  distance past 1.0, displaying 0% confidence for a correct match.
+  Confirmed live: several 30+ frame "Cristina Agave" clusters showed 0%
+  despite being the right performer, while the same performer/database
+  entry pairing showed 35-65% confidence in other scenes with fewer
+  tracked frames -- i.e. more frames could make a correct match look
+  *less* confident, the opposite of the frame-count bonus this same
+  logic already rewards during ranking. Now shows the best frame's own
+  distance, consistent with what selected the candidate in the first
+  place.
+
 ### 0.14.17 (sidecar only)
 - Feature: the sidecar now self-checks GitHub once an hour for the
   latest sidecar release and the latest published plugin version (via

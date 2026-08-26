@@ -969,6 +969,67 @@ async def _validate_and_prune_duplicate_scene_group_recommendations(
     return deleted_rec_ids, missing_scene_ids
 
 
+async def _validate_and_prune_scene_face_match_group_recommendations(
+    rec: Recommendation,
+    stash,
+    db: RecommendationsDB,
+) -> tuple[set[int], list[str]]:
+    """Prune stale scene_face_match recommendations across the whole
+    per-scene group, not just the single row `rec` was loaded from.
+
+    Every raw scene_face_match row in a group (one per detected
+    person/candidate) references the same scene_id -- `get_recommendation`
+    is called with the group's synthetic representative id
+    (`_group_scene_face_match_recommendations`'s `top_rec`), so deleting
+    only that one row leaves its siblings behind. Those survivors then
+    get re-grouped into a "new" entry for the same (now-nonexistent)
+    scene on the next list load, which is exactly the bug this mirrors
+    the duplicate-scenes group prune above to fix.
+    """
+    scene_id = _extract_scene_face_match_scene_id(rec)
+    if not scene_id:
+        return set(), []
+
+    group_recs = [
+        candidate
+        for candidate in _load_all_recommendations(
+            db,
+            status=rec.status,
+            type="scene_face_match",
+            target_type=rec.target_type,
+        )
+        if _extract_scene_face_match_scene_id(candidate) == scene_id
+    ]
+    if not group_recs:
+        return set(), []
+
+    try:
+        scene = await stash.get_scene_by_id(scene_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed scene existence check for recommendation %s scene %s: %s",
+            rec.id,
+            scene_id,
+            exc,
+        )
+        return set(), []
+
+    if scene:
+        return set(), []
+
+    deleted_rec_ids: set[int] = set()
+    for candidate in group_recs:
+        db.delete_recommendation(candidate.id)
+        deleted_rec_ids.add(candidate.id)
+    logger.info(
+        "Deleted %d stale scene_face_match recommendation(s): missing scene %s",
+        len(deleted_rec_ids),
+        scene_id,
+    )
+
+    return deleted_rec_ids, [scene_id]
+
+
 @router.get("/settings")
 async def get_all_user_settings():
     """Get all user settings stored in the recommendations DB."""
@@ -1127,6 +1188,20 @@ async def get_recommendation(rec_id: int):
     stash = get_stash_client()
     if rec.type == "duplicate_scenes":
         deleted_rec_ids, missing_scene_ids = await _validate_and_prune_duplicate_scene_group_recommendations(rec, stash, db)
+        if rec_id in deleted_rec_ids:
+            missing_list = ", ".join(missing_scene_ids)
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Recommendation removed because referenced scene no longer exists: "
+                    f"{missing_list}"
+                ),
+            )
+        rec = db.get_recommendation(rec_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail="Recommendation not found")
+    elif rec.type == "scene_face_match":
+        deleted_rec_ids, missing_scene_ids = await _validate_and_prune_scene_face_match_group_recommendations(rec, stash, db)
         if rec_id in deleted_rec_ids:
             missing_list = ", ".join(missing_scene_ids)
             raise HTTPException(
