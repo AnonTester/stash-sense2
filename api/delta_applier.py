@@ -10,6 +10,21 @@ drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
 needed client-side, that already happened when the delta was built.
 
+Two independent halves, both applied by `apply_delta_db` below: the
+`performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
+identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table -- a
+locally-inserted performer's own autoincrement id is never assumed to
+match the server's, since identity doesn't depend on it), and
+`catalogue_performers`/`catalogue_performer_urls`/`catalogue_faces`
+(pornbox.com/seekfans.com/legacy-site performers with no stashbox linkage
+at all -- identity there IS the raw `performers.id`, portable specifically
+because the server's own performers.db is one continuously-evolving file,
+never regenerated from scratch, so a given performer's id is permanent).
+The catalogue tables are strictly additive and may not exist in an
+older delta.db -- `_has_table` guards every read of them, so applying a
+pre-catalogue-support delta through this code is a no-op for that half,
+not an error.
+
 Lifecycle
 ---------
 1. ``find_delta_chain(current_version)`` — walk release history back from
@@ -219,6 +234,56 @@ def _sync_face_count(conn: sqlite3.Connection, performer_id: int) -> None:
     )
 
 
+def _has_table(conn: sqlite3.Connection, name: str) -> bool:
+    """Whether `name` exists in `conn`'s schema -- used to check the
+    `catalogue_*` tables before querying them, since a delta.db built
+    before stash-sense2-data-gen added catalogue-performer support won't
+    have them. An older, unpatched build of this file querying a *newer*
+    delta.db is the mirror case, and needs no code here at all: it simply
+    never runs the new SELECTs below, so the new tables are silently
+    ignored rather than erroring -- exactly why they were added as
+    strictly additive tables server-side (see stash-sense2-data-gen's
+    build/export_delta.py) rather than folded into the existing
+    performers/faces shape."""
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (name,)
+    ).fetchone() is not None
+
+
+def _upsert_catalogue_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> None:
+    """Unlike _upsert_performer (stashbox path), this INSERTs with the
+    server-assigned `id` explicitly rather than letting SQLite
+    autoincrement pick one. That's required, not just tidy: a catalogue
+    performer's universal_id is `f"{source_endpoint}:{performer_id}"`
+    (see export_db_to_json.py's make_catalogue_id) -- it has no
+    stashbox_ids row to resolve identity through the way stashbox
+    performers do, so the raw id itself IS the portable identity, and
+    only stays portable if this client never invents its own."""
+    conn.execute(
+        """
+        INSERT INTO performers (id, canonical_name, gender, country, image_url, face_count, updated_at)
+        VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
+        ON CONFLICT(id) DO UPDATE SET
+            canonical_name = excluded.canonical_name, gender = excluded.gender,
+            country = excluded.country, image_url = excluded.image_url,
+            updated_at = datetime('now')
+        """,
+        (p["id"], p["canonical_name"], p["gender"], p["country"], p["image_url"]),
+    )
+
+
+def _upsert_catalogue_performer_url(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+    exists = conn.execute(
+        "SELECT 1 FROM performer_urls WHERE performer_id = ? AND url = ?",
+        (row["performer_id"], row["url"]),
+    ).fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO performer_urls (performer_id, url, url_type, source_endpoint) VALUES (?, ?, ?, ?)",
+            (row["performer_id"], row["url"], row["url_type"], row["source_endpoint"]),
+        )
+
+
 def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
     """Apply one delta.db onto the live performers.db + usearch index in
     `data_dir`. Does not touch faces.json/performers.json/manifest.json —
@@ -278,6 +343,35 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
             touched_performers.add(row[0])
         faces_removed += 1
 
+    # Catalogue-sourced (pornbox/seekfans/legacy-site) performers/faces --
+    # see _has_table's docstring and stash-sense2-data-gen's
+    # build/export_delta.py for why these are separate, additive tables
+    # rather than folded into the loops above.
+    catalogue_upserted = catalogue_faces_added = 0
+    if _has_table(delta_conn, "catalogue_performers"):
+        for p in delta_conn.execute("SELECT * FROM catalogue_performers"):
+            _upsert_catalogue_performer(conn, p)
+            touched_performers.add(p["id"])
+            catalogue_upserted += 1
+
+        for row in delta_conn.execute("SELECT * FROM catalogue_performer_urls"):
+            _upsert_catalogue_performer_url(conn, row)
+
+        for f in delta_conn.execute("SELECT * FROM catalogue_faces"):
+            vec = np.frombuffer(f["embedding"], dtype=np.float32)
+            index.add(f["embedding_index"], vec)
+            conn.execute(
+                """
+                INSERT INTO faces (performer_id, embedding_index, image_url,
+                                    source_endpoint, quality_score, yaw)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (f["performer_id"], f["embedding_index"], f["image_url"],
+                 f["source_endpoint"], f["quality_score"], f["yaw"]),
+            )
+            touched_performers.add(f["performer_id"])
+            catalogue_faces_added += 1
+
     for pid in touched_performers:
         _sync_face_count(conn, pid)
 
@@ -290,6 +384,8 @@ def apply_delta_db(delta_db_path: Path, data_dir: Path) -> dict[str, int]:
     return {
         "performers_upserted": upserted, "performers_removed": removed,
         "faces_added": faces_added, "faces_removed": faces_removed,
+        "catalogue_performers_upserted": catalogue_upserted,
+        "catalogue_faces_added": catalogue_faces_added,
     }
 
 
@@ -348,7 +444,8 @@ async def apply_delta_chain(
     work_dir = data_dir / f"delta_work_{int(time.time())}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0}
+    totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0,
+              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0}
 
     try:
         for i, hop in enumerate(chain):

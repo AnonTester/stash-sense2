@@ -16,7 +16,12 @@ The script will:
 3. Validate the output matches the usearch index
 
 Run this script after copying a new performers.db from stash-sense2-data-gen,
-or after updating the database in any way.
+or after updating the database in any way. Also called by
+delta_applier.py's apply_delta_chain() to regenerate both files after a
+delta chain applies -- universal_id has three shapes (stashbox, local,
+catalogue) matching stash-sense2-data-gen's build/export_json.py exactly;
+see make_catalogue_id()'s docstring for why this file needs to stay in
+sync with that one.
 """
 import argparse
 import json
@@ -42,6 +47,84 @@ def make_universal_id(endpoint: str, stashbox_id: str) -> str:
     return f"{domain}:{stashbox_id}"
 
 
+def make_catalogue_id(source_endpoint: str, performer_id: int) -> str:
+    """Universal ID for a performer with no stashbox linkage at all --
+    e.g. "pornbox:176428", "seekfans:4821". Ported from
+    stash-sense2-data-gen's build/export_json.py (the server-side
+    counterpart of this exact function) -- this file had drifted out of
+    sync with that fix (which added catalogue-performer support to the
+    *server's* full-zip export) until stash-sense2-data-gen's own delta
+    package started shipping catalogue performers too: without this,
+    applying such a delta and then re-exporting locally (this script is
+    exactly what apply_delta_chain() calls after a delta applies) would
+    silently drop every catalogue performer from faces.json/
+    performers.json all over again, the same bug the server-side fix
+    already solved once."""
+    return f"{source_endpoint}:{performer_id}"
+
+
+def _performer_universal_ids(conn: sqlite3.Connection) -> dict:
+    """One universal_id per performer_id -- a real stashbox linkage first
+    (highest source priority wins if a performer somehow has more than
+    one), then a catalogue id (performer_urls.url_type='catalogue') for
+    performers with none, then whichever face source_endpoint is on file
+    as a last resort (matches build/export_json.py's own three-tier
+    fallback exactly, including its rationale for the third tier: a
+    handful of legacy performers predate performer_urls entirely)."""
+    priority_sql = """
+        CASE endpoint
+            WHEN 'stashdb' THEN 1
+            WHEN 'theporndb' THEN 2
+            WHEN 'fansdb' THEN 3
+            WHEN 'pmvstash' THEN 4
+            WHEN 'javstash' THEN 5
+            ELSE 6
+        END
+    """
+    ids: dict = {}
+    best_priority: dict = {}
+    for performer_id, endpoint, stashbox_id, priority in conn.execute(f"""
+        SELECT performer_id, endpoint, stashbox_performer_id, {priority_sql}
+        FROM stashbox_ids
+    """):
+        if performer_id not in best_priority or priority < best_priority[performer_id]:
+            best_priority[performer_id] = priority
+            ids[performer_id] = make_universal_id(endpoint, stashbox_id)
+
+    for performer_id, source_endpoint in conn.execute("""
+        SELECT performer_id, source_endpoint FROM performer_urls WHERE url_type = 'catalogue'
+    """):
+        if performer_id not in ids:
+            ids[performer_id] = make_catalogue_id(source_endpoint, performer_id)
+
+    for performer_id, source_endpoint in conn.execute("""
+        SELECT performer_id, source_endpoint FROM faces GROUP BY performer_id
+    """):
+        if performer_id not in ids:
+            ids[performer_id] = make_catalogue_id(source_endpoint, performer_id)
+
+    return ids
+
+
+def _catalogue_links(conn: sqlite3.Connection) -> dict:
+    """performer_id -> {"source", "catalogue_url", "profile_url"} for
+    performers with a catalogue (non-stashbox) universal_id. Ported
+    verbatim from build/export_json.py -- see that module for the
+    reasoning."""
+    links: dict = {}
+    for performer_id, url, url_type, source_endpoint in conn.execute("""
+        SELECT performer_id, url, url_type, source_endpoint FROM performer_urls
+        WHERE url_type IN ('catalogue', 'profile')
+    """):
+        entry = links.setdefault(performer_id, {"source": None, "catalogue_url": None, "profile_url": None})
+        if url_type == "catalogue":
+            entry["source"] = source_endpoint
+            entry["catalogue_url"] = url
+        elif url_type == "profile":
+            entry["profile_url"] = url
+    return {pid: v for pid, v in links.items() if v["source"]}
+
+
 def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
     """Export faces.json - list of universal IDs indexed by usearch index.
 
@@ -50,49 +133,20 @@ def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
 
     Returns the number of faces exported.
     """
-    cursor = conn.cursor()
+    universal_ids = _performer_universal_ids(conn)
 
-    # Get all faces with their stashbox IDs in a single query
-    # This avoids cursor reuse issues and is much faster
-    cursor.execute("""
-        SELECT f.embedding_index, s.endpoint, s.stashbox_performer_id, p.canonical_name
-        FROM faces f
-        JOIN performers p ON f.performer_id = p.id
-        JOIN stashbox_ids s ON p.id = s.performer_id
-        ORDER BY f.embedding_index,
-            CASE s.endpoint
-                WHEN 'stashdb' THEN 1
-                WHEN 'theporndb' THEN 2
-                WHEN 'fansdb' THEN 3
-                WHEN 'pmvstash' THEN 4
-                WHEN 'javstash' THEN 5
-                ELSE 6
-            END
-    """)
+    cursor = conn.execute("SELECT embedding_index, performer_id FROM faces ORDER BY embedding_index")
 
     faces = []
-    last_index = -1
-    skipped_duplicates = 0
     gap_count = 0
 
-    for embedding_index, endpoint, stashbox_id, name in cursor:
-        # Skip duplicate rows (same face, different stashbox endpoint)
-        # We only want the first (highest priority) endpoint per face
-        if embedding_index == last_index:
-            skipped_duplicates += 1
-            continue
-        last_index = embedding_index
-
-        universal_id = make_universal_id(endpoint, stashbox_id)
-
-        # Ensure we're filling indices sequentially
+    for embedding_index, performer_id in cursor:
         while len(faces) < embedding_index:
-            # Fill gaps with placeholder - happens when faces exist but performer
-            # has no stashbox ID (data issue in trainer)
             gap_count += 1
             faces.append(None)
-
-        faces.append(universal_id)
+        faces.append(universal_ids.get(performer_id))
+        if faces[-1] is None:
+            gap_count += 1
 
     # Write output
     with open(output_path, "w") as f:
@@ -101,9 +155,7 @@ def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
     valid_faces = len(faces) - gap_count
     print(f"  Exported {valid_faces} faces ({len(faces)} total indices) to {output_path}")
     if gap_count:
-        print(f"  WARNING: {gap_count} gaps filled with null (performers missing stashbox IDs)")
-    if skipped_duplicates:
-        print(f"  (Skipped {skipped_duplicates} duplicate stashbox entries)")
+        print(f"  WARNING: {gap_count} gaps filled with null (performer has neither a stashbox link nor a catalogue source)")
     return len(faces)
 
 
@@ -118,60 +170,60 @@ def export_performers_json(conn: sqlite3.Connection, output_path: Path) -> int:
             "image_url": "https://...",
             "face_count": 4
         },
+        "pornbox:176428": {
+            "name": "Aleks",
+            "country": "RU",
+            "image_url": "https://...",
+            "face_count": 1,
+            "source": "pornbox",
+            "catalogue_url": "https://www.pornbox.com/application/model/930",
+            "profile_url": null
+        },
         ...
     }
 
     Returns the number of performers exported.
     """
-    cursor = conn.cursor()
+    universal_ids = _performer_universal_ids(conn)
+    catalogue_links = _catalogue_links(conn)
 
-    # Get all performers with faces, joined with their stashbox IDs
-    # Single query to avoid cursor reuse issues
-    cursor.execute("""
-        SELECT p.id, p.canonical_name, p.country, p.image_url, p.face_count,
-               s.endpoint, s.stashbox_performer_id
-        FROM performers p
-        JOIN stashbox_ids s ON p.id = s.performer_id
-        WHERE p.face_count > 0
-        ORDER BY p.id,
-            CASE s.endpoint
-                WHEN 'stashdb' THEN 1
-                WHEN 'theporndb' THEN 2
-                WHEN 'fansdb' THEN 3
-                WHEN 'pmvstash' THEN 4
-                WHEN 'javstash' THEN 5
-                ELSE 6
-            END
+    cursor = conn.execute("""
+        SELECT id, canonical_name, country, image_url, face_count
+        FROM performers WHERE face_count > 0
     """)
 
     performers = {}
-    last_performer_id = -1
-    skipped_duplicates = 0
+    for performer_id, name, country, image_url, face_count in cursor:
+        universal_id = universal_ids.get(performer_id)
+        if universal_id is None:
+            continue  # matches the null gap left in faces.json for this performer
 
-    for performer_id, name, country, image_url, face_count, endpoint, stashbox_id in cursor:
-        # Skip duplicate rows (same performer, different stashbox endpoint)
-        # We only want the first (highest priority) endpoint per performer
-        if performer_id == last_performer_id:
-            skipped_duplicates += 1
-            continue
-        last_performer_id = performer_id
-
-        universal_id = make_universal_id(endpoint, stashbox_id)
-
-        performers[universal_id] = {
+        entry = {
             "name": name,
             "country": country,
             "image_url": image_url,
             "face_count": face_count or 0,
         }
+        # A catalogue-shaped id (no "." in its prefix, unlike "stashdb.org"
+        # etc., and not "local") needs its source/links surfaced so the
+        # UI renders it as a catalogue match instead of a broken stashbox
+        # one -- see build/export_json.py's own comment for why this is
+        # derived from the id's own shape rather than solely from having
+        # a performer_urls row (the third-tier fallback above produces a
+        # catalogue id with no matching row at all).
+        prefix = universal_id.split(":", 1)[0]
+        if prefix != "local" and "." not in prefix:
+            link = catalogue_links.get(performer_id, {})
+            entry["source"] = link.get("source") or prefix
+            entry["catalogue_url"] = link.get("catalogue_url")
+            entry["profile_url"] = link.get("profile_url")
+        performers[universal_id] = entry
 
     # Write output
     with open(output_path, "w") as f:
         json.dump(performers, f, indent=2)
 
     print(f"  Exported {len(performers)} performers to {output_path}")
-    if skipped_duplicates:
-        print(f"  (Skipped {skipped_duplicates} duplicate stashbox entries)")
     return len(performers)
 
 
