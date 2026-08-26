@@ -140,6 +140,24 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
             scene_title = scene.get("title") or f"Scene {scene_id}"
 
             try:
+                # require_db_available() was only awaited once, before this
+                # loop started -- it's both the lazy-loader AND the idle-
+                # timer touch (see its own docstring), normally re-run on
+                # every request via FastAPI's Depends() on the real
+                # /identify/scene endpoint. This loop calls
+                # _identify_scene_impl directly, bypassing that dependency,
+                # so on a run long enough to cross the idle timeout (30 min
+                # default) the face recognition model got unloaded
+                # mid-scan and never reloaded -- every remaining scene
+                # failed for the rest of the run with "'NoneType' object
+                # has no attribute 'generator'". Confirmed live: a 1144-
+                # scene full scan failed on 820 of them (72%) this way,
+                # including the exact scene a user reported a confidence
+                # bug on, so it never got a fresh recommendation from that
+                # run at all. Re-checking every iteration reloads if
+                # evicted and resets the idle timer so it doesn't happen
+                # again for the rest of a long scan.
+                await require_db_available()
                 request = SceneIdentifyRequest(
                     scene_id=scene_id,
                     top_k=TOP_K_PER_PERSON,

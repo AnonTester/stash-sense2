@@ -1,4 +1,21 @@
-## 2026-08-26
+## 2026-08-27
+
+### 0.14.21 (sidecar only)
+- Fix: the Scene Face Matches analyzer's full-scan loop called
+  `_identify_scene_impl` directly for every candidate scene, bypassing
+  the `require_db_available` FastAPI dependency the real `/identify/
+  scene` endpoint normally re-runs on every request -- which is both the
+  lazy-loader for the face recognition model AND what resets its idle-
+  unload timer (see that function's own docstring). Only calling it once
+  before the loop meant a scan long enough to cross the 30-minute idle
+  timeout got its model unloaded mid-scan and never reloaded, silently
+  failing every remaining scene for the rest of the run with `'NoneType'
+  object has no attribute 'generator'`. Confirmed live: a 1144-scene
+  full scan failed on 820 of them (72%) this way -- including the exact
+  scene a prior confidence-display bug report was about, which as a
+  result never got a corrected recommendation from that run at all. Now
+  re-checked on every scene, so it reloads if evicted and never goes
+  idle for the rest of a long-running scan.
 
 ### 0.14.20 (sidecar only)
 - Fix: even with the previous fix's ranking/display alignment inside
