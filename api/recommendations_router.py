@@ -728,9 +728,24 @@ def _group_scene_face_match_recommendations(recs: list[Recommendation]) -> list[
 
     grouped_recs: list[Recommendation] = []
     for group in grouped.values():
+        # is_best_match first (not raw confidence) -- the analyzer picks
+        # is_best_match via a frame-count-weighted score (rewards a
+        # performer appearing consistently across the tracked cluster,
+        # not just whoever's single best frame happens to be a hair
+        # closer), so it can legitimately differ from whichever candidate
+        # has the single highest confidence value. Sorting by confidence
+        # alone put a higher-confidence, non-preselected candidate ahead
+        # of the actually-preselected one -- confirmed live (a 59.9%
+        # candidate listed first while a 59.2% candidate was the one
+        # pre-checked) -- so the preselected candidate must always sort
+        # first, with confidence only as the tiebreaker among the rest.
         candidates = sorted(
             group["candidates"],
-            key=lambda c: (int(c.get("person_id") or 0), -(float(c.get("confidence") or 0.0))),
+            key=lambda c: (
+                int(c.get("person_id") or 0),
+                not c.get("is_best_match"),
+                -(float(c.get("confidence") or 0.0)),
+            ),
         )
         if not candidates:
             continue

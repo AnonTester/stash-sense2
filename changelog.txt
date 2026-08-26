@@ -1,5 +1,21 @@
 ## 2026-08-26
 
+### 0.14.20 (sidecar only)
+- Fix: even with the previous fix's ranking/display alignment inside
+  `aggregate_matches`, the Scene Face Matches recommendation list could
+  still show its pre-selected (`is_best_match`) candidate somewhere
+  other than first. The analyzer's `is_best_match` pick and each
+  candidate's stored `confidence` are computed differently on purpose
+  (`is_best_match` uses a frame-count-weighted score that rewards a
+  performer appearing consistently across the tracked cluster, not just
+  whoever's single best frame happens to be a touch closer) -- but the
+  recommendations list only ever sorted candidates by raw confidence,
+  with no awareness of which one was actually pre-selected. Confirmed
+  live: a 59.9%-confidence candidate listed first while a 59.2%
+  candidate was the one pre-checked. The pre-selected candidate now
+  always sorts first within its person group; confidence is only the
+  tiebreaker among the rest.
+
 ### 0.14.19 (sidecar only)
 - Fix: `aggregate_matches` (the `matching_mode="cluster"` function the
   Scene Face Matches recommendation job hardcodes) still showed 0%
