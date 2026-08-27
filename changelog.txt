@@ -1,5 +1,29 @@
 ## 2026-08-27
 
+### 0.14.22 (sidecar only)
+- Feature: soft gender-mismatch confidence penalty for face matching.
+  Adds a standalone buffalo_l `genderage` model (kept separate from the
+  main detection+recognition pipeline, invoked only on the query face
+  actually being matched, with our own softmax wrapper for a real
+  confidence value -- insightface's own `Attribute.get()` only returns a
+  hard label with no confidence at all) alongside a new
+  `inferred_gender`/`inferred_gender_confidence` field on each performer
+  (a buffalo_l-derived aggregate across their own reference faces,
+  exported by stash-sense2-data-gen -- see that project's own changelog).
+  When both the query face's own predicted gender and a candidate's
+  gender (real source value if known, else the confident inferred one)
+  are confidently known and disagree, that candidate's confidence is
+  multiplied down (never excluded outright -- a hard filter would
+  silently hide a correct match whenever either side's signal is wrong,
+  a real risk for a model-inferred value). New `gender_confidence_floor`
+  (0.65) / `gender_mismatch_penalty` (0.5) tunables in `MatchingConfig`.
+  No UI change yet -- this only affects match ranking/confidence;
+  requires data-gen's next published database (or a delta) to actually
+  populate `inferred_gender` before it does anything for most
+  performers. Also fixes `api/delta_applier.py`/`export_db_to_json.py`
+  to carry the new performer fields through an incremental delta update,
+  not just a full database download.
+
 ### 0.14.21 (plugin only)
 - Fix: the "Add as..." search-for-existing-performer modal on scene/
   gallery pages showed a broken image for every search result. Its

@@ -145,6 +145,23 @@ async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> 
 # Applying a single delta.db onto the live data files
 # ---------------------------------------------------------------------------
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    """Idempotently ADD COLUMN any of `columns` (name -> SQL type) missing
+    from `table`. A full download always gets a fresh performers.db with
+    whatever schema stash-sense2-data-gen's build/assemble.py last
+    produced (never needs migrating), but a delta patches whatever
+    performers.db a given install already has on disk -- one that's only
+    ever been delta-updated since before this feature landed would never
+    otherwise pick up the new `performers.inferred_gender`/
+    `inferred_gender_confidence` columns _upsert_performer/
+    _upsert_catalogue_performer below now write to. Mirrors
+    stash-sense2-data-gen's own build/schema.py::ensure_columns exactly."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, sql_type in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
 def _get_performer_id(conn: sqlite3.Connection, endpoint: str, stashbox_id: str) -> Optional[int]:
     row = conn.execute(
         """
@@ -168,6 +185,15 @@ def _upsert_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> int:
         hair_color=p["hair_color"], career_start_year=p["career_start_year"],
         career_end_year=p["career_end_year"],
         image_url=images[0]["url"] if images else None,
+        # buffalo_l-inferred soft signal from stash-sense2-data-gen's own
+        # recompute_inferred_gender() -- present in the delta row (see
+        # export_delta.py) whenever the source delta was built after that
+        # feature landed; keys() guards against an older delta.db that
+        # predates it, same posture as the catalogue_* table guards below.
+        inferred_gender=p["inferred_gender"] if "inferred_gender" in p.keys() else None,
+        inferred_gender_confidence=(
+            p["inferred_gender_confidence"] if "inferred_gender_confidence" in p.keys() else None
+        ),
     )
 
     if performer_id is None:
@@ -176,11 +202,13 @@ def _upsert_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> int:
             INSERT INTO performers (
                 canonical_name, disambiguation, gender, country, ethnicity, birth_date,
                 death_date, height_cm, eye_color, hair_color, career_start_year,
-                career_end_year, image_url, face_count, updated_at, stashdb_updated_at
+                career_end_year, image_url, face_count, updated_at, stashdb_updated_at,
+                inferred_gender, inferred_gender_confidence
             ) VALUES (
                 :canonical_name, :disambiguation, :gender, :country, :ethnicity, :birth_date,
                 :death_date, :height_cm, :eye_color, :hair_color, :career_start_year,
-                :career_end_year, :image_url, 0, datetime('now'), :stashdb_updated_at
+                :career_end_year, :image_url, 0, datetime('now'), :stashdb_updated_at,
+                :inferred_gender, :inferred_gender_confidence
             )
             """,
             {**fields, "stashdb_updated_at": p["updated"] if endpoint == "stashdb" else None},
@@ -267,16 +295,24 @@ def _upsert_catalogue_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> Non
     stashbox_ids row to resolve identity through the way stashbox
     performers do, so the raw id itself IS the portable identity, and
     only stays portable if this client never invents its own."""
+    inferred_gender = p["inferred_gender"] if "inferred_gender" in p.keys() else None
+    inferred_gender_confidence = (
+        p["inferred_gender_confidence"] if "inferred_gender_confidence" in p.keys() else None
+    )
     conn.execute(
         """
-        INSERT INTO performers (id, canonical_name, gender, country, image_url, face_count, updated_at)
-        VALUES (?, ?, ?, ?, ?, 0, datetime('now'))
+        INSERT INTO performers (id, canonical_name, gender, country, image_url, face_count,
+                                 updated_at, inferred_gender, inferred_gender_confidence)
+        VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             canonical_name = excluded.canonical_name, gender = excluded.gender,
             country = excluded.country, image_url = excluded.image_url,
+            inferred_gender = excluded.inferred_gender,
+            inferred_gender_confidence = excluded.inferred_gender_confidence,
             updated_at = datetime('now')
         """,
-        (p["id"], p["canonical_name"], p["gender"], p["country"], p["image_url"]),
+        (p["id"], p["canonical_name"], p["gender"], p["country"], p["image_url"],
+         inferred_gender, inferred_gender_confidence),
     )
 
 
@@ -313,6 +349,10 @@ def apply_delta_db(
     """
     conn = sqlite3.connect(data_dir / "performers.db")
     conn.execute("PRAGMA foreign_keys = ON")
+    _ensure_columns(conn, "performers", {
+        "inferred_gender": "TEXT", "inferred_gender_confidence": "REAL",
+    })
+    conn.commit()
 
     index = Index(ndim=512, metric="cos")
     index_path = data_dir / "face_embeddings.usearch"

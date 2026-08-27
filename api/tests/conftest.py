@@ -16,6 +16,8 @@ _ML_MODULES = [
     "usearch.index",
     "insightface",
     "insightface.app",
+    "insightface.model_zoo",
+    "insightface.model_zoo.attribute",
     "insightface.utils",
     "insightface.utils.face_align",
 ]

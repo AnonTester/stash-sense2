@@ -16,6 +16,13 @@
       "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
       "group": "face_recognition",
       "description": "buffalo_l ResNet50@WebFace600K face recognition model"
+    },
+    "buffalo_l_genderage": {
+      "file": "models/buffalo_l/genderage.onnx",
+      "size": 1322532,
+      "sha256": "4fde69b1c810857b88c64a335084f1c3fe8f01246c9a191b48c7bb756d6652fb",
+      "group": "face_recognition",
+      "description": "buffalo_l gender/age classifier (used standalone for a soft cross-gender matching signal, not part of the detection+recognition pipeline)"
     }
   }
 }

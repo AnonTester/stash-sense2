@@ -818,22 +818,22 @@ async def _process_sprite_frames(
     if not sprite_frames:
         return []
 
-    detected: list[tuple[float, "DetectedFace"]] = []
+    detected: list[tuple[float, "DetectedFace", "np.ndarray"]] = []
     for sf in sprite_frames:
         faces = _recognizer.generator.detect_faces(sf.image, min_confidence=min_face_confidence)
         for face in faces:
             if face.bbox["w"] >= min_face_size and face.bbox["h"] >= min_face_size:
-                detected.append((sf.timestamp, face))
+                detected.append((sf.timestamp, face, sf.image))
 
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite: {len(sprite_frames)} tiles, {len(detected)} usable faces")
     if not detected:
         return []
 
-    embeddings = _recognizer.generator.get_embeddings_batch([face for _, face in detected])
+    embeddings = _recognizer.generator.get_embeddings_batch([face for _, face, _ in detected])
 
     extra_results: list[tuple[int, RecognitionResult]] = []
-    for (_, face), embedding in zip(detected, embeddings):
-        matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
+    for (_, face, tile_image), embedding in zip(detected, embeddings):
+        matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=tile_image)
         extra_results.append((-2, RecognitionResult(face=face, matches=matches, embedding=embedding)))
 
     return extra_results
@@ -1158,7 +1158,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
 
     # Phase 1: Detect all faces from all frames
     _set_stage(request.scene_id, "analyzing_frames")
-    detected_faces: list[tuple[int, "DetectedFace"]] = []  # (frame_index, face)
+    detected_faces: list[tuple[int, "DetectedFace", "np.ndarray"]] = []  # (frame_index, face, frame_image)
     total_faces = 0
     t_detect_total = 0.0
 
@@ -1174,7 +1174,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
         for face in faces:
             total_faces += 1
             if face.bbox["w"] >= request.min_face_size and face.bbox["h"] >= request.min_face_size:
-                detected_faces.append((frame.frame_index, face))
+                detected_faces.append((frame.frame_index, face, frame.image))
 
     filtered_faces = len(detected_faces)
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Detection: {t_detect_total:.1f}s | {total_faces} detected, {filtered_faces} after filter")
@@ -1182,7 +1182,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
     # Phase 2: read back embeddings buffalo_l already computed during detection
     t_embed = time.time()
     if detected_faces:
-        embeddings = _recognizer.generator.get_embeddings_batch([face for _, face in detected_faces])
+        embeddings = _recognizer.generator.get_embeddings_batch([face for _, face, _ in detected_faces])
     else:
         embeddings = []
     t_embed_total = time.time() - t_embed
@@ -1195,9 +1195,9 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
     # NOTE: face_cache_rows/save_face_signal_cache removed for this
     # migration -- see the comment where rows used to be appended, below.
 
-    for (frame_idx, face), embedding in zip(detected_faces, embeddings):
+    for (frame_idx, face, frame_image), embedding in zip(detected_faces, embeddings):
         t_rec = time.time()
-        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
+        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=frame_image)
         t_recognize_total += time.time() - t_rec
 
         result = RecognitionResult(face=face, matches=matches, embedding=embedding)
@@ -1248,7 +1248,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
                     if ss_faces:
                         ss_embeddings = _recognizer.generator.get_embeddings_batch(ss_faces)
                         for face, emb in zip(ss_faces, ss_embeddings):
-                            matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb)
+                            matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb, image=screenshot_image)
                             result = RecognitionResult(face=face, matches=matches, embedding=emb)
                             all_results.append((-1, result))
                             screenshot_faces += 1

@@ -28,7 +28,9 @@ falling back to CPU.
 """
 import os
 import io
+import logging
 import warnings
+import cv2
 import numpy as np
 from PIL import Image
 from typing import Optional
@@ -36,6 +38,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from insightface.app import FaceAnalysis
+from insightface.model_zoo.attribute import Attribute
+from insightface.utils import face_align
+
+logger = logging.getLogger(__name__)
 
 warnings.filterwarnings(
     "ignore",
@@ -127,6 +133,8 @@ class FaceEmbeddingGenerator:
                 models_dir = MODELS_DIR
         self._models_dir = models_dir
         self._face_analyzer = None
+        self._gender_model: Optional[Attribute] = None
+        self._gender_model_load_attempted = False
 
     def _ort_providers(self) -> list[str]:
         """Get ONNX Runtime providers based on device."""
@@ -168,6 +176,84 @@ class FaceEmbeddingGenerator:
                 det_size=(det_size, det_size),
             )
         return self._face_analyzer
+
+    @property
+    def gender_model(self) -> Optional[Attribute]:
+        """Lazy-loaded, standalone `genderage.onnx` session -- deliberately
+        *not* part of `face_analyzer`'s `allowed_modules` (see that
+        property's own comment): we don't want `FaceAnalysis.get()`
+        auto-running this on every detected face via its own hard-argmax,
+        no-confidence `Attribute.get()`. Loaded manually, invoked only on
+        faces this pipeline is already processing (a query face during
+        identification), with our own softmax wrapper below for a real
+        confidence value. Mirrors data-gen's own embed/embeddings.py
+        exactly -- same reasoning applies to why this must stay identical
+        between the two: a database-side gender label and a query-side
+        one computed differently would be silently, systematically
+        inconsistent.
+
+        Returns None (not an exception) if the file isn't present (e.g.
+        not yet downloaded via Settings -> Models) -- gender-based
+        matching is an enhancement, never a hard requirement for face
+        recognition to keep working."""
+        if self._gender_model_load_attempted:
+            return self._gender_model
+        self._gender_model_load_attempted = True
+
+        model_path = Path(self._models_dir) / "models" / "buffalo_l" / "genderage.onnx"
+        if not model_path.exists():
+            logger.warning("genderage.onnx not found at %s -- gender-based matching disabled", model_path)
+            return None
+
+        import onnxruntime as ort
+        session = ort.InferenceSession(str(model_path), providers=self._ort_providers())
+        model = Attribute(model_file=str(model_path), session=session)
+        model.prepare(ctx_id=0 if self.device == "gpu" else -1)
+        self._gender_model = model
+        return self._gender_model
+
+    def predict_gender_age(self, face: "DetectedFace", image: np.ndarray) -> Optional[tuple[str, float, int]]:
+        """Predict (gender, gender_confidence, estimated_age) for one
+        already-detected face, reusing the same full `image` (not the
+        cropped `face.image`) `detect_faces()` was called on.
+
+        Replicates `insightface.model_zoo.attribute.Attribute.get()`'s own
+        bbox-centered crop and preprocessing exactly (same
+        `face_align.transform`, same input mean/std it auto-detected at
+        load time) but keeps the raw 2-class gender logits to apply softmax
+        ourselves instead of `Attribute.get()`'s bare `np.argmax` (no
+        confidence at all). Age is read off the same raw prediction
+        `Attribute.get()` already computes it from (`pred[2] * 100`) --
+        free, since it's the same forward pass. Mirrors data-gen's own
+        embed/embeddings.py exactly.
+
+        Returns None if `genderage.onnx` isn't available.
+        """
+        model = self.gender_model
+        if model is None:
+            return None
+
+        x1, y1 = face.bbox["x"], face.bbox["y"]
+        x2, y2 = x1 + face.bbox["w"], y1 + face.bbox["h"]
+        center = ((x1 + x2) / 2, (y1 + y2) / 2)
+        input_size = model.input_size[0]
+        scale = input_size / (max(x2 - x1, y2 - y1) * 1.5)
+        aligned, _ = face_align.transform(image, center, input_size, scale, 0)
+        aligned_size = tuple(aligned.shape[0:2][::-1])
+        blob = cv2.dnn.blobFromImage(
+            aligned, 1.0 / model.input_std, aligned_size,
+            (model.input_mean, model.input_mean, model.input_mean), swapRB=True,
+        )
+        pred = model.session.run(model.output_names, {model.input_name: blob})[0][0]
+
+        gender_logits = pred[:2]
+        exp = np.exp(gender_logits - np.max(gender_logits))
+        probs = exp / exp.sum()
+        idx = int(np.argmax(probs))
+        gender = "FEMALE" if idx == 0 else "MALE"
+        confidence = float(probs[idx])
+        age = int(np.round(float(pred[2]) * 100))
+        return gender, confidence, age
 
     def detect_faces(
         self,

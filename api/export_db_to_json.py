@@ -188,12 +188,14 @@ def export_performers_json(conn: sqlite3.Connection, output_path: Path) -> int:
     catalogue_links = _catalogue_links(conn)
 
     cursor = conn.execute("""
-        SELECT id, canonical_name, country, image_url, face_count
+        SELECT id, canonical_name, country, image_url, face_count,
+               gender, inferred_gender, inferred_gender_confidence
         FROM performers WHERE face_count > 0
     """)
 
     performers = {}
-    for performer_id, name, country, image_url, face_count in cursor:
+    for (performer_id, name, country, image_url, face_count,
+         gender, inferred_gender, inferred_gender_confidence) in cursor:
         universal_id = universal_ids.get(performer_id)
         if universal_id is None:
             continue  # matches the null gap left in faces.json for this performer
@@ -203,6 +205,13 @@ def export_performers_json(conn: sqlite3.Connection, output_path: Path) -> int:
             "country": country,
             "image_url": image_url,
             "face_count": face_count or 0,
+            # See build/export_json.py (data-gen) for the full explanation --
+            # `gender` is the real source value when known, `inferred_gender`/
+            # `inferred_gender_confidence` are the buffalo_l-derived soft
+            # signal used by matching.py's gender-mismatch penalty.
+            "gender": gender,
+            "inferred_gender": inferred_gender,
+            "inferred_gender_confidence": inferred_gender_confidence,
         }
         # A catalogue-shaped id (no "." in its prefix, unlike "stashdb.org"
         # etc., and not "local") needs its source/links surfaced so the

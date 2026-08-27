@@ -144,6 +144,129 @@ class TestBuildMatches:
         assert result.matches[0].name == "Unknown"
 
 
+class TestGenderMismatchPenalty:
+    """build_matches()'s soft gender-mismatch confidence penalty -- see
+    matching.py's own _effective_gender/_apply_gender_penalty."""
+
+    def _query_result(self, neighbors, distances):
+        return IndexQueryResult(
+            neighbors=np.array(neighbors, dtype=np.int64),
+            distances=np.array(distances, dtype=np.float32),
+        )
+
+    def test_confident_mismatch_penalizes_confidence_and_distance(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "MALE"}}
+        config = MatchingConfig(gender_confidence_floor=0.65, gender_mismatch_penalty=0.5)
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers, config,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        match = result.matches[0]
+        assert match.confidence == pytest.approx(0.8 * 0.5)
+        # combined_distance must stay consistent with the penalized
+        # confidence -- ranking/threshold-filtering read combined_distance,
+        # not confidence, so a penalty that only touched confidence would
+        # be invisible to them.
+        assert match.combined_distance == pytest.approx(1.0 - match.confidence)
+
+    def test_agreement_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "FEMALE"}}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_low_confidence_query_gender_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "MALE"}}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.3,  # below default floor
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_low_confidence_inferred_gender_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {
+            "name": "Performer 0", "inferred_gender": "MALE", "inferred_gender_confidence": 0.5,
+        }}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_confident_inferred_gender_is_used_when_source_missing(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {
+            "name": "Performer 0", "inferred_gender": "MALE", "inferred_gender_confidence": 0.9,
+        }}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8 * 0.5)
+
+    def test_source_gender_takes_precedence_over_inferred(self):
+        # Source says FEMALE (agrees with query) even though inferred says
+        # MALE -- source must win, no penalty.
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {
+            "name": "Performer 0", "gender": "FEMALE",
+            "inferred_gender": "MALE", "inferred_gender_confidence": 0.99,
+        }}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_non_binary_source_gender_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "NON_BINARY"}}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_transgender_source_gender_compared_by_presentation_bucket(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "TRANSGENDER_FEMALE"}}
+
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers,
+            query_gender="MALE", query_gender_confidence=0.9,
+        )
+
+        assert result.matches[0].confidence == pytest.approx(0.8 * 0.5)
+
+    def test_no_query_gender_is_a_no_op(self):
+        qr = self._query_result([0], [0.2])
+        performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "MALE"}}
+
+        result = build_matches(qr, ["stashdb.org:uuid-0"], performers)
+
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+
 class TestFuseLocalResults:
     def _query_result(self, neighbors, distances):
         return IndexQueryResult(
