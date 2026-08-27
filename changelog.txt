@@ -1,5 +1,16 @@
 ## 2026-08-27
 
+### 0.14.21 (plugin only)
+- Fix: the "Add as..." search-for-existing-performer modal on scene/
+  gallery pages showed a broken image for every search result. Its
+  results come from the sidecar's `/stash/search-performers`, which
+  passes through Stash's own GraphQL `image_path` field as-is -- an
+  absolute URL using whatever origin the *sidecar* reached Stash
+  through, not necessarily the address the *browser* uses (a reverse
+  proxy or different LAN hostname/port breaks this). Now stripped to a
+  relative path before use, same fix already applied to every other
+  performer/scene thumbnail in the Recommendations tab.
+
 ### 0.14.21 (sidecar only)
 - Fix: the Scene Face Matches analyzer's full-scan loop called
   `_identify_scene_impl` directly for every candidate scene, bypassing

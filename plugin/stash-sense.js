@@ -65,6 +65,21 @@
       return defaultTitle;
     }
 
+    // Convert an absolute URL to a relative path. Stash's GraphQL API
+    // returns image URLs with whatever origin it was queried through --
+    // for /stash/search-performers that's the sidecar's own STASH_URL,
+    // not necessarily the address the browser uses to reach Stash (a
+    // reverse proxy or a different LAN hostname/port), so the raw
+    // absolute URL can point somewhere the browser can't reach. Stripping
+    // to a relative path lets it resolve against the current page's own
+    // origin instead. Same fix already applied in
+    // stash-sense-recommendations.js's own relativeUrl().
+    function relativeUrl(url) {
+      if (!url) return url;
+      try { return new URL(url).pathname; }
+      catch (e) { return url; }
+    }
+
     // Poll /health while an identify request is in flight so the loading
     // modal can show real feedback during the multi-second lazy face
     // recognition model load instead of sitting on "Connecting to Stash
@@ -1084,7 +1099,7 @@
 
               resultsList.innerHTML = performers.map(p => `
                 <li class="ss-search-result-item" data-performer-id="${p.id}" data-performer-name="${SS.escapeHtml ? SS.escapeHtml(p.name) : p.name}">
-                  ${p.image_path ? `<img src="${p.image_path}" class="ss-search-result-img" />` : ''}
+                  ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" class="ss-search-result-img" onerror="this.style.display='none'" />` : ''}
                   <span>${p.name}${p.disambiguation ? ` (${p.disambiguation})` : ''}</span>
                 </li>
               `).join('');
