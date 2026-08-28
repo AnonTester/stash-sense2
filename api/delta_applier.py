@@ -10,20 +10,23 @@ drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
 needed client-side, that already happened when the delta was built.
 
-Two independent halves, both applied by `apply_delta_db` below: the
+Three independent parts, all applied by `apply_delta_db` below: the
 `performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
 identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table -- a
 locally-inserted performer's own autoincrement id is never assumed to
-match the server's, since identity doesn't depend on it), and
+match the server's, since identity doesn't depend on it),
 `catalogue_performers`/`catalogue_performer_urls`/`catalogue_faces`
 (pornbox.com/seekfans.com/legacy-site performers with no stashbox linkage
 at all -- identity there IS the raw `performers.id`, portable specifically
 because the server's own performers.db is one continuously-evolving file,
-never regenerated from scratch, so a given performer's id is permanent).
-The catalogue tables are strictly additive and may not exist in an
-older delta.db -- `_has_table` guards every read of them, so applying a
-pre-catalogue-support delta through this code is a no-op for that half,
-not an error.
+never regenerated from scratch, so a given performer's id is permanent),
+and `face_field_updates` (gender/age/image_sha256 backfilled server-side
+onto a face that already shipped in an earlier release -- identity is
+`embedding_index`, applied as a plain field UPDATE with no INSERT/
+identity-resolution involved). All three of these table groups are
+strictly additive and may not exist in an older delta.db -- `_has_table`
+guards every read of them, so applying an older delta through this code
+is simply a no-op for whichever part it predates, not an error.
 
 Lifecycle
 ---------
@@ -88,6 +91,22 @@ _PROGRESS_TICK_ROWS = 200
 # Same set database_updater.py backs up/restores — kept identical so a
 # rollback here is indistinguishable from a rollback of the full-zip path.
 BACKED_UP_FILES = ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "manifest.json", "face_yaw.json")
+
+# Mirrors stash-sense2-data-gen's build/schema.py::BACKFILLABLE_FACE_FIELDS
+# exactly (separate repo, can't share the constant directly -- keep the
+# two in sync by hand when a field is added on the generator side). Used
+# both to migrate an old local performers.db that predates a given field
+# (_ensure_columns) and to apply face_field_updates rows generically
+# below. Actual application is tolerant of version skew either way: it
+# only ever touches the intersection of this dict's keys and whatever
+# columns a specific delta.db's face_field_updates table actually has,
+# so an older client applying a delta with a newer field (or a newer
+# client applying an older delta lacking one) both degrade gracefully
+# instead of erroring on an unrecognized column.
+BACKFILLABLE_FACE_FIELDS = {
+    "gender": "TEXT", "gender_confidence": "REAL",
+    "estimated_age": "INTEGER", "image_sha256": "TEXT",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +385,7 @@ def apply_delta_db(
     _ensure_columns(conn, "performers", {
         "inferred_gender": "TEXT", "inferred_gender_confidence": "REAL",
     })
+    _ensure_columns(conn, "faces", BACKFILLABLE_FACE_FIELDS)
     conn.commit()
 
     index = Index(ndim=512, metric="cos")
@@ -377,9 +397,12 @@ def apply_delta_db(
     delta_conn.row_factory = sqlite3.Row
 
     catalogue_tables_present = _has_table(delta_conn, "catalogue_performers")
+    field_updates_present = _has_table(delta_conn, "face_field_updates")
     progress_tables = ["performers", "faces", "removed_faces"]
     if catalogue_tables_present:
         progress_tables += ["catalogue_performers", "catalogue_performer_urls", "catalogue_faces"]
+    if field_updates_present:
+        progress_tables += ["face_field_updates"]
     total_rows = sum(delta_conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in progress_tables)
     processed = 0
 
@@ -468,6 +491,36 @@ def apply_delta_db(
             catalogue_faces_added += 1
             _tick()
 
+    # Field-only updates to faces that already existed before this delta
+    # (e.g. gender/age inference or image_sha256 backfilled server-side
+    # after the face's own release) -- see stash-sense2-data-gen's
+    # build/export_delta.py module docstring. A plain UPDATE by
+    # embedding_index, no identity resolution or performer touch needed:
+    # unlike new/removed faces, this never changes face_count.
+    #
+    # `applicable_fields` is the intersection of what this client knows
+    # about (BACKFILLABLE_FACE_FIELDS above) and what this specific
+    # delta.db's face_field_updates table actually has -- tolerates
+    # version skew both directions: a delta built with a newer field this
+    # client predates just never gets that column touched, and an older
+    # delta missing a field this client already knows about simply never
+    # writes it either. Still ticks through every row even when nothing's
+    # applicable, so progress accounting stays correct.
+    field_updates_applied = 0
+    if field_updates_present:
+        delta_field_columns = {row[1] for row in delta_conn.execute("PRAGMA table_info(face_field_updates)")}
+        applicable_fields = [f for f in BACKFILLABLE_FACE_FIELDS if f in delta_field_columns]
+        if applicable_fields:
+            set_clause = ", ".join(f"{f} = ?" for f in applicable_fields)
+            for u in delta_conn.execute("SELECT * FROM face_field_updates"):
+                values = tuple(u[f] for f in applicable_fields) + (u["embedding_index"],)
+                conn.execute(f"UPDATE faces SET {set_clause} WHERE embedding_index = ?", values)
+                field_updates_applied += 1
+                _tick()
+        else:
+            for _ in delta_conn.execute("SELECT embedding_index FROM face_field_updates"):
+                _tick()
+
     for pid in touched_performers:
         _sync_face_count(conn, pid)
 
@@ -482,6 +535,7 @@ def apply_delta_db(
         "faces_added": faces_added, "faces_removed": faces_removed,
         "catalogue_performers_upserted": catalogue_upserted,
         "catalogue_faces_added": catalogue_faces_added,
+        "face_field_updates_applied": field_updates_applied,
     }
 
 
@@ -564,7 +618,7 @@ async def apply_delta_chain(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0,
-              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0}
+              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0, "face_field_updates_applied": 0}
 
     try:
         for i, hop in enumerate(chain):

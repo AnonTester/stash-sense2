@@ -1,5 +1,25 @@
 ## 2026-08-28
 
+### 0.16.1 (sidecar only)
+- Feature: delta updates can now carry field-only changes to faces that
+  already shipped in an earlier release -- e.g. gender/age inference or
+  image_sha256 backfilled server-side after the fact (see
+  stash-sense2-data-gen's build/export_delta.py). Previously the delta
+  mechanism only knew about new/removed rows (crawl diffs, catalogue-
+  source timestamps); a direct-UPDATE backfill script touching existing
+  rows was invisible to it, so a sidecar preferring the (smaller, faster)
+  delta path over a full re-download would silently never receive that
+  kind of change. `delta_applier.py` applies these as a plain
+  `UPDATE ... WHERE embedding_index = ?` -- minimum data only (just the
+  changed columns), not a full-row replace. The column list on both
+  sides is driven off one shared constant (mirrored across the two
+  repos, since they can't share Python directly) rather than hardcoded
+  in the SQL, and application is tolerant of version skew either
+  direction -- an older client applying a delta with a field it
+  doesn't know about yet, or a newer client applying an older delta
+  missing one it does, both degrade gracefully to whatever fields are
+  actually in common, rather than erroring.
+
 ### 0.16.0 (sidecar only)
 - Feature: local performer sync (the Stash-instance-local performer
   identification index) now runs as an async fetch pool + a small
