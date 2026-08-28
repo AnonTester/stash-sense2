@@ -1,6 +1,6 @@
 name: Stash Sense 2
 description: ML-powered performer identification and library curation for Stash
-version: 0.14.21
+version: 0.15.0
 url: https://github.com/AnonTester/stash-sense2
 
 ui:
@@ -39,3 +39,15 @@ hooks:
       - Performer.Create.Post
       - Performer.Update.Post
       - Performer.Destroy.Post
+  - name: hook_scene_cleanup
+    description: Remove recommendations referencing a scene that was deleted or merged away.
+    triggeredBy:
+      - Scene.Destroy.Post
+  - name: hook_studio_cleanup
+    description: Remove recommendations referencing a studio that was deleted.
+    triggeredBy:
+      - Studio.Destroy.Post
+  - name: hook_tag_cleanup
+    description: Remove recommendations referencing a tag that was deleted.
+    triggeredBy:
+      - Tag.Destroy.Post

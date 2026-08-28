@@ -4,16 +4,20 @@ Scene Fingerprint Generator
 Generates face fingerprints for scenes in the Stash library.
 Supports checkpointing for restart resilience and rate limiting.
 
-This generator calls the /identify/scene endpoint internally, which
-handles frame extraction, face detection, matching, and fingerprint
-persistence automatically.
+This generator calls straight into identification_router.py's
+_identify_scene_impl (bulk path: via scene_batch_orchestrator.py, so >=4K
+scenes get VAAPI-decode/ROCm-compute batching -- see that module's
+docstring), which handles frame extraction, face detection, matching, and
+fingerprint persistence automatically. It used to loop back through this
+same sidecar's own /identify/scene HTTP endpoint instead -- that went
+through the same process either way, so the HTTP round trip was pure
+overhead once bulk batching needed a hook into the decode/compute split.
 
 Usage:
     generator = SceneFingerprintGenerator(
         stash_client=stash,
         rec_db=db,
         db_version="2026.01.30",
-        identify_endpoint="http://localhost:5000/identify/scene",
     )
 
     # Generate fingerprints for all scenes
@@ -128,7 +132,6 @@ class SceneFingerprintGenerator:
         stash_client: "StashClientUnified",
         rec_db: "RecommendationsDB",
         db_version: str,
-        sidecar_url: str = "http://localhost:5000",
         num_frames: int = face_config.NUM_FRAMES,
         min_face_size: int = face_config.MIN_FACE_SIZE,
         max_distance: float = face_config.MAX_DISTANCE,
@@ -138,7 +141,6 @@ class SceneFingerprintGenerator:
         self.stash = stash_client
         self.rec_db = rec_db
         self.db_version = db_version
-        self.sidecar_url = sidecar_url.rstrip("/")
 
         # Identification config
         self.num_frames = num_frames
@@ -283,15 +285,15 @@ class SceneFingerprintGenerator:
                     self._progress.progress_pct,
                 )
 
+                to_process: list[dict] = []
+                scene_titles: dict[int, str] = {}
                 for scene in scenes:
                     if self._stop_requested:
                         break
 
                     scene_id = int(scene["id"])
                     scene_title = scene.get("title") or f"Scene {scene_id}"
-                    self._progress.current_scene_id = scene_id
-                    self._progress.current_scene_title = scene_title
-                    self._progress.batch_completed = False
+                    scene_titles[scene_id] = scene_title
 
                     # Check if we need to process this scene
                     existing = self.rec_db.get_scene_fingerprint(scene_id)
@@ -305,6 +307,9 @@ class SceneFingerprintGenerator:
                                     scene_id, scene_title,
                                     existing.get("db_version"), self.db_version,
                                 )
+                                self._progress.current_scene_id = scene_id
+                                self._progress.current_scene_title = scene_title
+                                self._progress.batch_completed = False
                                 self._progress.skipped += 1
                                 self._progress.processed_scenes += 1
                                 batch_skipped += 1
@@ -316,6 +321,9 @@ class SceneFingerprintGenerator:
                                 "(error record present, skip_errors=True)",
                                 scene_id, scene_title,
                             )
+                            self._progress.current_scene_id = scene_id
+                            self._progress.current_scene_title = scene_title
+                            self._progress.batch_completed = False
                             self._progress.skipped += 1
                             self._progress.processed_scenes += 1
                             batch_skipped += 1
@@ -332,38 +340,99 @@ class SceneFingerprintGenerator:
                     else:
                         logger.debug("Scene %d (%s): no existing fingerprint", scene_id, scene_title)
 
-                    # Pre-emptively mark as error before processing. If the sidecar is
-                    # SIGKILL'd mid-run, no Python cleanup code runs, so this record
-                    # survives. /identify/scene uses INSERT OR REPLACE, so a successful
-                    # run will overwrite it with "complete".
-                    self.rec_db.create_scene_fingerprint(
-                        stash_scene_id=scene_id, total_faces=0, frames_analyzed=0,
-                        fingerprint_status="error", db_version=self.db_version,
-                    )
+                    to_process.append(scene)
 
-                    # Generate fingerprint by calling /identify/scene
-                    result = await self._identify_scene(scene_id)
-
-                    self._progress.processed_scenes += 1
-                    if result.success:
-                        self._progress.successful += 1
-                        batch_successful += 1
-                        logger.debug(
-                            "Scene %d (%s): fingerprinted — performers_found=%d, faces_found=%d, "
-                            "frames=%d%s",
-                            scene_id, scene_title,
-                            result.performers_found, result.faces_found, result.frames_analyzed,
-                            " (retried with shifted frames)" if result.retried_with_shifted_frames else "",
-                        )
-                    else:
-                        self._progress.failed += 1
-                        batch_failed += 1
-                        logger.debug(
-                            "Scene %d (%s): fingerprint failed — %s",
-                            scene_id, scene_title, result.error,
+                if to_process and not self._stop_requested:
+                    # Pre-emptively mark every scene about to be attempted as
+                    # error, up front, before any of them actually runs. If
+                    # the sidecar is SIGKILL'd mid-batch, no Python cleanup
+                    # code runs, so these records survive -- a scene that
+                    # never got this far still correctly shows as never
+                    # attempted. A successful run overwrites its own row
+                    # with "complete" (INSERT OR REPLACE).
+                    for scene in to_process:
+                        self.rec_db.create_scene_fingerprint(
+                            stash_scene_id=int(scene["id"]), total_faces=0, frames_analyzed=0,
+                            fingerprint_status="error", db_version=self.db_version,
                         )
 
-                    yield self._progress
+                    from identification_router import require_db_available
+                    from scene_batch_orchestrator import SceneBatchSpec, identify_scenes_batched
+
+                    def _spec(scene: dict, start_offset_pct: float, end_offset_pct: float) -> SceneBatchSpec:
+                        sid = int(scene["id"])
+                        file_info = (scene.get("files") or [{}])[0]
+                        return SceneBatchSpec(
+                            scene_id=str(sid),
+                            width=file_info.get("width"),
+                            height=file_info.get("height"),
+                            request=self._build_identify_request(sid, start_offset_pct, end_offset_pct),
+                        )
+
+                    # First pass, batched -- normal-res scenes through the
+                    # existing unbatched path, >=4K scenes decoded-then-
+                    # computed in small batches (see scene_batch_orchestrator.py).
+                    first_pass_specs = [_spec(s, self.start_offset_pct, self.end_offset_pct) for s in to_process]
+                    retry_pending: dict[int, FingerprintResult] = {}
+
+                    async for scene_id_str, outcome in identify_scenes_batched(
+                        first_pass_specs,
+                        is_stop_requested=lambda: self._stop_requested,
+                        before_scene=require_db_available,
+                    ):
+                        scene_id = int(scene_id_str)
+                        result = self._response_to_result(scene_id, outcome)
+                        if result.success and result.faces_found == 0:
+                            # See _identify_scene's docstring -- shifted
+                            # retry, batched together below for every scene
+                            # that needs one, rather than one at a time.
+                            retry_pending[scene_id] = result
+                            continue
+                        batch_successful, batch_failed = self._finalize_scene_result(
+                            scene_id, scene_titles[scene_id], result, batch_successful, batch_failed,
+                        )
+                        yield self._progress
+
+                    if retry_pending and not self._stop_requested:
+                        scenes_by_id = {int(s["id"]): s for s in to_process}
+                        shifted_start, shifted_end = self._shifted_offsets(self.start_offset_pct, self.end_offset_pct)
+                        retry_specs = [
+                            _spec(scenes_by_id[sid], shifted_start, shifted_end) for sid in retry_pending
+                        ]
+                        logger.debug(
+                            "Retrying %d scene(s) with frames shifted (%.4f-%.4f) -> (%.4f-%.4f)",
+                            len(retry_specs), self.start_offset_pct, self.end_offset_pct,
+                            shifted_start, shifted_end,
+                        )
+                        async for scene_id_str, outcome in identify_scenes_batched(
+                            retry_specs,
+                            is_stop_requested=lambda: self._stop_requested,
+                            before_scene=require_db_available,
+                        ):
+                            scene_id = int(scene_id_str)
+                            retry_result = self._response_to_result(scene_id, outcome)
+                            if retry_result.success:
+                                retry_result.retried_with_shifted_frames = True
+                                final = retry_result
+                            else:
+                                # Retry itself errored -- keep the good first
+                                # result rather than discarding a confirmed
+                                # "0 faces" for it.
+                                final = retry_pending[scene_id]
+                            del retry_pending[scene_id]
+                            batch_successful, batch_failed = self._finalize_scene_result(
+                                scene_id, scene_titles[scene_id], final, batch_successful, batch_failed,
+                            )
+                            yield self._progress
+
+                    # Anything still pending here means a stop was requested
+                    # mid-retry-pass -- finalize with the good first-pass
+                    # result rather than leaving it silently uncounted.
+                    for scene_id, result in retry_pending.items():
+                        batch_successful, batch_failed = self._finalize_scene_result(
+                            scene_id, scene_titles[scene_id], result, batch_successful, batch_failed,
+                        )
+                        yield self._progress
 
                 offset += batch_size
                 self._progress.current_offset = offset
@@ -434,10 +503,107 @@ class SceneFingerprintGenerator:
         """Generate fingerprint for a single scene."""
         return await self._identify_scene(scene_id)
 
+    def _build_identify_request(
+        self, scene_id: int, start_offset_pct: float, end_offset_pct: float,
+    ) -> "SceneIdentifyRequest":
+        from identification_router import SceneIdentifyRequest
+        return SceneIdentifyRequest(
+            scene_id=str(scene_id),
+            num_frames=self.num_frames,
+            min_face_size=self.min_face_size,
+            max_distance=self.max_distance,
+            start_offset_pct=start_offset_pct,
+            end_offset_pct=end_offset_pct,
+            matching_mode="hybrid",
+        )
+
+    def _response_to_result(
+        self, scene_id: int, outcome: "SceneIdentifyResponse | Exception",
+    ) -> FingerprintResult:
+        """Maps a SceneIdentifyResponse (or the Exception raised while
+        producing one) into this generator's own FingerprintResult,
+        including writing the scene_fingerprints error row on failure --
+        shared by both the single-scene path (_call_identify) and the
+        batched bulk path (generate_all(), via
+        scene_batch_orchestrator.py)."""
+        from fastapi import HTTPException
+
+        if isinstance(outcome, Exception):
+            detail = outcome.detail if isinstance(outcome, HTTPException) else str(outcome)
+            logger.warning(f"Scene {scene_id} identification failed: {detail}")
+            self.rec_db.create_scene_fingerprint(
+                stash_scene_id=scene_id, total_faces=0, frames_analyzed=0,
+                fingerprint_status="error", db_version=self.db_version,
+            )
+            return FingerprintResult(scene_id=scene_id, success=False, error=str(detail))
+
+        response = outcome
+        performers_found = sum(1 for p in response.persons if p.best_match)
+        faces_found = response.faces_after_filter
+
+        if not response.fingerprint_saved and performers_found > 0:
+            # Identification succeeded but save failed
+            error_msg = response.fingerprint_error or "Fingerprint save failed"
+            logger.warning(f"Scene {scene_id} fingerprint save failed: {error_msg}")
+            return FingerprintResult(
+                scene_id=scene_id,
+                success=False,
+                error=f"Save failed: {error_msg}",
+                performers_found=performers_found,
+                frames_analyzed=response.frames_analyzed,
+                faces_found=faces_found,
+            )
+
+        return FingerprintResult(
+            scene_id=scene_id,
+            success=True,
+            performers_found=performers_found,
+            frames_analyzed=response.frames_analyzed,
+            faces_found=faces_found,
+        )
+
+    def _finalize_scene_result(
+        self, scene_id: int, scene_title: str, result: FingerprintResult,
+        batch_successful: int, batch_failed: int,
+    ) -> tuple[int, int]:
+        """Records one scene's final outcome into self._progress (for the
+        caller to yield) and the batch-local tallies generate_all() logs at
+        the end of each Stash-fetched batch. Called exactly once per scene
+        that reached _identify_scene_impl (skipped scenes are counted
+        inline in generate_all()'s own skip-scan loop, not here)."""
+        self._progress.current_scene_id = scene_id
+        self._progress.current_scene_title = scene_title
+        self._progress.batch_completed = False
+        self._progress.processed_scenes += 1
+        if result.success:
+            self._progress.successful += 1
+            batch_successful += 1
+            logger.debug(
+                "Scene %d (%s): fingerprinted — performers_found=%d, faces_found=%d, "
+                "frames=%d%s",
+                scene_id, scene_title,
+                result.performers_found, result.faces_found, result.frames_analyzed,
+                " (retried with shifted frames)" if result.retried_with_shifted_frames else "",
+            )
+        else:
+            self._progress.failed += 1
+            batch_failed += 1
+            logger.debug(
+                "Scene %d (%s): fingerprint failed — %s",
+                scene_id, scene_title, result.error,
+            )
+        return batch_successful, batch_failed
+
+    def _shifted_offsets(self, start_offset_pct: float, end_offset_pct: float) -> tuple[float, float]:
+        """Shifts a sampling window by half a sampling interval -- see
+        _identify_scene's docstring for why."""
+        interval_pct = (end_offset_pct - start_offset_pct) / max(1, self.num_frames - 1)
+        half_shift = interval_pct / 2
+        return min(1.0, start_offset_pct + half_shift), min(1.0, end_offset_pct + half_shift)
+
     async def _identify_scene(self, scene_id: int) -> FingerprintResult:
-        """Call /identify/scene to generate and save a fingerprint, retrying
-        once with a shifted sampling grid if the first pass finds no usable
-        faces at all.
+        """Identify a single scene, retrying once with a shifted sampling
+        grid if the first pass finds no usable faces at all.
 
         Frame sampling is deterministic (uniform timestamps derived purely
         from num_frames/start_offset_pct/end_offset_pct), so a scene whose
@@ -452,10 +618,7 @@ class SceneFingerprintGenerator:
         result = await self._call_identify(scene_id, self.start_offset_pct, self.end_offset_pct)
 
         if result.success and result.faces_found == 0:
-            interval_pct = (self.end_offset_pct - self.start_offset_pct) / max(1, self.num_frames - 1)
-            half_shift = interval_pct / 2
-            shifted_start = min(1.0, self.start_offset_pct + half_shift)
-            shifted_end = min(1.0, self.end_offset_pct + half_shift)
+            shifted_start, shifted_end = self._shifted_offsets(self.start_offset_pct, self.end_offset_pct)
             logger.debug(
                 "Scene %d: no faces in first pass, retrying with frames shifted "
                 "(%.4f-%.4f) -> (%.4f-%.4f)",
@@ -475,85 +638,27 @@ class SceneFingerprintGenerator:
     async def _call_identify(
         self, scene_id: int, start_offset_pct: float, end_offset_pct: float,
     ) -> FingerprintResult:
-        """Single call to /identify/scene with the given sampling window.
+        """Single, unbatched identify pass for one scene, calling straight
+        into _identify_scene_impl instead of looping back through this
+        sidecar's own /identify/scene HTTP endpoint -- this generator always
+        runs inside the same process as that endpoint, so the HTTP round
+        trip was pure overhead. A single scene doesn't need
+        scene_batch_orchestrator.py's VAAPI/compute batching (its own
+        decode-then-compute sequencing already keeps the two from
+        overlapping for just one scene) -- see generate_all() for the
+        batched bulk path this doesn't cover.
         See _identify_scene for the retry wrapper around this."""
+        from identification_router import _identify_scene_impl, require_db_available
+
+        request = self._build_identify_request(scene_id, start_offset_pct, end_offset_pct)
         try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                response = await client.post(
-                    f"{self.sidecar_url}/identify/scene",
-                    json={
-                        "scene_id": str(scene_id),
-                        "num_frames": self.num_frames,
-                        "min_face_size": self.min_face_size,
-                        "max_distance": self.max_distance,
-                        "start_offset_pct": start_offset_pct,
-                        "end_offset_pct": end_offset_pct,
-                        "matching_mode": "hybrid",
-                    },
-                )
-
-                if response.status_code == 200:
-                    data = response.json()
-                    persons = data.get("persons", [])
-                    performers_found = sum(1 for p in persons if p.get("best_match"))
-                    faces_found = data.get("faces_after_filter", data.get("faces_detected", 0))
-
-                    # Check if fingerprint was actually saved
-                    fingerprint_saved = data.get("fingerprint_saved", False)
-                    fingerprint_error = data.get("fingerprint_error")
-
-                    if not fingerprint_saved and performers_found > 0:
-                        # Identification succeeded but save failed
-                        error_msg = fingerprint_error or "Fingerprint save failed"
-                        logger.warning(f"Scene {scene_id} fingerprint save failed: {error_msg}")
-                        return FingerprintResult(
-                            scene_id=scene_id,
-                            success=False,
-                            error=f"Save failed: {error_msg}",
-                            performers_found=performers_found,
-                            frames_analyzed=data.get("frames_analyzed", 0),
-                            faces_found=faces_found,
-                        )
-
-                    return FingerprintResult(
-                        scene_id=scene_id,
-                        success=True,
-                        performers_found=performers_found,
-                        frames_analyzed=data.get("frames_analyzed", 0),
-                        faces_found=faces_found,
-                    )
-                else:
-                    error_detail = response.json().get("detail", response.text)
-                    logger.warning(f"Scene {scene_id} identification failed: {error_detail}")
-
-                    # Mark as error in database
-                    self.rec_db.create_scene_fingerprint(
-                        stash_scene_id=scene_id,
-                        total_faces=0,
-                        frames_analyzed=0,
-                        fingerprint_status="error",
-                        db_version=self.db_version,
-                    )
-
-                    return FingerprintResult(
-                        scene_id=scene_id,
-                        success=False,
-                        error=error_detail,
-                    )
-
-        except httpx.TimeoutException:
-            error = "Timeout - scene may be too long or system too slow"
-            logger.warning("Scene %d timed out during fingerprinting", scene_id)
-            self.rec_db.create_scene_fingerprint(
-                stash_scene_id=scene_id, total_faces=0, frames_analyzed=0,
-                fingerprint_status="error", db_version=self.db_version,
-            )
-            return FingerprintResult(scene_id=scene_id, success=False, error=error)
-
+            # See scene_batch_orchestrator.py's before_scene docstring --
+            # calling _identify_scene_impl directly bypasses the FastAPI
+            # Depends() that normally re-touches the idle-unload timer on
+            # every request, so this must be re-checked on every call.
+            await require_db_available()
+            response = await _identify_scene_impl(request)
         except Exception as e:
-            logger.error("Error identifying scene %d: %s", scene_id, e, exc_info=True)
-            self.rec_db.create_scene_fingerprint(
-                stash_scene_id=scene_id, total_faces=0, frames_analyzed=0,
-                fingerprint_status="error", db_version=self.db_version,
-            )
-            return FingerprintResult(scene_id=scene_id, success=False, error=str(e))
+            return self._response_to_result(scene_id, e)
+
+        return self._response_to_result(scene_id, response)

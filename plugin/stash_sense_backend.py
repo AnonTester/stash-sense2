@@ -17,12 +17,23 @@ def main():
     # Get operation mode and args
     args = input_data.get("args", {})
 
-    # A hook invocation (Performer.Create/Update/Destroy.Post) has a
-    # different shape than a normal task/UI call: hookContext is present
-    # and there's no mode or JS-injected sidecar_url, since Stash calls
-    # the exec directly rather than going through our JS.
+    # A hook invocation (Performer.*/Scene.Destroy.Post/Studio.Destroy.Post/
+    # Tag.Destroy.Post) has a different shape than a normal task/UI call:
+    # hookContext is present and there's no mode or JS-injected sidecar_url,
+    # since Stash calls the exec directly rather than going through our JS.
+    # Route by the trigger's entity prefix -- this dispatcher previously
+    # assumed every hook was a performer hook, which would have misrouted
+    # a scene hook's id into the performer sync handler once one was added.
     if "hookContext" in args:
-        handle_performer_hook(input_data)
+        hook_type = input_data.get("args", {}).get("hookContext", {}).get("type", "")
+        if hook_type.startswith("Scene."):
+            handle_scene_destroy_hook(input_data)
+        elif hook_type.startswith("Studio."):
+            handle_entity_destroy_hook(input_data, "studio")
+        elif hook_type.startswith("Tag."):
+            handle_entity_destroy_hook(input_data, "tag")
+        else:
+            handle_performer_hook(input_data)
         print(json.dumps({"output": "ok"}))
         return
 
@@ -173,7 +184,12 @@ HOOK_FLUSH_LIMIT = 20
 
 def handle_performer_hook(input_data):
     """Handle a Performer.Create/Update/Destroy.Post hook by syncing the
-    affected performer into the local identification index."""
+    affected performer into the local identification index, and, on
+    destroy, also deleting recommendations that referenced it (a separate,
+    unconditional concern from local-index sync -- it runs even when
+    local_performer_auto_sync_enabled is off, since a user who doesn't
+    want auto face-sync still doesn't want recommendations dangling on a
+    deleted performer)."""
     hook_context = input_data.get("args", {}).get("hookContext", {})
     performer_id = hook_context.get("id")
     hook_type = hook_context.get("type", "")
@@ -189,6 +205,9 @@ def handle_performer_hook(input_data):
         _append_pending_sync(pending_path, performer_id, event_type)
         log("Local performer sync hook: could not resolve sidecar URL, queued for retry")
         return
+
+    if event_type == "destroy":
+        _cleanup_entity_recommendations(sidecar_url, "performer", performer_id)
 
     setting = sidecar_get(
         sidecar_url, "/settings/local_performer_auto_sync_enabled", timeout=HOOK_SYNC_TIMEOUT,
@@ -212,6 +231,79 @@ def handle_performer_hook(input_data):
 
     log(f"Local performer sync hook: performer {performer_id} -> {result.get('status')}")
     _flush_pending_sync(sidecar_url, pending_path, skip_performer_id=str(performer_id))
+
+
+def handle_scene_destroy_hook(input_data):
+    """Handle a Scene.Destroy.Post hook by deleting every recommendation
+    that referenced this scene. Stash has no separate Scene.Merge.Post
+    hook -- merging a scene into another destroys the source scene, which
+    fires this same hook for the source scene id, so one handler covers
+    both "deleted" and "merged away" without special-casing either.
+
+    Best-effort, not queued for retry like the performer hook: a missed
+    cleanup here just leaves a stale recommendation to be picked up by the
+    next scene event or a manual cleanup, not a meaningful loss like a
+    missed performer-index update would be, so this stays simple rather
+    than adding a second persistent retry-cache file.
+    """
+    hook_context = input_data.get("args", {}).get("hookContext", {})
+    scene_id = hook_context.get("id")
+    if scene_id is None:
+        return
+
+    server = input_data.get("server_connection", {})
+    sidecar_url = _get_sidecar_url(server)
+    if not sidecar_url:
+        log("Scene cleanup hook: could not resolve sidecar URL, skipping")
+        return
+
+    result = sidecar_post(
+        sidecar_url, "/recommendations/cleanup-scene",
+        {"scene_id": str(scene_id)},
+        timeout=HOOK_SYNC_TIMEOUT,
+    )
+    if "error" in result:
+        log(f"Scene cleanup hook: failed for scene {scene_id}: {result['error']}")
+        return
+
+    log(f"Scene cleanup hook: scene {scene_id} -> deleted {result.get('deleted', 0)} recommendation(s)")
+
+
+def _cleanup_entity_recommendations(sidecar_url, target_type, entity_id):
+    """POST to the generic performer/studio/tag cleanup endpoint and log
+    the outcome. Shared by handle_performer_hook's destroy branch and
+    handle_entity_destroy_hook (studio/tag) -- best-effort, not queued for
+    retry, same rationale as handle_scene_destroy_hook."""
+    result = sidecar_post(
+        sidecar_url, "/recommendations/cleanup-entity",
+        {"target_type": target_type, "entity_id": str(entity_id)},
+        timeout=HOOK_SYNC_TIMEOUT,
+    )
+    if "error" in result:
+        log(f"{target_type.capitalize()} cleanup hook: failed for {target_type} {entity_id}: {result['error']}")
+        return
+    log(f"{target_type.capitalize()} cleanup hook: {target_type} {entity_id} -> deleted {result.get('deleted', 0)} recommendation(s)")
+
+
+def handle_entity_destroy_hook(input_data, target_type):
+    """Handle a Studio.Destroy.Post / Tag.Destroy.Post hook by deleting
+    every recommendation that referenced the destroyed entity. Only wired
+    to *.Destroy.Post -- Tag also has a dedicated Tag.Merge.Post hook, but
+    its hookContext id semantics (source vs. destination tag) aren't
+    confirmed, and getting that wrong would delete recommendations for a
+    tag that's still alive, so it's deliberately left unhooked for now."""
+    hook_context = input_data.get("args", {}).get("hookContext", {})
+    entity_id = hook_context.get("id")
+    if entity_id is None:
+        return
+
+    server = input_data.get("server_connection", {})
+    sidecar_url = _get_sidecar_url(server)
+    if not sidecar_url:
+        log(f"{target_type.capitalize()} cleanup hook: could not resolve sidecar URL, skipping")
+        return
+
+    _cleanup_entity_recommendations(sidecar_url, target_type, entity_id)
 
 
 def _hook_event_type(hook_type):

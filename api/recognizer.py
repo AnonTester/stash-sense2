@@ -3,6 +3,8 @@
 Matches detected faces against the pre-built performer database.
 """
 import json
+import queue
+import threading
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
@@ -15,6 +17,14 @@ from embeddings import FaceEmbeddingGenerator, DetectedFace, FaceEmbedding
 from matching import MatchingConfig, match_face, MatchingResult
 from database_reader import PerformerDatabaseReader
 from stashbox_utils import classify_universal_id
+
+# Extra FaceEmbeddingGenerator instances (beyond the main self.generator)
+# kept warm for the whole sidecar's uptime so identification_router.py can
+# spread one scene's per-frame detect_faces() calls across several ONNX
+# sessions instead of one. Deliberately modest -- unlike a bounded batch
+# job, this is a permanent VRAM/session cost for as long as the sidecar
+# runs; raise only after checking real headroom (e.g. `rocm-smi --showmemuse`).
+DETECTION_POOL_SIZE = 3
 
 
 @dataclass
@@ -68,6 +78,19 @@ class FaceRecognizer:
         """
         self.db_config = db_config
         self.generator = FaceEmbeddingGenerator(models_dir=models_dir)
+        # Extra generators for detect_faces_parallel() -- see DETECTION_POOL_SIZE.
+        self.detection_pool: list[FaceEmbeddingGenerator] = [
+            FaceEmbeddingGenerator(models_dir=models_dir) for _ in range(DETECTION_POOL_SIZE - 1)
+        ]
+        # Force every generator's lazy buffalo_l session to load now, during
+        # this already-slow init, rather than on whichever request happens
+        # to hit each pooled instance first.
+        _warmup_image = np.zeros((64, 64, 3), dtype=np.uint8)
+        for _gen in (self.generator, *self.detection_pool):
+            try:
+                _gen.detect_faces(_warmup_image, min_confidence=0.99)
+            except Exception:
+                pass
 
         # Load index
         print(f"Loading embedding index from {db_config.embedding_index_path}...")
@@ -116,6 +139,45 @@ class FaceRecognizer:
     def _get_performer_info(self, universal_id: str) -> dict:
         """Get performer info from universal ID."""
         return self.performers.get(universal_id, {})
+
+    def detect_faces_parallel(
+        self, frames: list[np.ndarray], min_confidence: float,
+    ) -> list[list[DetectedFace]]:
+        """detect_faces() for many frames at once, spread across this
+        recognizer's detection pool (self.generator + self.detection_pool)
+        instead of one shared generator processing frames one at a time.
+
+        Returns per-frame face lists in the same order as `frames`. Safe to
+        call from a plain synchronous context; callers on an asyncio event
+        loop (e.g. identification_router.py) should run it via
+        `asyncio.to_thread()` since this blocks until every frame is done.
+        """
+        generators = [self.generator, *self.detection_pool]
+        if len(frames) <= 1 or len(generators) <= 1:
+            return [self.generator.detect_faces(f, min_confidence=min_confidence) for f in frames]
+
+        work_queue: "queue.Queue[Optional[int]]" = queue.Queue()
+        for i in range(len(frames)):
+            work_queue.put(i)
+        for _ in generators:
+            work_queue.put(None)
+
+        results: list[Optional[list[DetectedFace]]] = [None] * len(frames)
+
+        def _worker(gen: FaceEmbeddingGenerator) -> None:
+            while True:
+                i = work_queue.get()
+                if i is None:
+                    return
+                results[i] = gen.detect_faces(frames[i], min_confidence=min_confidence)
+
+        threads = [threading.Thread(target=_worker, args=(gen,), daemon=True) for gen in generators]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        return results
 
     def recognize_face_v2(
         self,

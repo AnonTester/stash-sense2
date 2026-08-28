@@ -1,3 +1,58 @@
+## 2026-08-28
+
+### 0.16.0 (sidecar only)
+- Feature: local performer sync (the Stash-instance-local performer
+  identification index) now runs as an async fetch pool + a small
+  threaded embed-worker pool + one single writer, instead of a strictly
+  sequential loop -- mirrors the concurrency redesign that took
+  stash-sense2-data-gen's backfill script from ~7 days to ~4.5 hours
+  (see that project's own changelog). A fresh `httpx.AsyncClient` per
+  performer is also gone -- one shared client for the whole run.
+- Feature: scene identification's per-frame face-detection loop now
+  spreads work across a small pool of warm `FaceEmbeddingGenerator`
+  instances instead of one shared generator processing frames one at a
+  time -- applies to both the live `/identify/scene` endpoint and the
+  sprite-tile fallback path.
+- Feature: face recognition now loads in the background right after
+  startup instead of lazily on the first `/identify` request, so the
+  first real request after a restart no longer eats the cold-load
+  latency. Idle-unload behavior (`idle_unload_minutes` setting) is
+  unchanged -- only the *first* load moved earlier.
+- Feature: `FFMPEG_HWACCEL=vaapi` is now a per-scene decision
+  (width>=3840 or height>=2160), not an all-or-nothing global setting --
+  below-4K scenes always decode on CPU now even with the env var set.
+  Root cause this addresses: mixing VAAPI hardware video-decode with
+  ROCm/HIP GPU compute on the same integrated GPU was destabilizing the
+  ROCm sidecar variant. Scene Face Matches and fingerprint generation
+  additionally batch >=4K scenes in small groups (2 at a time), fully
+  decoding a batch before any compute starts for it, so VAAPI decode
+  and ROCm compute never run at the same moment for those scenes
+  either.
+- Feature: recommendations referencing a scene, performer, studio, or
+  tag are now cleaned up automatically when that entity is deleted (or,
+  for scenes/performers, merged away, since Stash's merge operations
+  destroy the source entity) -- new `Scene.Destroy.Post`,
+  `Studio.Destroy.Post`, and `Tag.Destroy.Post` plugin hooks, plus the
+  existing performer hook now also does this on destroy (it previously
+  only kept the local identification index in sync, not the
+  recommendations list).
+- Fix: the AMD ROCm sidecar's `HSA_OVERRIDE_GFX_VERSION` guidance was
+  wrong for gfx1103 (Radeon 780M) -- `11.0.3` (this card's own literal
+  chip id) crashes on the very first real inference call, because
+  rocBLAS's bundled kernel library has no file for that exact id.
+  `11.0.0` (the nearest architecture rocBLAS does ship a kernel for) is
+  what's actually stable; `docker-compose.rocm.yml` and the README now
+  say so.
+
+### 0.15.0 (plugin only)
+- Feature: new `Scene.Destroy.Post` / `Studio.Destroy.Post` /
+  `Tag.Destroy.Post` hooks, and the existing performer hook now also
+  cleans up recommendations on `Performer.Destroy.Post` -- see the
+  matching sidecar entry above. Fixed a dispatcher bug this surfaced:
+  the hook exec previously routed every incoming hook to the performer
+  handler unconditionally, which would have misrouted a scene/studio/
+  tag hook's id straight into the performer sync path.
+
 ## 2026-08-27
 
 ### 0.15.1 (sidecar only)

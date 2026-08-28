@@ -926,6 +926,8 @@ class StashClientUnified:
               files {
                 path
                 duration
+                width
+                height
               }
               stash_ids {
                 endpoint
@@ -1043,6 +1045,8 @@ class StashClientUnified:
               files {
                 id
                 duration
+                width
+                height
               }
             }
           }

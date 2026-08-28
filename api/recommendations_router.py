@@ -1918,6 +1918,122 @@ async def reset_fingerprints_with_backup():
 # endpoint, since it's a fast synchronous operation, not a queued job.
 
 
+def _extract_performer_ids_from_recommendation(rec) -> list[str]:
+    """Extract referenced local performer IDs from a recommendation.
+
+    duplicate_performer's target_id is only the suggested-keeper anchor --
+    the other performers in the group live in details.performers (a list
+    of {"id": ...} dicts), so a deleted non-anchor performer must be found
+    there too, not just via target_id. upstream_performer_changes has no
+    such grouping -- target_id is the whole story.
+    """
+    details = rec.details or {}
+    performer_ids: list[str] = []
+
+    def add(value):
+        if value is None:
+            return
+        pid = str(value).strip()
+        if pid:
+            performer_ids.append(pid)
+
+    if str(rec.type or "") == "duplicate_performer":
+        for p in details.get("performers") or []:
+            add(p.get("id"))
+        add(rec.target_id)
+    elif str(rec.target_type or "") == "performer":
+        add(rec.target_id)
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for pid in performer_ids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        deduped.append(pid)
+    return deduped
+
+
+def _extract_simple_target_id(rec, target_type: str) -> list[str]:
+    """For recommendation types with a single scalar target_id and no
+    grouped/composite ids to unpack (studio: upstream_studio_changes, tag:
+    upstream_tag_changes) -- unlike performer's duplicate_performer group
+    or scene's several composite-id types."""
+    if str(rec.target_type or "") == target_type and rec.target_id:
+        return [str(rec.target_id)]
+    return []
+
+
+class EntityCleanupRequest(BaseModel):
+    """Request from a Stash performer/studio/tag destroy hook to remove
+    every recommendation referencing that entity. Scenes have their own
+    dedicated cleanup-scene endpoint (several recommendation types there
+    use composite/grouped target_ids needing per-type extraction) --
+    performer/studio/tag recommendation types are simpler, so one generic
+    endpoint covers all three via target_type."""
+    target_type: str  # "performer" | "studio" | "tag"
+    entity_id: str
+
+
+@router.post("/cleanup-entity")
+async def cleanup_entity_recommendations(request: EntityCleanupRequest):
+    """Fast single-entity cleanup for the performer/studio/tag destroy
+    hooks. Deletes every recommendation (any status) referencing this
+    entity id. Runs inline, same rationale as cleanup-scene."""
+    if request.target_type not in ("performer", "studio", "tag"):
+        raise HTTPException(status_code=400, detail=f"Unsupported target_type: {request.target_type}")
+
+    db = get_rec_db()
+    entity_id = str(request.entity_id)
+    extractor = (
+        _extract_performer_ids_from_recommendation
+        if request.target_type == "performer"
+        else lambda rec: _extract_simple_target_id(rec, request.target_type)
+    )
+
+    recs = _load_all_recommendations(db, target_type=request.target_type)
+    deleted = 0
+    for rec in recs:
+        if entity_id in extractor(rec):
+            db.delete_recommendation(rec.id)
+            deleted += 1
+
+    return {"target_type": request.target_type, "entity_id": entity_id, "deleted": deleted}
+
+
+class SceneCleanupRequest(BaseModel):
+    """Request from the Stash scene destroy hook to remove every
+    recommendation referencing a scene that no longer exists. Covers both
+    a plain delete and a merge (Stash has no separate Scene.Merge.Post
+    hook -- merging folds the source scene's data into the destination and
+    destroys the source, which fires this same Scene.Destroy.Post hook for
+    the source scene id)."""
+    scene_id: str
+
+
+@router.post("/cleanup-scene")
+async def cleanup_scene_recommendations(request: SceneCleanupRequest):
+    """Fast single-scene cleanup for the Scene.Destroy.Post hook handler.
+    Deletes every recommendation (any status) referencing this scene id --
+    reuses the same extraction logic get_recommendation's lazy per-item
+    prune uses (_extract_scene_ids_from_recommendation), just applied
+    proactively for one already-known-gone scene instead of waiting for a
+    user to open a stale recommendation. Runs inline (a handful of sqlite
+    deletes at most) since the caller has its own local retry-cache for
+    when this endpoint is unreachable, same as the performer sync hook."""
+    db = get_rec_db()
+    scene_id = str(request.scene_id)
+
+    recs = _load_all_recommendations(db, target_type="scene")
+    deleted = 0
+    for rec in recs:
+        if scene_id in _extract_scene_ids_from_recommendation(rec):
+            db.delete_recommendation(rec.id)
+            deleted += 1
+
+    return {"scene_id": scene_id, "deleted": deleted}
+
+
 class LocalPerformerSyncOneRequest(BaseModel):
     """Request from the Stash performer create/update/destroy hook to sync
     a single performer into the local index. Deliberately synchronous

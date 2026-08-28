@@ -35,23 +35,17 @@ services:
       # already mapped in below for VAAPI-accelerated decode).
       - FFMPEG_HWACCEL=vaapi
       # Commented out by default -- most cards are on ROCm's officially
-      # supported target list and don't need this at all. Only cards
-      # OUTSIDE that list need it set to their nearest supported gfx
-      # version, or inference segfaults (see Dockerfile.rocm); forcing it
-      # on a card that doesn't need an override risks ROCm treating your
-      # GPU as a different architecture than it actually is. Check
-      # `rocminfo`'s reported gfx version on your host if inference fails
-      # to initialize, then uncomment and set this to match *your* card
-      # (not the value below, which is specific to the reference
-      # deployment's card).
-      #
-      # On gfx1103 (Radeon 780M), 11.0.0 alone caused intermittent
-      # "GPU Hang" crashes on the reference deployment during MIOpen's
-      # kernel warmup -- fixed by pairing this with the HOST kernel
-      # parameter `amdgpu.cwsr_enable=0` (add to GRUB_CMDLINE_LINUX_DEFAULT,
-      # `update-grub`, reboot) and bumping this to 11.0.3. If you hit the
-      # same crash on this card, try that combination.
-      # - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.3}
+      # supported target list and don't need this. Cards outside that
+      # list need it set to the nearest *supported* gfx target, not their
+      # own literal chip id -- rocBLAS's bundled kernel library doesn't
+      # ship a file for every real chip (gfx1103 itself, on the reference
+      # deployment's Radeon 780M, segfaults on the first real inference
+      # call for exactly this reason). Check `rocminfo`'s reported gfx
+      # version, then uncomment and set this to the nearest value rocBLAS
+      # actually has a kernel for -- 11.0.0 below is what works for the
+      # 780M. See README's GPU Troubleshooting section for the host
+      # kernel parameter this card also needed.
+      # - HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-11.0.0}
     devices:
       - /dev/kfd
       - /dev/dri

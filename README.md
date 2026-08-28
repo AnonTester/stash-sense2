@@ -12,7 +12,7 @@ Stash Sense 2 is a sidecar service and Stash plugin that brings ML-powered analy
 - **Scene Face Matches** — Automatically scans scenes with no performers assigned and surfaces the performers it identifies in them for review, with a video player, jump-to-timestamp buttons for each candidate's strongest frames, and one-click accept/reject per scene
 - **Duplicate Scene Detection** — Find duplicate scenes using face fingerprints, stash-box IDs, and metadata overlap — catches duplicates that phash matching misses
 - **Upstream Sync** — Detect metadata changes on stash-box endpoints and review per-field merge controls to keep your library current
-- **Recommendations Dashboard** — A unified view of all suggestions: duplicates, unidentified scenes, missing stash-box links, and upstream updates
+- **Recommendations Dashboard** — A unified view of all suggestions: duplicates, unidentified scenes, missing stash-box links, and upstream updates. Automatically cleaned up when their underlying scene, performer, studio, or tag is deleted or merged away in Stash
 - **Self-Updating Database** — Check for and apply database updates from the Settings UI without restarting the container
 - **Hardware-Adaptive** — Auto-detects your GPU and adjusts performance settings. Works with AMD (ROCm) or NVIDIA (CUDA) GPUs, or CPU-only (slower)
 
@@ -75,7 +75,7 @@ Each variant listens on port `6960` and persists its data under `./api/data` —
 curl http://localhost:6960/health
 ```
 
-> **`"status": "degraded"` at this point is expected, not an error.** The face recognition database and models load lazily on first use, not at container startup, so `/health` reports `degraded` until the first real identification request — or, on a brand-new install, until you've actually downloaded the database and models in step 4 below. It should flip to `healthy` the first time an identify request succeeds.
+> **`"status": "degraded"` at this point is expected, not an error.** The face recognition database and models load in the background right after startup (no request needed) — but on a brand-new install there's nothing to load yet until you've downloaded the database and models in step 4 below, so `/health` reports `degraded` until then. It flips to `healthy` once loading finishes.
 
 ### 3. Install the Stash plugin
 
@@ -109,15 +109,15 @@ Additional performance and recognition settings are configurable via the **Setti
 
 ### ffmpeg Hardware Acceleration
 
-By default ffmpeg decodes video frames on the CPU. For very large or high-resolution files (4K+, 8K, 10-bit HEVC) this can exhaust container RAM and trigger the kernel OOM killer, crashing the container. Setting `FFMPEG_HWACCEL` offloads decoding to the GPU, keeping large frame buffers in GPU memory instead of host RAM.
+By default ffmpeg decodes video frames on the CPU. For very large or high-resolution files (4K+, 8K) this can exhaust container RAM and trigger the kernel OOM killer, crashing the container. Setting `FFMPEG_HWACCEL` *allows* offloading decoding to the GPU, keeping large frame buffers in GPU memory instead of host RAM — but it only actually kicks in per-scene, for width/height ≥3840×2160. Below that, ffmpeg always decodes on CPU regardless of this setting: normal-sized frames don't need it, and on the ROCm variant specifically, mixing GPU decode with GPU compute for ordinary scenes destabilized the container (see the AMD troubleshooting note below).
 
 | Value | GPU | Notes |
 |-------|-----|-------|
 | `none` | Any / CPU | Default in every compose file, regardless of which one you're running. |
-| `cuda` | NVIDIA | Uses NVDEC. Only meaningful with `docker-compose.cuda.yml`, which already reserves the GPU it needs. |
-| `vaapi` | AMD or Intel | Uses VAAPI. `docker-compose.rocm.yml` already maps `/dev/dri` and defaults to this; for CPU-inference + VAAPI-decode on the base compose file, uncomment its `devices:` block instead. |
+| `cuda` | NVIDIA | Uses NVDEC for qualifying (≥4K) scenes. Only meaningful with `docker-compose.cuda.yml`, which already reserves the GPU it needs. |
+| `vaapi` | AMD or Intel | Uses VAAPI for qualifying (≥4K) scenes. `docker-compose.rocm.yml` already maps `/dev/dri` and defaults to this; for CPU-inference + VAAPI-decode on the base compose file, uncomment its `devices:` block instead. |
 
-**Trade-off:** hwaccel reduces memory pressure but adds a small per-frame GPU context setup cost, which slightly slows down single-frame seeks. For normal 1080p/4K libraries the default CPU mode is faster. Use hwaccel only if you are hitting OOM crashes on specific large files.
+**Trade-off:** since this now only applies to genuinely large scenes, there's little reason not to leave it set once you've confirmed hwaccel actually works on your host — the common case (sub-4K scenes) decodes on CPU either way.
 
 **NVIDIA (CUDA):**
 
@@ -135,7 +135,7 @@ devices:
 
 Check your host's render node with `ls /dev/dri/` — use `renderD129` if you have multiple GPUs and `renderD128` is your primary display adapter.
 
-> **If VAAPI fails** (ffmpeg logs "Device creation failed" or "No device available for decoder"), the affected scenes are marked as errors and skipped on crash-recovery reruns. To retry them, start a **new** fingerprint generation job from the Operations tab — new jobs always retry error scenes while skipping already-completed ones.
+> **If VAAPI fails** (ffmpeg logs "Device creation failed" or "No device available for decoder") on a qualifying ≥4K scene, that scene is marked as an error and skipped on crash-recovery reruns. To retry it, start a **new** fingerprint generation job from the Operations tab — new jobs always retry error scenes while skipping already-completed ones.
 
 ## Updating
 
@@ -201,9 +201,9 @@ If you plan to run v1 and v2 side by side for a while during the switch (rather 
 | `docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]]` | Install `nvidia-container-toolkit` and restart Docker |
 | GPU not detected inside container | Verify with `nvidia-smi` on the host; ensure the toolkit is configured: `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
 
-**AMD (ROCm):** `docker-compose.rocm.yml` maps `/dev/kfd` and `/dev/dri` and sets `security_opt: seccomp=unconfined` — no separate toolkit install needed beyond the host having a working kernel driver for your card (`rocminfo` should list your GPU). If your card isn't on ROCm's officially supported list (e.g. integrated/APU parts like the Radeon 780M this was tested on), you may need `HSA_OVERRIDE_GFX_VERSION` set to the nearest supported target — check `rocminfo`'s reported `gfx` version. This is a compose-level environment variable (`docker-compose.rocm.yml`'s `HSA_OVERRIDE_GFX_VERSION` line, commented out by default since most cards don't need it and forcing it on one that doesn't can cause its own problems), not baked into the image, so uncomment and set it to match *your* card without needing to rebuild.
+**AMD (ROCm):** `docker-compose.rocm.yml` maps `/dev/kfd` and `/dev/dri` and sets `security_opt: seccomp=unconfined` — no separate toolkit install needed beyond a working host kernel driver (`rocminfo` should list your GPU). Cards outside ROCm's officially supported list (e.g. integrated/APU parts like the Radeon 780M this was tested on) need `HSA_OVERRIDE_GFX_VERSION` set to the *nearest supported* gfx target, not their own literal chip id — rocBLAS's bundled kernel library doesn't ship one for every real chip, and using the literal id can crash on the first real inference call. It's a compose-level env var (`docker-compose.rocm.yml`'s `HSA_OVERRIDE_GFX_VERSION` line, commented out by default), not baked into the image, so uncomment and set it without rebuilding.
 
-On gfx1103 (Radeon 780M) specifically, `HSA_OVERRIDE_GFX_VERSION` alone wasn't enough — the reference deployment saw intermittent `HW Exception ... reason: GPU Hang` crashes during MIOpen's kernel warmup (this target has no precompiled kernel cache, so first-use kernels get JIT-compiled) that crash-looped the container until it happened to land on a lucky start. Fixed by also setting the **host** kernel parameter `amdgpu.cwsr_enable=0` (add to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, run `update-grub`, reboot) alongside bumping `HSA_OVERRIDE_GFX_VERSION` to `11.0.3`. If you're on the same card and see `GPU Hang` in the container logs, try this combination.
+On the reference deployment's Radeon 780M (gfx1103), the stable combination is `HSA_OVERRIDE_GFX_VERSION=11.0.0` plus the **host** kernel parameter `amdgpu.cwsr_enable=0` (add to `GRUB_CMDLINE_LINUX_DEFAULT` in `/etc/default/grub`, `update-grub`, reboot) — `11.0.3` (this card's own literal chip id) reliably segfaults on first inference instead of `11.0.0`. If you're on the same card, use that combination directly.
 
 **Neither?** Use the default `docker-compose.yml` (CPU-only) — every feature works, face recognition is just slower per scene.
 

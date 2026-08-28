@@ -53,11 +53,8 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         # finished defining the names identification_router itself imports
         # back from recommendations_router. See scene_matcher.py for the
         # same pattern/reasoning.
-        from identification_router import (
-            _identify_scene_impl,
-            require_db_available,
-            SceneIdentifyRequest,
-        )
+        from identification_router import require_db_available, SceneIdentifyRequest
+        from scene_batch_orchestrator import SceneBatchSpec, identify_scenes_batched
 
         try:
             await require_db_available()
@@ -128,37 +125,16 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         processed = 0
         errors: list[str] = []
 
+        scene_titles = {str(scene["id"]): scene.get("title") or f"Scene {scene['id']}" for scene in scenes_to_scan}
+        specs = []
         for scene in scenes_to_scan:
-            if self.is_stop_requested():
-                logger.warning(
-                    "[scene_face_match] Stop requested after %d/%d scenes",
-                    processed, len(scenes_to_scan),
-                )
-                break
-
             scene_id = str(scene["id"])
-            scene_title = scene.get("title") or f"Scene {scene_id}"
-
-            try:
-                # require_db_available() was only awaited once, before this
-                # loop started -- it's both the lazy-loader AND the idle-
-                # timer touch (see its own docstring), normally re-run on
-                # every request via FastAPI's Depends() on the real
-                # /identify/scene endpoint. This loop calls
-                # _identify_scene_impl directly, bypassing that dependency,
-                # so on a run long enough to cross the idle timeout (30 min
-                # default) the face recognition model got unloaded
-                # mid-scan and never reloaded -- every remaining scene
-                # failed for the rest of the run with "'NoneType' object
-                # has no attribute 'generator'". Confirmed live: a 1144-
-                # scene full scan failed on 820 of them (72%) this way,
-                # including the exact scene a user reported a confidence
-                # bug on, so it never got a fresh recommendation from that
-                # run at all. Re-checking every iteration reloads if
-                # evicted and resets the idle timer so it doesn't happen
-                # again for the rest of a long scan.
-                await require_db_available()
-                request = SceneIdentifyRequest(
+            file_info = (scene.get("files") or [{}])[0]
+            specs.append(SceneBatchSpec(
+                scene_id=scene_id,
+                width=file_info.get("width"),
+                height=file_info.get("height"),
+                request=SceneIdentifyRequest(
                     scene_id=scene_id,
                     top_k=TOP_K_PER_PERSON,
                     matching_mode="cluster",
@@ -171,15 +147,37 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     # would silently get weaker results here than manual
                     # identify would find for the same scene.
                     use_sprite=True,
-                )
-                response = await _identify_scene_impl(request)
-            except Exception as e:
-                logger.warning("[scene_face_match] Failed to identify scene %s: %s", scene_id, e)
-                errors.append(f"scene {scene_id}: {e}")
+                ),
+            ))
+
+        # require_db_available is passed through as identify_scenes_batched's
+        # before_scene hook rather than called once up front -- it's both
+        # the lazy-loader AND the idle-timer touch (see its own docstring),
+        # normally re-run on every request via FastAPI's Depends() on the
+        # real /identify/scene endpoint. This scan calls straight into the
+        # underlying identify functions, bypassing that dependency, so on a
+        # run long enough to cross the idle timeout (30 min default) the
+        # face recognition model got unloaded mid-scan and never reloaded --
+        # every remaining scene failed for the rest of the run with
+        # "'NoneType' object has no attribute 'generator'". Confirmed live:
+        # a 1144-scene full scan failed on 820 of them (72%) this way,
+        # including the exact scene a user reported a confidence bug on, so
+        # it never got a fresh recommendation from that run at all.
+        # Re-checking before every scene reloads if evicted and resets the
+        # idle timer so it doesn't happen again for the rest of a long scan.
+        async for scene_id, result in identify_scenes_batched(
+            specs, is_stop_requested=self.is_stop_requested, before_scene=require_db_available,
+        ):
+            scene_title = scene_titles[scene_id]
+
+            if isinstance(result, Exception):
+                logger.warning("[scene_face_match] Failed to identify scene %s: %s", scene_id, result)
+                errors.append(f"scene {scene_id}: {result}")
                 processed += 1
                 self.update_progress(processed, created)
                 continue
 
+            response = result
             for person in response.persons:
                 best_uid = _match_universal_id(person.best_match) if person.best_match else None
                 for match in person.all_matches:
@@ -220,6 +218,12 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
             processed += 1
             self.update_progress(processed, created)
+
+        if self.is_stop_requested() and processed < len(scenes_to_scan):
+            logger.warning(
+                "[scene_face_match] Stop requested after %d/%d scenes",
+                processed, len(scenes_to_scan),
+            )
 
         logger.warning(
             "[scene_face_match] Complete: %d matches found from %d/%d scenes scanned",

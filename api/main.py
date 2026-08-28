@@ -236,8 +236,10 @@ async def lifespan(app: FastAPI):
         loader=lambda: _load_face_recognition(data_dir),
         unloader=lambda: _unload_face_recognition(data_dir),
     )
-    # Face recognition is NOT loaded eagerly — it loads on first /identify request
-    print("Face recognition registered for lazy loading (loads on first use)")
+    # Face recognition is now eager-loaded in the background once settings
+    # are ready (see the require() call below, after init_settings()) --
+    # only the *unload* side stays lazy, governed by idle_unload_minutes.
+    print("Face recognition resource group registered (eager-loads once settings are ready)")
 
     # Initialize database self-updater
     db_updater = DatabaseUpdater(
@@ -286,6 +288,16 @@ async def lifespan(app: FastAPI):
     from recommendations_router import get_rec_db
     settings_mgr = init_settings(get_rec_db(), hw_profile.tier)
     init_settings_router()
+
+    # Warm the face-recognition resource in the background now that
+    # settings exist (idle_unload_minutes needs to be readable for
+    # _idle_checker below, but the load itself doesn't depend on it).
+    # Non-blocking -- startup/health responds immediately; the existing
+    # "face_recognition_loading" flag (see database_health_router.py)
+    # already covers the loading-in-progress UX, and require()'s own
+    # per-group lock means a request arriving mid-load just waits on this
+    # same in-flight load rather than double-loading.
+    asyncio.create_task(asyncio.to_thread(resource_mgr.require, FACE_RECOGNITION_RESOURCE))
 
     # Load stash-box endpoint config from Stash
     if STASH_URL:
@@ -375,7 +387,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.15.1",
+    version="0.16.0",
     lifespan=lifespan,
 )
 

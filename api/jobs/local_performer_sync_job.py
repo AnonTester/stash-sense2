@@ -15,19 +15,57 @@ A performer with no custom cover image still returns an image_path, but
 Stash marks it with a "default=true" query param -- that's how "no image
 yet" is detected, without needing to fetch and fail to decode a
 placeholder icon.
+
+## Concurrency
+
+Fetch (network) is async with bounded concurrency, sharing one
+httpx.AsyncClient; detect+embed (CPU-bound) runs on a small pool of real
+worker threads, each its own FaceEmbeddingGenerator -- same split as
+stash-sense2-data-gen's build/backfill_genderage.py, and for the same
+reason (fetches are I/O-bound, detection is CPU-bound around each ONNX
+call). Kept far more modest than that backfill's 32/5: this job's own
+library is typically a few hundred to a few thousand performers, not
+660k, and unlike the backfill this runs *inside* a long-lived service
+process's shared event loop, not a one-shot batch container -- the main
+coordinator loop below is async and never blocks synchronously, so other
+requests/jobs keep running while this one is in flight.
+
+`LocalPerformerIndex.upsert()`/`remove()` touch a usearch C++ Index
+object and are not thread-safe, so exactly one thread (the main
+coordinator, i.e. this job's own `run()`) ever calls them -- the async
+fetch stage only ever *reads* `index.get_image_hash()` (a plain dict
+lookup, safe under the GIL, and it never touches the usearch Index
+object at all), and reports anything requiring a write back to the
+coordinator via a queue instead of writing it itself.
+
+Uses `sync_one_performer()`'s pure helpers (`_image_fingerprint`,
+`_relative_image_url`, `STASHDB_ENDPOINT`) but not the function itself --
+`sync_one_performer()` stays untouched since the single-performer Stash
+hook handler also depends on its exact current (simple, sequential)
+behavior.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import queue
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
+
+import httpx
 
 from base_job import BaseJob, JobContext
 from config import DatabaseConfig
-from embeddings import FaceEmbeddingGenerator
-from local_performer_index import LocalPerformerIndex, sync_one_performer
+from embeddings import FaceEmbeddingGenerator, load_image
+from local_performer_index import (
+    STASHDB_ENDPOINT,
+    LocalPerformerIndex,
+    _image_fingerprint,
+    _relative_image_url,
+)
 from recommendations_router import get_stash_client
 
 logger = logging.getLogger(__name__)
@@ -39,16 +77,124 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 # per-100-scenes checkpoint cadence.
 CHECKPOINT_BATCH_SIZE = 50
 
+FETCH_CONCURRENCY = 8
+EMBED_WORKERS = 2
+
+
+async def _fetch_one(
+    stash: Any, client: httpx.AsyncClient, index: LocalPerformerIndex,
+    performer: dict, semaphore: asyncio.Semaphore, position: int,
+    event_queue: "queue.Queue", stop_event: threading.Event,
+) -> None:
+    """Fetches + fingerprints one performer's cover image and reports the
+    outcome onto `event_queue` for the coordinator to act on. Never
+    writes to `index` -- only reads `get_image_hash()` (plain dict
+    lookup, safe from this thread; see module docstring)."""
+    if stop_event.is_set():
+        return  # never dispatched -- position stays incomplete, picked up on resume
+    performer_id = int(performer["id"])
+    # event_queue.put() below is wrapped in asyncio.to_thread() throughout --
+    # a plain blocking call here would, if the queue is momentarily full,
+    # stall this whole producer thread's event loop (all FETCH_CONCURRENCY
+    # in-flight fetches), not just this one task. Real embed-worker threads
+    # (see _embed_worker) don't need this -- a blocking put() there only
+    # blocks that one dedicated thread, which is fine/expected backpressure.
+    async with semaphore:
+        try:
+            detail = await stash.get_performer(str(performer_id))
+        except Exception as e:
+            logger.warning("Local performer sync: failed to fetch performer %d: %s", performer_id, e)
+            await asyncio.to_thread(event_queue.put, ("fetch_error", performer_id, position, None))
+            return
+
+        image_path = detail.get("image_path") if detail else None
+        has_custom_image = bool(image_path) and "default=true" not in image_path
+        if not detail or not has_custom_image:
+            await asyncio.to_thread(event_queue.put, ("no_image", performer_id, position, None))
+            return
+
+        try:
+            resp = await client.get(image_path, headers={"ApiKey": stash.api_key})
+            resp.raise_for_status()
+            image_bytes = resp.content
+        except Exception as e:
+            logger.warning("Local performer sync: failed to fetch image for performer %d: %s", performer_id, e)
+            await asyncio.to_thread(event_queue.put, ("fetch_error", performer_id, position, None))
+            return
+
+        fingerprint = _image_fingerprint(image_bytes)
+        if index.get_image_hash(performer_id) == fingerprint:
+            await asyncio.to_thread(event_queue.put, ("unchanged", performer_id, position, None))
+            return
+
+        stashdb_id = next(
+            (sid["stash_id"] for sid in (detail.get("stash_ids") or [])
+             if sid.get("endpoint") == STASHDB_ENDPOINT),
+            None,
+        )
+        meta = {"name": detail["name"], "stashdb_id": stashdb_id, "image_url": _relative_image_url(image_path)}
+        await asyncio.to_thread(
+            event_queue.put, ("needs_embed", performer_id, position, (image_bytes, fingerprint, meta)),
+        )
+
+
+async def _produce(
+    stash: Any, index: LocalPerformerIndex, performers: list[dict], start_position: int,
+    event_queue: "queue.Queue", stop_event: threading.Event,
+) -> None:
+    semaphore = asyncio.Semaphore(FETCH_CONCURRENCY)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        tasks = [
+            asyncio.create_task(
+                _fetch_one(stash, client, index, performers[i], semaphore, i, event_queue, stop_event)
+            )
+            for i in range(start_position, len(performers))
+        ]
+        await asyncio.gather(*tasks)
+    event_queue.put(("producer_done", None, None, None))
+
+
+def _embed_worker(embed_queue: "queue.Queue", event_queue: "queue.Queue") -> None:
+    """Runs in its own OS thread with its own FaceEmbeddingGenerator --
+    pulls fetched images off embed_queue, does detect+embed, and reports
+    the outcome onto event_queue for the coordinator to apply."""
+    generator = FaceEmbeddingGenerator()
+    while True:
+        item = embed_queue.get()
+        if item is None:
+            break
+        performer_id, position, image_bytes, fingerprint, meta = item
+        try:
+            image = load_image(image_bytes)
+            faces = generator.detect_faces(image, min_confidence=0.5)
+        except Exception as e:
+            logger.warning("Local performer sync: decode/detect failed for performer %d: %s", performer_id, e)
+            event_queue.put(("embed_error", performer_id, position, None))
+            continue
+
+        if not faces:
+            event_queue.put(("no_face", performer_id, position, None))
+            continue
+
+        best_face = max(faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
+        embedding = generator.get_embedding(best_face)
+        event_queue.put(("embedded", performer_id, position, (embedding.embedding, fingerprint, meta)))
+
+    event_queue.put(("worker_done", None, None, None))
+
 
 class LocalPerformerSyncJob(BaseJob):
     """Diffs current Stash performers against the local index, embedding
     new/changed performers and removing ones no longer present.
 
     Cursor format (JSON string): {"position": <int>} -- index into the
-    stable-sorted (by id) performer list to resume from. The index is
-    saved to disk at the same checkpoints, so a crash never loses already-
-    embedded work, and a resumed run naturally skips anything already
-    up to date (same image fingerprint) even without the cursor.
+    stable-sorted (by id) performer list to resume from; specifically the
+    highest N such that positions [0, N) are *all* complete (not just
+    "highest position seen"), since fetch/embed now complete out of
+    order under concurrency. The index is saved to disk at the same
+    checkpoints, so a crash never loses already-embedded work, and a
+    resumed run naturally skips anything already up to date (same image
+    fingerprint) even without the cursor.
     """
 
     async def run(self, context: JobContext, cursor: Optional[str] = None) -> Optional[str]:
@@ -70,7 +216,6 @@ class LocalPerformerSyncJob(BaseJob):
             db_config.local_embedding_index_path,
             db_config.local_faces_json_path,
         )
-        generator = FaceEmbeddingGenerator()
 
         performers = await stash.get_all_performers()
         performers.sort(key=lambda p: int(p["id"]))  # stable order across runs
@@ -99,46 +244,106 @@ class LocalPerformerSyncJob(BaseJob):
         skipped_no_image = 0
         errored = 0
 
-        for i in range(start_position, total):
-            if context.is_stop_requested():
-                break
+        if start_position >= total:
+            context.set_result_summary(f"0 added, 0 updated, {removed} removed (nothing new to sync)")
+            return None
 
-            performer = performers[i]
-            performer_id = int(performer["id"])
+        event_queue: "queue.Queue" = queue.Queue(maxsize=500)
+        embed_queue: "queue.Queue" = queue.Queue(maxsize=200)
+        stop_event = threading.Event()
 
-            # Cheap pre-check against the already-fetched bulk list: only
-            # skips performers with no image_path at all (rare -- Stash
-            # normally returns a placeholder URL even with no custom
-            # cover). Everything else goes through sync_one_performer,
-            # which fetches and content-hashes the image to decide whether
-            # it actually needs re-embedding.
-            if not performer.get("image_path"):
-                await context.report_progress(i + 1, total)
+        embed_threads = [
+            threading.Thread(target=_embed_worker, args=(embed_queue, event_queue), daemon=True)
+            for _ in range(EMBED_WORKERS)
+        ]
+        for t in embed_threads:
+            t.start()
+
+        producer_thread = threading.Thread(
+            target=lambda: asyncio.run(_produce(stash, index, performers, start_position, event_queue, stop_event)),
+            daemon=True,
+        )
+        producer_thread.start()
+
+        completed_positions: set[int] = set()
+        next_expected = start_position
+        producer_finished = False
+        worker_sentinels = 0
+        since_checkpoint = 0
+
+        def _advance_and_report(position: int) -> None:
+            nonlocal next_expected, since_checkpoint
+            completed_positions.add(position)
+            while next_expected in completed_positions:
+                completed_positions.discard(next_expected)
+                next_expected += 1
+            since_checkpoint += 1
+
+        while True:
+            kind, performer_id, position, payload = await asyncio.to_thread(event_queue.get)
+
+            if kind == "producer_done":
+                producer_finished = True
+                for _ in range(EMBED_WORKERS):
+                    embed_queue.put(None)
+                continue
+            if kind == "worker_done":
+                worker_sentinels += 1
+                if producer_finished and worker_sentinels >= EMBED_WORKERS:
+                    break
                 continue
 
-            try:
-                status = await sync_one_performer(stash, generator, index, performer_id, "update")
-                if status == "added":
-                    added += 1
-                elif status == "updated":
-                    updated += 1
-                elif status == "skipped_no_image":
-                    skipped_no_image += 1
-            except Exception as e:
-                logger.warning("Local performer sync: failed on performer %d (%s): %s",
-                                performer_id, performer.get("name"), e)
+            if kind == "unchanged":
+                pass
+            elif kind == "fetch_error":
                 errored += 1
-
-            await context.report_progress(i + 1, total)
-
-            if (i + 1) % CHECKPOINT_BATCH_SIZE == 0:
-                index.save()
-                await context.checkpoint(
-                    cursor=json.dumps({"position": i + 1}),
-                    items_processed=i + 1,
+            elif kind == "no_image":
+                was_present = performer_id in index
+                index.remove(performer_id)
+                if was_present:
+                    removed += 1
+                else:
+                    skipped_no_image += 1
+            elif kind == "needs_embed":
+                image_bytes, fingerprint, meta = payload
+                await asyncio.to_thread(embed_queue.put, (performer_id, position, image_bytes, fingerprint, meta))
+                continue  # not complete yet -- don't advance the cursor until the embed result comes back
+            elif kind in ("no_face", "embed_error"):
+                was_present = performer_id in index
+                index.remove(performer_id)
+                if kind == "embed_error":
+                    errored += 1
+                elif was_present:
+                    removed += 1
+                else:
+                    skipped_no_image += 1
+            elif kind == "embedded":
+                embedding, fingerprint, meta = payload
+                was_present = performer_id in index
+                index.upsert(
+                    performer_id=performer_id, name=meta["name"], stashdb_id=meta["stashdb_id"],
+                    image_hash=fingerprint, image_url=meta["image_url"], embedding=embedding,
                 )
-                logger.debug("Local performer sync checkpoint: position=%d/%d", i + 1, total)
+                if was_present:
+                    updated += 1
+                else:
+                    added += 1
 
+            _advance_and_report(position)
+            await context.report_progress(next_expected, total)
+
+            if since_checkpoint >= CHECKPOINT_BATCH_SIZE:
+                since_checkpoint = 0
+                index.save()
+                await context.checkpoint(cursor=json.dumps({"position": next_expected}), items_processed=next_expected)
+                logger.debug("Local performer sync checkpoint: position=%d/%d", next_expected, total)
+
+            if context.is_stop_requested() and not stop_event.is_set():
+                stop_event.set()  # prevents new fetches from starting; in-flight ones still complete and get applied
+
+        producer_thread.join()
+        for t in embed_threads:
+            t.join()
         index.save()
 
         stopped_early = context.is_stop_requested()
@@ -157,8 +362,8 @@ class LocalPerformerSyncJob(BaseJob):
         except (RuntimeError, KeyError):
             pass  # not initialized / not currently loaded -- nothing to unload
 
-        if stopped_early:
-            return json.dumps({"position": i + 1})
+        if stopped_early and next_expected < total:
+            return json.dumps({"position": next_expected})
 
         summary = (
             f"{added} added, {updated} updated, {removed} removed "

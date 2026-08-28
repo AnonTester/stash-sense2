@@ -11,6 +11,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import Optional
 
 import httpx
@@ -22,6 +23,7 @@ import face_config
 from recognizer import FaceRecognizer, PerformerMatch, RecognitionResult
 from embeddings import load_image, DetectedFace, FaceEmbedding
 from frame_extractor import (
+    ExtractionResult,
     FrameExtractionConfig,
     extract_frames_from_stash_scene,
     check_ffmpeg_available,
@@ -66,6 +68,21 @@ _scene_progress: dict[str, dict] = {}
 
 def _set_stage(scene_id: str, stage: str) -> None:
     _scene_progress[scene_id] = {"stage": stage, "updated_at": time.time()}
+
+
+def _scene_needs_vaapi(width: Optional[int], height: Optional[int]) -> bool:
+    """True only for genuinely >=4K scenes (resolution-only trigger).
+
+    FFMPEG_HWACCEL=vaapi exists specifically to keep 4K+ frame decode+resize
+    off the CPU/RAM path -- large frames there were causing real OOM
+    crashes. Below that threshold, CPU decode is fast enough on its own and
+    skipping VAAPI also avoids driving GPU video-decode concurrently with
+    ROCm/HIP compute on the same iGPU (the two were found to destabilize
+    each other when run at once). FFMPEG_HWACCEL is the ceiling ("VAAPI
+    allowed if set at all"); this decides whether a specific scene actually
+    uses it.
+    """
+    return bool(width and width >= 3840) or bool(height and height >= 2160)
 
 # Module-level globals set by init
 _recognizer = None
@@ -342,8 +359,12 @@ async def _fetch_missing_images(all_matches: list[PerformerMatch]) -> None:
 async def require_db_available():
     """Ensure face recognition is loaded, return 503 if unavailable.
 
-    Uses ResourceManager to lazily load on first request. Returns 503 if
-    a database update is in progress or if loading fails.
+    Normally already loaded by main.py's startup eager-load task by the
+    time any real request arrives; this is the fallback path (still eager
+    triggers ResourceManager's lazy-load) for a request that lands while
+    that background load is still in flight, or if it failed and a later
+    request is retrying. Returns 503 if a database update is in progress
+    or if loading fails.
     """
     if _db_updater and _db_updater._state.status in (
         UpdateStatus.SWAPPING, UpdateStatus.RELOADING,
@@ -819,8 +840,12 @@ async def _process_sprite_frames(
         return []
 
     detected: list[tuple[float, "DetectedFace", "np.ndarray"]] = []
-    for sf in sprite_frames:
-        faces = _recognizer.generator.detect_faces(sf.image, min_confidence=min_face_confidence)
+    per_tile_faces = await asyncio.to_thread(
+        _recognizer.detect_faces_parallel,
+        [sf.image for sf in sprite_frames],
+        min_face_confidence,
+    )
+    for sf, faces in zip(sprite_frames, per_tile_faces):
         for face in faces:
             if face.bbox["w"] >= min_face_size and face.bbox["h"] >= min_face_size:
                 detected.append((sf.timestamp, face, sf.image))
@@ -971,96 +996,32 @@ async def identify_scene(request: SceneIdentifyRequest, _=Depends(require_db_ava
     return await _identify_scene_impl(request)
 
 
-async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyResponse":
-    """Actual scene-identify implementation, split out from the identify_scene
-    route so callers other than the HTTP route (e.g. the scene_face_match
-    analyzer's batch job) can invoke it directly without going through
-    FastAPI's Depends machinery. Callers must ensure face recognition is
-    available themselves first (see require_db_available)."""
-    t_start = time.time()
+@dataclass
+class SceneExtractionBundle:
+    """Everything the compute half (_identify_scene_compute) needs from the
+    decode half (_extract_scene_frames), so the two can run with a
+    deliberate gap in between -- see scene_batch_orchestrator.py, which
+    runs _extract_scene_frames for a whole batch of >=4K scenes to
+    completion before starting compute for any of them, keeping VAAPI
+    decode and ROCm/HIP compute from ever overlapping for those scenes."""
+    extraction_result: ExtractionResult
+    duration_sec: float
+    screenshot_url: Optional[str]
+    file_info: dict
+    extraction_ms: float  # wall time of the ffmpeg extraction call itself
 
+
+async def _extract_scene_frames(
+    request: SceneIdentifyRequest, num_frames: int, t_start: float,
+) -> SceneExtractionBundle:
+    """Decode half of scene identification: resolves scene info from Stash
+    (duration, resolution, screenshot path), decides per-scene hwaccel via
+    _scene_needs_vaapi(), and extracts frames via ffmpeg. Pulled out of
+    _identify_scene_impl (which still calls this directly for the live
+    endpoint / non-batched callers) so scene_batch_orchestrator.py can also
+    call it standalone for >=4K scenes -- see SceneExtractionBundle."""
     base_url = _stash_url.rstrip("/")
     api_key = _stash_api_key
-
-    if not base_url:
-        raise HTTPException(status_code=400, detail="STASH_URL env var not set")
-
-    # Resolve num_frames: use settings value when caller didn't override.
-    # Done up front so it's available for the cache-compatibility check below.
-    num_frames = request.num_frames
-    try:
-        from settings import get_setting
-        settings_num_frames = int(get_setting("num_frames"))
-        if num_frames == face_config.NUM_FRAMES:
-            num_frames = settings_num_frames
-    except (RuntimeError, KeyError):
-        pass
-
-    scene_id_int = int(request.scene_id)
-
-    match_config = MatchingConfig(
-        query_k=100,  # Get more candidates before threshold-filtering
-        max_results=request.top_k * 2,
-        max_distance=request.max_distance,
-    )
-
-    # Sprite results are resolved once, up front, so they're available
-    # regardless of which video-frame path runs after this (cache fast-path /
-    # full pipeline / skipped entirely via skip_frame_extraction). Unlike
-    # v1's implementation of this feature, nothing here is cached (see
-    # _process_sprite_frames's docstring) -- every use_sprite=True call
-    # redoes sprite fetch+detect+embed, consistent with video-frame
-    # results' current (also uncached) behavior in v2.
-    sprite_extra_results: list[tuple[int, RecognitionResult]] = []
-    if request.use_sprite:
-        _set_stage(request.scene_id, "analyzing_sprite")
-        sprite_extra_results = await _process_sprite_frames(
-            base_url, request.scene_id, api_key,
-            min_face_size=request.min_face_size,
-            min_face_confidence=request.min_face_confidence,
-            match_config=match_config, t_start=t_start,
-        )
-
-    if request.skip_frame_extraction:
-        # User declined to fingerprint an unfingerprinted scene -- identify
-        # from sprite tiles only. No screenshot, no ffmpeg, no fingerprint
-        # write (that would misrepresent this scene as fingerprinted).
-        scene_all_matches = [m for _, r in sprite_extra_results for m in r.matches]
-        await _fetch_missing_images(scene_all_matches)
-        _set_stage(request.scene_id, "matching_performers")
-        persons = _cluster_and_match(sprite_extra_results, request)
-        _set_stage(request.scene_id, "done")
-        return SceneIdentifyResponse(
-            scene_id=request.scene_id,
-            frames_analyzed=0,
-            frames_requested=0,
-            faces_detected=len(sprite_extra_results),
-            faces_after_filter=len(sprite_extra_results),
-            persons=persons,
-            errors=[],
-            fingerprint_saved=False,
-            fingerprint_error=None,
-            timing={"total_ms": round((time.time() - t_start) * 1000)},
-            used_cache=False,
-        )
-
-    if request.use_cache:
-        cache_meta = get_scene_signal_cache(scene_id_int)
-        if cache_meta is not None and is_scene_cache_compatible(
-            cache_meta,
-            num_frames=num_frames,
-            min_face_size=request.min_face_size,
-            min_face_confidence=request.min_face_confidence,
-            start_offset_pct=request.start_offset_pct,
-            end_offset_pct=request.end_offset_pct,
-        ):
-            print(f"[identify_scene] === START scene_id={request.scene_id} (cache hit) ===")
-            try:
-                return await _identify_scene_from_cache(
-                    request, cache_meta, t_start, extra_results=sprite_extra_results,
-                )
-            except Exception as e:
-                logger.warning(f"[identify_scene] Cache fast-path failed for scene {request.scene_id}, falling back to full pipeline: {e}")
 
     if not check_ffmpeg_available():
         raise HTTPException(status_code=503, detail="ffmpeg not available")
@@ -1117,9 +1078,18 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
     except (RuntimeError, KeyError):
         pass
 
-    # Configure frame extraction
+    # Configure frame extraction. FFMPEG_HWACCEL is a ceiling ("VAAPI
+    # allowed if set at all") -- _scene_needs_vaapi() decides whether this
+    # specific scene actually uses it, so below-4K scenes always decode on
+    # CPU even when the env var permits VAAPI, keeping GPU video-decode from
+    # ever running alongside ROCm/HIP compute for the common case.
     _hwaccel_env = os.environ.get("FFMPEG_HWACCEL", "none").lower().strip()
-    hwaccel = None if _hwaccel_env in ("none", "", "cpu") else _hwaccel_env
+    _hwaccel_allowed = None if _hwaccel_env in ("none", "", "cpu") else _hwaccel_env
+    hwaccel = (
+        _hwaccel_allowed
+        if _hwaccel_allowed and _scene_needs_vaapi(file_info.get("width"), file_info.get("height"))
+        else None
+    )
 
     # VAAPI requires a dynamically-linked ffmpeg to dlopen libva backend
     # plugins at runtime. The mwader static build (/usr/local/bin/ffmpeg)
@@ -1152,25 +1122,60 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
         config=config,
     )
 
-    print(f"[identify_scene] [{time.time()-t_start:.1f}s] Extracted {len(extraction_result.frames)} frames in {time.time()-t_extract:.1f}s")
+    extraction_ms = (time.time() - t_extract) * 1000
+    print(f"[identify_scene] [{time.time()-t_start:.1f}s] Extracted {len(extraction_result.frames)} frames in {extraction_ms/1000:.1f}s")
     if extraction_result.errors:
         print(f"[identify_scene] Errors: {extraction_result.errors[:3]}")
 
-    # Phase 1: Detect all faces from all frames
+    return SceneExtractionBundle(
+        extraction_result=extraction_result,
+        duration_sec=duration_sec,
+        screenshot_url=screenshot_url,
+        file_info=file_info,
+        extraction_ms=extraction_ms,
+    )
+
+
+async def _identify_scene_compute(
+    request: SceneIdentifyRequest,
+    bundle: SceneExtractionBundle,
+    num_frames: int,
+    match_config: MatchingConfig,
+    scene_id_int: int,
+    sprite_extra_results: list[tuple[int, RecognitionResult]],
+    t_start: float,
+) -> "SceneIdentifyResponse":
+    """Detect+embed+match+fingerprint half of scene identification, given
+    an already-extracted bundle (see _extract_scene_frames). Pulled out of
+    _identify_scene_impl (which still calls this directly right after
+    _extract_scene_frames for the live endpoint / non-batched callers) so
+    scene_batch_orchestrator.py can call it separately, after a deliberate
+    gap where an entire batch of >=4K scenes finished decoding first."""
+    api_key = _stash_api_key
+    extraction_result = bundle.extraction_result
+    duration_sec = bundle.duration_sec
+    screenshot_url = bundle.screenshot_url
+    file_info = bundle.file_info
+
+    # Phase 1: Detect all faces from all frames -- spread across
+    # _recognizer's detection pool (recognizer.py's DETECTION_POOL_SIZE
+    # generators) instead of one shared generator processing frames
+    # sequentially, off the event loop via asyncio.to_thread since
+    # detect_faces_parallel() blocks until every frame is done.
     _set_stage(request.scene_id, "analyzing_frames")
     detected_faces: list[tuple[int, "DetectedFace", "np.ndarray"]] = []  # (frame_index, face, frame_image)
     total_faces = 0
-    t_detect_total = 0.0
 
     t_face_loop = time.time()
-    for frame in extraction_result.frames:
-        t_det = time.time()
-        faces = _recognizer.generator.detect_faces(
-            frame.image,
-            min_confidence=request.min_face_confidence,
-        )
-        t_detect_total += time.time() - t_det
+    t_det = time.time()
+    per_frame_faces = await asyncio.to_thread(
+        _recognizer.detect_faces_parallel,
+        [frame.image for frame in extraction_result.frames],
+        request.min_face_confidence,
+    )
+    t_detect_total = time.time() - t_det
 
+    for frame, faces in zip(extraction_result.frames, per_frame_faces):
         for face in faces:
             total_faces += 1
             if face.bbox["w"] >= request.min_face_size and face.bbox["h"] >= request.min_face_size:
@@ -1333,7 +1338,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
 
     timing_data = {
         "total_ms": round((time.time() - t_start) * 1000),
-        "extraction_ms": round((t_face_loop - t_extract) * 1000),
+        "extraction_ms": round(bundle.extraction_ms),
         "face_loop_ms": round(t_face_loop_total * 1000),
         "detection_ms": round(t_detect_total * 1000),
         "embedding_ms": round(t_embed_total * 1000),
@@ -1356,6 +1361,152 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
         fingerprint_saved=fingerprint_saved,
         fingerprint_error=fingerprint_error,
         timing=timing_data,
+    )
+
+
+@dataclass
+class PreparedSceneIdentify:
+    """Output of _prepare_scene_identify() when the scene needs the full
+    decode+compute pipeline (no skip_frame_extraction / cache-hit short-
+    circuit applied) -- everything _extract_scene_frames() and
+    _identify_scene_compute() need, resolved once so a batch caller
+    (scene_batch_orchestrator.py) doesn't redo sprite processing or the
+    cache check for each scene it batches."""
+    num_frames: int
+    match_config: MatchingConfig
+    scene_id_int: int
+    sprite_extra_results: list[tuple[int, RecognitionResult]]
+    t_start: float
+
+
+async def _prepare_scene_identify(
+    request: SceneIdentifyRequest,
+) -> "PreparedSceneIdentify | SceneIdentifyResponse":
+    """Everything common to every /identify/scene call that happens before
+    any ffmpeg decode: resolves num_frames/match_config, runs sprite-tile
+    processing (independent of video decode -- sprites come from Stash's
+    own pre-generated JPEG, not this scene's video file), and applies the
+    skip_frame_extraction / cache-hit short-circuits.
+
+    Returns a finished SceneIdentifyResponse directly for either short-
+    circuit, or a PreparedSceneIdentify when the full decode+compute
+    pipeline (_extract_scene_frames + _identify_scene_compute) is still
+    needed -- callers must check which type they got back before deciding
+    whether to proceed to decode."""
+    t_start = time.time()
+
+    base_url = _stash_url.rstrip("/")
+    api_key = _stash_api_key
+
+    if not base_url:
+        raise HTTPException(status_code=400, detail="STASH_URL env var not set")
+
+    # Resolve num_frames: use settings value when caller didn't override.
+    # Done up front so it's available for the cache-compatibility check below.
+    num_frames = request.num_frames
+    try:
+        from settings import get_setting
+        settings_num_frames = int(get_setting("num_frames"))
+        if num_frames == face_config.NUM_FRAMES:
+            num_frames = settings_num_frames
+    except (RuntimeError, KeyError):
+        pass
+
+    scene_id_int = int(request.scene_id)
+
+    match_config = MatchingConfig(
+        query_k=100,  # Get more candidates before threshold-filtering
+        max_results=request.top_k * 2,
+        max_distance=request.max_distance,
+    )
+
+    # Sprite results are resolved once, up front, so they're available
+    # regardless of which video-frame path runs after this (cache fast-path /
+    # full pipeline / skipped entirely via skip_frame_extraction). Unlike
+    # v1's implementation of this feature, nothing here is cached (see
+    # _process_sprite_frames's docstring) -- every use_sprite=True call
+    # redoes sprite fetch+detect+embed, consistent with video-frame
+    # results' current (also uncached) behavior in v2.
+    sprite_extra_results: list[tuple[int, RecognitionResult]] = []
+    if request.use_sprite:
+        _set_stage(request.scene_id, "analyzing_sprite")
+        sprite_extra_results = await _process_sprite_frames(
+            base_url, request.scene_id, api_key,
+            min_face_size=request.min_face_size,
+            min_face_confidence=request.min_face_confidence,
+            match_config=match_config, t_start=t_start,
+        )
+
+    if request.skip_frame_extraction:
+        # User declined to fingerprint an unfingerprinted scene -- identify
+        # from sprite tiles only. No screenshot, no ffmpeg, no fingerprint
+        # write (that would misrepresent this scene as fingerprinted).
+        scene_all_matches = [m for _, r in sprite_extra_results for m in r.matches]
+        await _fetch_missing_images(scene_all_matches)
+        _set_stage(request.scene_id, "matching_performers")
+        persons = _cluster_and_match(sprite_extra_results, request)
+        _set_stage(request.scene_id, "done")
+        return SceneIdentifyResponse(
+            scene_id=request.scene_id,
+            frames_analyzed=0,
+            frames_requested=0,
+            faces_detected=len(sprite_extra_results),
+            faces_after_filter=len(sprite_extra_results),
+            persons=persons,
+            errors=[],
+            fingerprint_saved=False,
+            fingerprint_error=None,
+            timing={"total_ms": round((time.time() - t_start) * 1000)},
+            used_cache=False,
+        )
+
+    if request.use_cache:
+        cache_meta = get_scene_signal_cache(scene_id_int)
+        if cache_meta is not None and is_scene_cache_compatible(
+            cache_meta,
+            num_frames=num_frames,
+            min_face_size=request.min_face_size,
+            min_face_confidence=request.min_face_confidence,
+            start_offset_pct=request.start_offset_pct,
+            end_offset_pct=request.end_offset_pct,
+        ):
+            print(f"[identify_scene] === START scene_id={request.scene_id} (cache hit) ===")
+            try:
+                return await _identify_scene_from_cache(
+                    request, cache_meta, t_start, extra_results=sprite_extra_results,
+                )
+            except Exception as e:
+                logger.warning(f"[identify_scene] Cache fast-path failed for scene {request.scene_id}, falling back to full pipeline: {e}")
+
+    return PreparedSceneIdentify(
+        num_frames=num_frames,
+        match_config=match_config,
+        scene_id_int=scene_id_int,
+        sprite_extra_results=sprite_extra_results,
+        t_start=t_start,
+    )
+
+
+async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyResponse":
+    """Actual scene-identify implementation, split out from the identify_scene
+    route so callers other than the HTTP route (e.g. the scene_face_match
+    analyzer's batch job) can invoke it directly without going through
+    FastAPI's Depends machinery. Callers must ensure face recognition is
+    available themselves first (see require_db_available).
+
+    Internally this is a thin wrapper over _prepare_scene_identify (settings/
+    sprite/cache/skip short-circuits), _extract_scene_frames (decode), and
+    _identify_scene_compute (detect+embed+match+fingerprint) -- split out so
+    scene_batch_orchestrator.py can run decode for a whole batch of >=4K
+    scenes before compute starts for any of them."""
+    prepared = await _prepare_scene_identify(request)
+    if isinstance(prepared, SceneIdentifyResponse):
+        return prepared
+
+    bundle = await _extract_scene_frames(request, prepared.num_frames, prepared.t_start)
+    return await _identify_scene_compute(
+        request, bundle, prepared.num_frames, prepared.match_config,
+        prepared.scene_id_int, prepared.sprite_extra_results, prepared.t_start,
     )
 
 
