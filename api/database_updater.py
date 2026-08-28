@@ -37,7 +37,8 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from delta_applier import apply_delta_chain, find_delta_chain
+from delta_applier import apply_delta_chain, find_delta_chain, parse_min_sidecar_version
+from release_info import compare_versions
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ RELEASE_FILES = {
     "faces.json",
     "performers.json",
     "manifest.json",
+    "face_yaw.json",
 }
 
 # Subset of RELEASE_FILES that *must* be present for a valid release.
@@ -258,6 +260,29 @@ class DatabaseUpdater:
             except Exception as exc:
                 logger.warning("Delta chain lookup failed, will offer full download only: %s", exc)
 
+        # Minimum sidecar version required to safely consume the target
+        # release -- parsed from the release notes body (zero extra HTTP
+        # cost, already fetched above), plus every delta hop's own marker
+        # as defense in depth (also free -- find_delta_chain() already
+        # parsed these while building the chain). Only ever increases
+        # release-over-release (see stash-sense2-data-gen's
+        # build/manifest.py::MIN_SIDECAR_VERSION), so taking the max
+        # across whatever markers we have is always correct, not just a
+        # safe overestimate.
+        min_sidecar_version = parse_min_sidecar_version(release.get("body"))
+        for hop in (delta_chain or []):
+            hop_min = hop.get("min_sidecar_version")
+            if hop_min and (min_sidecar_version is None or compare_versions(hop_min, min_sidecar_version) > 0):
+                min_sidecar_version = hop_min
+
+        from main import app as _app
+        own_version = getattr(_app, "version", None)
+        sidecar_compatible = (
+            min_sidecar_version is None
+            or own_version is None
+            or compare_versions(own_version, min_sidecar_version) >= 0
+        )
+
         result: dict[str, Any] = {
             "update_available": update_available,
             "current_version": current,
@@ -269,6 +294,8 @@ class DatabaseUpdater:
             "delta_available": bool(delta_chain),
             "delta_chain_length": len(delta_chain) if delta_chain else None,
             "delta_download_size_mb": round(sum(h["size_mb"] for h in delta_chain), 2) if delta_chain else None,
+            "min_sidecar_version": min_sidecar_version,
+            "sidecar_compatible": sidecar_compatible,
             "_delta_chain": delta_chain,
         }
 

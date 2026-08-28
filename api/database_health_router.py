@@ -87,6 +87,10 @@ class CheckUpdateResponse(BaseModel):
     delta_available: bool = False
     delta_chain_length: Optional[int] = None
     delta_download_size_mb: Optional[float] = None
+    # Compatibility gate -- see database_updater.py's check_update() and
+    # stash-sense2-data-gen's build/manifest.py::MIN_SIDECAR_VERSION.
+    min_sidecar_version: Optional[str] = None
+    sidecar_compatible: bool = True
 
 
 class StartUpdateResponse(BaseModel):
@@ -243,6 +247,12 @@ async def start_database_update(method: str = "auto"):
     check = await _db_updater.check_update(force=True)
     if not check.get("update_available"):
         raise HTTPException(status_code=400, detail="Already on latest version")
+    if not check.get("sidecar_compatible", True):
+        raise HTTPException(
+            status_code=400,
+            detail=f"This database release requires sidecar {check.get('min_sidecar_version')} or "
+                   "newer -- update the sidecar container first.",
+        )
 
     use_delta = method != "full" and check.get("delta_available")
     if use_delta:

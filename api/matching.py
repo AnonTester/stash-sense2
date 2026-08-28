@@ -45,6 +45,24 @@ class MatchingConfig:
     gender_confidence_floor: float = 0.65
     gender_mismatch_penalty: float = 0.5
 
+    # Steep-angle soft penalty. buffalo_l's per-face yaw estimate (see
+    # stash-sense2-data-gen's embed/embeddings.py) is a rough heuristic,
+    # not a calibrated pose estimator, and a face crop shot from a steep
+    # angle carries less reliable identity information than a frontal
+    # one -- confirmed live: a performer whose only reference images were
+    # both >30 degrees off-frontal kept surfacing as a false-positive
+    # match across unrelated queries. Deliberately a soft multiplier
+    # (like the gender penalty above), not a hard exclusion -- yaw is a
+    # rough estimate, and a genuinely steep-angle match can still be
+    # correct. Scales linearly from 1.0 (no penalty) at
+    # yaw_penalty_threshold up to yaw_penalty_at_90 at a full 90-degree
+    # profile. Applied per-candidate-face (the specific matched vector's
+    # own yaw), not per-performer -- a performer can have both great
+    # frontal shots and steep-angle ones, so this can't be collapsed to
+    # one number the way inferred_gender is.
+    yaw_penalty_threshold: float = 45.0
+    yaw_penalty_at_90: float = 0.5
+
 
 DEFAULT_CONFIG = MatchingConfig()
 
@@ -153,6 +171,31 @@ def _apply_gender_penalty(
         candidate.combined_distance = 1.0 - candidate.confidence
 
 
+def _apply_yaw_penalty(candidate: CandidateMatch, face_yaw: list, config: MatchingConfig) -> None:
+    """Multiplies `candidate.confidence` down (never excludes) when the
+    specific reference face that matched was shot at a steep angle --
+    looked up by its own usearch vector id (`candidate.face_index`), not
+    aggregated across the performer. See MatchingConfig's own comment for
+    the rationale and the linear-scaling formula.
+
+    Also pushes `combined_distance` back out to match, same reasoning as
+    `_apply_gender_penalty` -- every downstream ranking/filtering step
+    reads `combined_distance`, not `confidence`."""
+    if not face_yaw or candidate.face_index >= len(face_yaw):
+        return
+    yaw = face_yaw[candidate.face_index]
+    if yaw is None:
+        return
+    abs_yaw = min(abs(yaw), 90.0)
+    if abs_yaw <= config.yaw_penalty_threshold:
+        return
+    span = 90.0 - config.yaw_penalty_threshold
+    frac = (abs_yaw - config.yaw_penalty_threshold) / span if span > 0 else 1.0
+    multiplier = 1.0 - frac * (1.0 - config.yaw_penalty_at_90)
+    candidate.confidence *= multiplier
+    candidate.combined_distance = 1.0 - candidate.confidence
+
+
 def build_matches(
     query_result: IndexQueryResult,
     faces_mapping: list[str],  # index -> universal_id
@@ -160,6 +203,7 @@ def build_matches(
     config: MatchingConfig = DEFAULT_CONFIG,
     query_gender: Optional[str] = None,
     query_gender_confidence: Optional[float] = None,
+    face_yaw: Optional[list] = None,  # index -> yaw degrees, or None
 ) -> MatchingResult:
     """Build sorted, threshold-filtered CandidateMatch objects from one
     index query's results.
@@ -167,7 +211,12 @@ def build_matches(
     `query_gender`/`query_gender_confidence`: the query face's own
     buffalo_l-predicted gender (see recognizer.py's caller), used only for
     the soft mismatch penalty below -- optional, and a no-op when omitted
-    (existing callers that don't pass them are unaffected)."""
+    (existing callers that don't pass them are unaffected).
+
+    `face_yaw`: index -> yaw degrees (same shape as faces_mapping), for
+    the steep-angle soft penalty -- optional, and a no-op when omitted or
+    shorter than the matched index (an older dataset published before
+    this feature has no face_yaw.json at all)."""
     candidates: dict[int, CandidateMatch] = {}
     faces_count = len(faces_mapping)
 
@@ -187,6 +236,7 @@ def build_matches(
         )
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
         _apply_gender_penalty(candidate, info, config, query_gender, query_gender_confidence)
+        _apply_yaw_penalty(candidate, face_yaw, config)
         # Defensive: keep only the closer entry if the ANN index ever
         # returns the same idx twice within one query's neighbor list
         # (shouldn't happen in practice, but cheap to guard).
@@ -322,6 +372,7 @@ def match_face(
     local_performers_mapping: Optional[dict[str, dict]] = None,
     query_gender: Optional[str] = None,
     query_gender_confidence: Optional[float] = None,
+    face_yaw: Optional[list] = None,
 ) -> MatchingResult:
     """
     Match a face against the database.
@@ -343,6 +394,11 @@ def match_face(
             ("MALE"/"FEMALE"), if available -- see recognizer.py's caller.
             Optional; omitting it just skips the gender mismatch penalty.
         query_gender_confidence: Confidence (0-1) for `query_gender`.
+        face_yaw: index -> yaw degrees for the main index (see
+            build_matches's own docstring). Optional; omitting it skips
+            the steep-angle penalty. Not applicable to local-index
+            candidates (each local performer contributes exactly one
+            vector from their own cover image, no per-vector yaw tracked).
 
     Returns:
         MatchingResult with candidates
@@ -351,6 +407,7 @@ def match_face(
     result = build_matches(
         query_result, faces_mapping, performers, config,
         query_gender=query_gender, query_gender_confidence=query_gender_confidence,
+        face_yaw=face_yaw,
     )
 
     # Optionally merge in local-performer-index matches (see fuse_local_results).

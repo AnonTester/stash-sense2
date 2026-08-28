@@ -83,6 +83,15 @@ class FaceRecognizer:
         with open(db_config.performers_json_path) as f:
             self.performers = json.load(f)  # universal_id -> metadata
 
+        # Optional -- an older dataset published before this feature has
+        # no face_yaw.json at all. matching.py's build_matches() treats a
+        # missing/short list as "no yaw penalty", so [] here is a
+        # correct, safe default, not just a placeholder.
+        self.face_yaw: list = []
+        if db_config.face_yaw_json_path and db_config.face_yaw_json_path.exists():
+            with open(db_config.face_yaw_json_path) as f:
+                self.face_yaw = json.load(f)
+
         print(f"Loaded {len(self.faces)} faces, {len(self.performers)} performers")
 
         # Optionally load the local performer index -- built from this
@@ -160,6 +169,7 @@ class FaceRecognizer:
             local_performers_mapping=local_index.mapping if local_index else None,
             query_gender=query_gender,
             query_gender_confidence=query_gender_confidence,
+            face_yaw=self.face_yaw,
         )
 
         # Convert to PerformerMatch format for compatibility

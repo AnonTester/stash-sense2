@@ -522,6 +522,11 @@
       const updateAvailable = updateInfo && updateInfo.update_available;
       const dbUpdateActive = dbUpdateStatus
         && !['idle', 'complete', 'failed'].includes(dbUpdateStatus.status);
+      // A newer database release exists but requires a sidecar version
+      // this container doesn't have yet -- server-side enforced too (see
+      // database_health_router.py's start_database_update()), this is
+      // just surfacing that ahead of a click instead of a 400 error.
+      const blockedBySidecarVersion = updateAvailable && updateInfo.sidecar_compatible === false;
 
       // Row 1: performer database (the ~2GB dataset downloaded via Database Update)
       performerStatsEl.className = 'ss-id-database-stats ss-id-database-stats-performer';
@@ -533,18 +538,22 @@
             <div class="ss-update-badge">
               <span class="ss-update-badge-text">${noDatabase
                 ? 'No database downloaded yet'
-                : `v${updateInfo.latest_version} available${
-                    updateInfo.delta_available
-                      ? ` \u2014 ${updateInfo.delta_download_size_mb} MB via delta (${updateInfo.delta_chain_length} release${updateInfo.delta_chain_length === 1 ? '' : 's'} behind)`
-                      : updateInfo.download_size_mb
-                        ? ` \u2014 ${updateInfo.download_size_mb} MB full download`
-                        : ''
-                  }`
+                : blockedBySidecarVersion
+                  ? `v${updateInfo.latest_version} available \u2014 requires sidecar v${updateInfo.min_sidecar_version}+, update the sidecar container to install it`
+                  : `v${updateInfo.latest_version} available${
+                      updateInfo.delta_available
+                        ? ` \u2014 ${updateInfo.delta_download_size_mb} MB via delta (${updateInfo.delta_chain_length} release${updateInfo.delta_chain_length === 1 ? '' : 's'} behind)`
+                        : updateInfo.download_size_mb
+                          ? ` \u2014 ${updateInfo.download_size_mb} MB full download`
+                          : ''
+                    }`
               }</span>
             </div>
-            <button class="ss-update-btn ss-download-db-btn" id="ss-download-db-btn" ${dbUpdateActive ? 'disabled' : ''}>
-              ${dbUpdateActive ? 'Downloading\u2026' : (noDatabase ? 'Download Database' : 'Update Database')}
-            </button>
+            ${blockedBySidecarVersion ? '' : `
+              <button class="ss-update-btn ss-download-db-btn" id="ss-download-db-btn" ${dbUpdateActive ? 'disabled' : ''}>
+                ${dbUpdateActive ? 'Downloading\u2026' : (noDatabase ? 'Download Database' : 'Update Database')}
+              </button>
+            `}
           ` : ''}
         </div>
         <div class="ss-db-stat">

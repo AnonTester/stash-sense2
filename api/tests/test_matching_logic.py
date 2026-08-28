@@ -258,6 +258,121 @@ class TestGenderMismatchPenalty:
 
         assert result.matches[0].confidence == pytest.approx(0.8 * 0.5)
 
+
+class TestYawPenalty:
+    """build_matches()'s soft steep-angle confidence penalty -- see
+    matching.py's own _apply_yaw_penalty. Default config:
+    yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5."""
+
+    def _query_result(self, neighbors, distances):
+        return IndexQueryResult(
+            neighbors=np.array(neighbors, dtype=np.int64),
+            distances=np.array(distances, dtype=np.float32),
+        )
+
+    def test_frontal_face_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}},
+            face_yaw=[5.0],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_exactly_at_threshold_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}},
+            face_yaw=[45.0],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_full_profile_gets_max_penalty(self):
+        qr = self._query_result([0], [0.2])
+        config = MatchingConfig(yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5)
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}}, config,
+            face_yaw=[90.0],
+        )
+        match = result.matches[0]
+        assert match.confidence == pytest.approx(0.8 * 0.5)
+        assert match.combined_distance == pytest.approx(1.0 - match.confidence)
+
+    def test_negative_yaw_treated_symmetrically(self):
+        qr = self._query_result([0], [0.2])
+        config = MatchingConfig(yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5)
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}}, config,
+            face_yaw=[-90.0],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8 * 0.5)
+
+    def test_beyond_90_clamped_to_max_penalty(self):
+        qr = self._query_result([0], [0.2])
+        config = MatchingConfig(yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5)
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}}, config,
+            face_yaw=[150.0],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8 * 0.5)
+
+    def test_midpoint_scales_linearly(self):
+        # threshold=45, at 90 the multiplier is 0.5 -- halfway (67.5) should
+        # land halfway between 1.0 and 0.5, i.e. 0.75.
+        qr = self._query_result([0], [0.2])
+        config = MatchingConfig(yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5)
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}}, config,
+            face_yaw=[67.5],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8 * 0.75)
+
+    def test_null_yaw_entry_not_penalized(self):
+        qr = self._query_result([0], [0.2])
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}},
+            face_yaw=[None],
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_missing_face_yaw_is_a_noop(self):
+        """No face_yaw at all (older dataset without face_yaw.json) --
+        must not error, must not penalize."""
+        qr = self._query_result([0], [0.2])
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], {"stashdb.org:uuid-0": {"name": "P0"}},
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_face_yaw_shorter_than_matched_index_is_a_noop(self):
+        """A dataset whose face_yaw.json predates faces added since (or a
+        stale cached list) -- index out of range must not crash."""
+        qr = self._query_result([2], [0.2])
+        faces = [f"stashdb.org:uuid-{i}" for i in range(3)]
+        result = build_matches(
+            qr, faces, {"stashdb.org:uuid-2": {"name": "P2"}},
+            face_yaw=[10.0],  # only covers index 0
+        )
+        assert result.matches[0].confidence == pytest.approx(0.8)
+
+    def test_combines_with_gender_penalty(self):
+        """Both penalties multiply together when both conditions fire."""
+        # distance=0.1 (not 0.2) so the doubly-penalized combined_distance
+        # comfortably clears max_distance's default 0.8 cutoff.
+        qr = self._query_result([0], [0.1])
+        performers = {"stashdb.org:uuid-0": {"name": "P0", "gender": "MALE"}}
+        config = MatchingConfig(
+            gender_confidence_floor=0.65, gender_mismatch_penalty=0.5,
+            yaw_penalty_threshold=45.0, yaw_penalty_at_90=0.5,
+        )
+        result = build_matches(
+            qr, ["stashdb.org:uuid-0"], performers, config,
+            query_gender="FEMALE", query_gender_confidence=0.9,
+            face_yaw=[90.0],
+        )
+        match = result.matches[0]
+        assert match.confidence == pytest.approx(0.9 * 0.5 * 0.5)
+        assert match.combined_distance == pytest.approx(1.0 - match.confidence)
+
     def test_no_query_gender_is_a_no_op(self):
         qr = self._query_result([0], [0.2])
         performers = {"stashdb.org:uuid-0": {"name": "Performer 0", "gender": "MALE"}}

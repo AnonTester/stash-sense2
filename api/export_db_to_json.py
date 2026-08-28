@@ -24,6 +24,7 @@ see make_catalogue_id()'s docstring for why this file needs to stay in
 sync with that one.
 """
 import argparse
+import html
 import json
 import sqlite3
 from pathlib import Path
@@ -125,6 +126,24 @@ def _catalogue_links(conn: sqlite3.Connection) -> dict:
     return {pid: v for pid, v in links.items() if v["source"]}
 
 
+def export_face_yaw_json(conn: sqlite3.Connection, output_path: Path) -> int:
+    """Export face_yaw.json - embedding_index -> yaw (degrees, or null),
+    same sparse-array shape as export_faces_json's own index -> universal_id
+    array. Mirrors stash-sense2-data-gen's build/export_json.py::
+    export_face_yaw_json() exactly -- see matching.py's steep-angle
+    penalty for how the sidecar consumes this."""
+    cursor = conn.execute("SELECT embedding_index, yaw FROM faces ORDER BY embedding_index")
+
+    yaws = []
+    for embedding_index, yaw in cursor:
+        while len(yaws) < embedding_index:
+            yaws.append(None)
+        yaws.append(yaw)
+
+    output_path.write_text(json.dumps(yaws))
+    return len(yaws)
+
+
 def export_faces_json(conn: sqlite3.Connection, output_path: Path) -> int:
     """Export faces.json - list of universal IDs indexed by usearch index.
 
@@ -201,7 +220,15 @@ def export_performers_json(conn: sqlite3.Connection, output_path: Path) -> int:
             continue  # matches the null gap left in faces.json for this performer
 
         entry = {
-            "name": name,
+            # html.unescape() as a display-time safety net -- mirrors
+            # stash-sense2-data-gen's build/export_json.py::
+            # export_performers_json() exactly. A name can arrive
+            # pre-HTML-escaped from a source's own JSON API (e.g. "Ellie
+            # &lt;3" instead of "Ellie <3") -- the scrapers now decode at
+            # capture time too, so this only matters for an install whose
+            # local performers.db predates that fix and hasn't been
+            # re-crawled since.
+            "name": html.unescape(name) if name else name,
             "country": country,
             "image_url": image_url,
             "face_count": face_count or 0,

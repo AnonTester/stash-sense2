@@ -147,6 +147,93 @@ class TestFfmpegHealth:
             assert data["v2_endpoint_ready"] is False
 
 
+# ==================== POST /database/update ====================
+
+
+@pytest.fixture
+def client_with_updater(mock_manifest):
+    """Test client with a mocked db_updater, for /database/update gating."""
+    original_recognizer = dh_mod._recognizer
+    original_manifest = dh_mod._db_manifest
+    original_updater = dh_mod._db_updater
+
+    mock_updater = Mock()
+    mock_updater._update_task = None
+    mock_updater.check_update = AsyncMock()
+    mock_updater.start_update = AsyncMock(return_value="job-full")
+    mock_updater.start_delta_update = AsyncMock(return_value="job-delta")
+    mock_updater._last_delta_chain = []
+
+    dh_mod._recognizer = None
+    dh_mod._db_manifest = mock_manifest
+    dh_mod._db_updater = mock_updater
+
+    app = FastAPI()
+    app.include_router(dh_mod.router)
+    test_client = TestClient(app)
+
+    yield test_client, mock_updater
+
+    dh_mod._recognizer = original_recognizer
+    dh_mod._db_manifest = original_manifest
+    dh_mod._db_updater = original_updater
+
+
+class TestStartDatabaseUpdate:
+    """Test POST /database/update -- in particular the sidecar_compatible
+    gate (server-side enforcement of min-sidecar-version, defense in depth
+    behind the Settings-UI hiding the button for the same case)."""
+
+    def test_blocked_when_sidecar_incompatible(self, client_with_updater):
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.01",
+            "delta_available": False,
+            "sidecar_compatible": False,
+            "min_sidecar_version": "0.99.0",
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 400
+        assert "0.99.0" in resp.json()["detail"]
+        mock_updater.start_update.assert_not_called()
+        mock_updater.start_delta_update.assert_not_called()
+
+    def test_allowed_when_sidecar_compatible(self, client_with_updater):
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.01",
+            "delta_available": False,
+            "download_url": "https://example.com/full.zip",
+            "sidecar_compatible": True,
+            "min_sidecar_version": "0.14.22",
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 200
+        mock_updater.start_update.assert_called_once()
+
+    def test_missing_sidecar_compatible_field_defaults_to_allowed(self, client_with_updater):
+        """A result dict without the field at all (shouldn't happen post-
+        this-change, but defends against a stale/mocked caller) must not
+        block -- permissive default, same as check_update()'s own logic."""
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.01",
+            "delta_available": False,
+            "download_url": "https://example.com/full.zip",
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 200
+
+
 # ==================== GET /health/rate-limiter ====================
 
 

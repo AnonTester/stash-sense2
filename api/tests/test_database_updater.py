@@ -78,7 +78,9 @@ def _make_release_zip(dest: Path, version: str = "2026.02.15", extra_files: dict
     return manifest
 
 
-def _github_release_json(tag: str = "2026.02.15", zip_url: str = "https://github.com/fake/download.zip"):
+def _github_release_json(
+    tag: str = "2026.02.15", zip_url: str = "https://github.com/fake/download.zip", body: str | None = None,
+):
     """Return a dict resembling a GitHub latest-release API response.
 
     Asset name must match check_update()'s exact naming convention
@@ -90,6 +92,7 @@ def _github_release_json(tag: str = "2026.02.15", zip_url: str = "https://github
         "tag_name": tag,
         "name": f"Release {tag}",
         "published_at": "2026-02-15T00:00:00Z",
+        "body": body,
         "assets": [
             {
                 "name": f"stash-sense2-data-{tag}.zip",
@@ -243,6 +246,67 @@ class TestCheckUpdate:
             await updater.check_update()
 
         assert client_instance.get.call_count == 2
+
+
+class TestMinSidecarVersionGate:
+    """check_update() surfaces min_sidecar_version/sidecar_compatible,
+    parsed from the release notes body -- see delta_applier.py's
+    parse_min_sidecar_version() and build/publish.py's marker line on the
+    data-gen side."""
+
+    async def _check(self, tmp_path, own_version, body, current="2026.02.12"):
+        _write_manifest(tmp_path, version=current)
+        updater = DatabaseUpdater(data_dir=tmp_path, reload_fn=MagicMock(return_value=True))
+
+        release_json = _github_release_json(tag="2026.02.15", body=body)
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = release_json
+        mock_response.raise_for_status = MagicMock()
+
+        mock_app = MagicMock()
+        mock_app.version = own_version
+
+        with patch("database_updater.httpx.AsyncClient") as MockClient, \
+             patch("database_updater.find_delta_chain", AsyncMock(return_value=None)), \
+             patch("main.app", mock_app):
+            client_instance = AsyncMock()
+            client_instance.get.return_value = mock_response
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=client_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            return await updater.check_update()
+
+    async def test_no_marker_is_compatible(self, tmp_path):
+        result = await self._check(tmp_path, own_version="0.14.0", body="Just some release notes.")
+        assert result["min_sidecar_version"] is None
+        assert result["sidecar_compatible"] is True
+
+    async def test_own_version_meets_requirement(self, tmp_path):
+        result = await self._check(tmp_path, own_version="0.14.22", body="min-sidecar-version: 0.14.22")
+        assert result["min_sidecar_version"] == "0.14.22"
+        assert result["sidecar_compatible"] is True
+
+    async def test_own_version_exceeds_requirement(self, tmp_path):
+        result = await self._check(tmp_path, own_version="0.15.0", body="min-sidecar-version: 0.14.22")
+        assert result["sidecar_compatible"] is True
+
+    async def test_own_version_below_requirement_is_incompatible(self, tmp_path):
+        result = await self._check(tmp_path, own_version="0.14.19", body="min-sidecar-version: 0.14.22")
+        assert result["min_sidecar_version"] == "0.14.22"
+        assert result["sidecar_compatible"] is False
+
+    async def test_marker_is_case_insensitive_and_embedded_in_notes(self, tmp_path):
+        body = "1,234 performers, 5,678 faces.\n\nSome text.\n\nMin-Sidecar-Version: 0.15.0\n"
+        result = await self._check(tmp_path, own_version="0.14.22", body=body)
+        assert result["min_sidecar_version"] == "0.15.0"
+        assert result["sidecar_compatible"] is False
+
+    async def test_unknown_own_version_is_treated_as_compatible(self, tmp_path):
+        """Can't determine own version -> don't block (permissive default,
+        never brick an update over an internal error)."""
+        result = await self._check(tmp_path, own_version=None, body="min-sidecar-version: 99.0.0")
+        assert result["sidecar_compatible"] is True
 
 
 class TestChecksumVerification:

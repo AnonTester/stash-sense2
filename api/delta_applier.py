@@ -58,11 +58,24 @@ import httpx
 import numpy as np
 from usearch.index import Index
 
-from export_db_to_json import export_faces_json, export_performers_json
+from export_db_to_json import export_face_yaw_json, export_faces_json, export_performers_json
 
 logger = logging.getLogger(__name__)
 
 _DELTA_ASSET_RE = re.compile(r"^stash-sense2-delta-(?P<from_version>.+)-to-(?P<to_version>.+)\.zip$")
+# Matches build/publish.py's own release-notes marker line (see
+# stash-sense2-data-gen's build/manifest.py::MIN_SIDECAR_VERSION).
+_MIN_SIDECAR_VERSION_RE = re.compile(r"^min-sidecar-version:\s*(\S+)", re.MULTILINE | re.IGNORECASE)
+
+
+def parse_min_sidecar_version(body: Optional[str]) -> Optional[str]:
+    """Pull the `min-sidecar-version: X.Y.Z` marker out of a release's
+    notes body, or None if absent (a release published before this
+    feature existed -- treated as compatible by the caller)."""
+    if not body:
+        return None
+    m = _MIN_SIDECAR_VERSION_RE.search(body)
+    return m.group(1) if m else None
 _CHUNK_SIZE = 65_536
 # How often apply_delta_db reports progress -- every N rows across
 # performers+faces+catalogue_* combined, not per-table. Small enough to
@@ -74,7 +87,7 @@ _PROGRESS_TICK_ROWS = 200
 
 # Same set database_updater.py backs up/restores — kept identical so a
 # rollback here is indistinguishable from a rollback of the full-zip path.
-BACKED_UP_FILES = ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "manifest.json")
+BACKED_UP_FILES = ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "manifest.json", "face_yaw.json")
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +132,7 @@ async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> 
             "from_version": m.group("from_version"),
             "download_url": delta_asset["browser_download_url"],
             "size_mb": round(delta_asset.get("size", 0) / 1_000_000, 2),
+            "min_sidecar_version": parse_min_sidecar_version(rel.get("body")),
         }
 
     chain: list[dict[str, Any]] = []
@@ -620,6 +634,7 @@ async def apply_delta_chain(
         try:
             face_count = export_faces_json(conn, data_dir / "faces.json")
             performer_count = export_performers_json(conn, data_dir / "performers.json")
+            export_face_yaw_json(conn, data_dir / "face_yaw.json")
         finally:
             conn.close()
 
@@ -631,7 +646,7 @@ async def apply_delta_chain(
             "face_count": face_count,
             "checksums": {
                 fname: f"sha256:{_sha256(data_dir / fname)}"
-                for fname in ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json")
+                for fname in ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "face_yaw.json")
             },
         }
         (data_dir / "manifest.json").write_text(json.dumps(new_manifest, indent=2))

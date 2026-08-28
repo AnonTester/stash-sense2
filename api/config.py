@@ -77,6 +77,11 @@ class DatabaseConfig:
     performers_json_path: Path = None
     manifest_json_path: Path = None
 
+    # embedding_index -> yaw (degrees), for matching.py's steep-angle soft
+    # penalty -- optional, may not exist (older dataset published before
+    # this feature). See export_db_to_json.py's export_face_yaw_json().
+    face_yaw_json_path: Path = None
+
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -88,6 +93,7 @@ class DatabaseConfig:
         self.faces_json_path = self.faces_json_path or self.data_dir / "faces.json"
         self.performers_json_path = self.performers_json_path or self.data_dir / "performers.json"
         self.manifest_json_path = self.manifest_json_path or self.data_dir / "manifest.json"
+        self.face_yaw_json_path = self.face_yaw_json_path or self.data_dir / "face_yaw.json"
 
 
 # Embedding dimensions

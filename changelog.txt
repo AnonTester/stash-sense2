@@ -1,5 +1,76 @@
 ## 2026-08-27
 
+### 0.15.1 (sidecar only)
+- Fix: performer names containing HTML entities (e.g. "Ellie &amp;lt;3"
+  instead of "Ellie <3") displayed with the raw entity text instead of
+  the decoded character -- confirmed live for 293 performers, mostly
+  seekfans/OnlyFans-sourced names with `&amp;`/`&lt;`/emoji-adjacent
+  markup. Root cause: seekfans' own JSON-LD embeds pre-HTML-escaped
+  names (their structured data reuses the string meant for direct HTML
+  embedding); `json.loads()` has no concept of HTML entities, so it
+  passed straight through. Fixed at the source
+  (`scrape/seekfans_discovery.py`/`scrape/pornbox_discovery.py` in
+  stash-sense2-data-gen -- see that project's own changelog), at both
+  export paths (`export_performers_json()`, defense in depth), and
+  backfilled: the data-gen source-of-truth db (`updated_at` bumped so it
+  reaches already-updated sidecars through the normal catalogue-delta
+  mechanism), plus a one-off patch of this reference deployment's
+  already-cached copies (`performers.json`, `local_faces.json`, and
+  `recommendations.details` JSON blobs -- the last one populated by
+  analyzer jobs at run time, not re-resolved from performers.json at
+  request time, so it needed its own pass).
+- Fix: the Recommendations tab's scene-face-match detail view played a
+  raw `<video src>` pointed straight at `paths.stream` (the single
+  direct-file URL) with no fallback -- any scene whose source container/
+  codec the browser can't decode natively threw "No video with supported
+  format and MIME type found," even though the same scene played fine in
+  Stash's own page. Stash's own player never uses `paths.stream` alone --
+  it builds multiple `<source>` candidates from `sceneStreams` (direct,
+  HLS, WEBM, lower-res transcodes, each with a real mimeType) and lets
+  the browser pick one it can decode. `get_scene_by_id()` now also
+  requests `sceneStreams { url mime_type label }`, and the detail view
+  renders all of them as `<source>` children instead of a single `src`,
+  falling back to the old single-source behavior only if `sceneStreams`
+  comes back empty.
+
+### 0.15.0 (sidecar only)
+- Feature: minimum-sidecar-version compatibility gate for database
+  updates. stash-sense2-data-gen's `build/publish.py` now embeds a
+  `min-sidecar-version: X.Y.Z` marker line in each release's own notes
+  text -- parsed here at zero extra HTTP cost (the release body is
+  already fetched as part of the normal update-check call, and every
+  hop's body during delta-chain discovery too). `check_update()` now
+  returns `min_sidecar_version`/`sidecar_compatible`, and
+  `/database/update` rejects the request with a 400 if the running
+  sidecar is below the requirement -- server-side enforcement, not just
+  hiding the button (the Settings tab also shows a distinct "update the
+  sidecar container" message instead of the Update/Download button in
+  that case). A release with no marker at all (anything published before
+  this feature) is always treated as compatible. Nothing currently
+  published requires this -- it's a safety net for a future breaking
+  database-format change, not a response to an actual incompatibility.
+- Feature: soft steep-angle confidence penalty for face matching.
+  Confirmed live: a performer whose only 2 reference images (from
+  seekfans/OnlyFans) were both shot from a steep angle (yaw -35 and -62
+  degrees -- butt/leg-dominant poses with the face turned away or looking
+  down at a phone) kept surfacing as a false-positive match across
+  unrelated query faces. `faces.yaw` was already computed and stored by
+  stash-sense2-data-gen but never actually used anywhere in matching --
+  this wires it in. New optional `face_yaw.json` export (embedding_index
+  -> yaw, same sparse-array shape as faces.json's own index -> universal_id
+  -- see that project's own changelog), applied per matched *face vector*
+  in `build_matches()` (not aggregated per-performer, since a performer
+  can have both good frontal shots and steep-angle ones). Soft multiplier
+  like the gender penalty, not a hard exclusion -- yaw is a rough
+  per-face heuristic, not a calibrated pose estimate, and a genuinely
+  steep-angle match can still be correct. Scales linearly from no penalty
+  at 45 degrees off-frontal down to 0.5x confidence at a full 90-degree
+  profile (`yaw_penalty_threshold`/`yaw_penalty_at_90` in
+  `MatchingConfig`). Additive and backward-compatible like the gender
+  feature -- an older dataset without face_yaw.json, or an older sidecar
+  that doesn't know to look for it, both no-op cleanly; no
+  min-sidecar-version bump needed.
+
 ### 0.14.22 (sidecar only)
 - Feature: soft gender-mismatch confidence penalty for face matching.
   Adds a standalone buffalo_l `genderage` model (kept separate from the
