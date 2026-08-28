@@ -215,7 +215,8 @@ async def lifespan(app: FastAPI):
     model_mgr = init_model_manager(manifest_path, models_dir)
     init_model_router(model_mgr)
 
-    # Load manifest early so database stats are available before lazy load
+    # Load manifest early so database stats are available before face
+    # recognition finishes its own (eager, background) load below
     db_config = DatabaseConfig(data_dir=data_dir)
     startup_manifest = {}
     if db_config.manifest_json_path.exists():
@@ -248,7 +249,8 @@ async def lifespan(app: FastAPI):
     )
 
     # Initialize identification router with runtime dependencies
-    # recognizer starts as None (lazy loaded)
+    # recognizer starts as None -- set once the eager background load
+    # (require() call below, after settings init) finishes
     init_identification_router(
         recognizer=None,
         db_manifest=startup_manifest,
@@ -280,7 +282,8 @@ async def lifespan(app: FastAPI):
     )
     print("Recommendations database initialized!")
 
-    # Set DB version from manifest so fingerprint stats are accurate before lazy load
+    # Set DB version from manifest so fingerprint stats are accurate before
+    # face recognition's eager load finishes
     if startup_manifest.get("version"):
         set_db_version(startup_manifest["version"])
 

@@ -106,18 +106,18 @@ Two components talking to one Stash instance:
 - **`plugin/`** — JS/CSS/Python injected into Stash web UI. All sidecar calls go through `stash_sense_backend.py` to bypass browser CSP.
 
 **Two databases:**
-- `performers.db` — Read-only, distributed via GitHub Releases on `AnonTester/stash-sense-data`. Face metadata, stash-box IDs, Voyager ANN indices. Built and published by a **separate, private** repo — `stash-sense-data-gen` — which crawls stash-box endpoints, embeds new/changed faces, and cuts a dated release (full + delta zips) roughly biweekly via cron. This repo's `database_updater.py` is what checks that release repo for updates; it has no involvement in producing them. See `stash-sense-data-gen`'s own `CLAUDE.md` for that pipeline's deployment/scheduling/publishing details — don't duplicate that documentation here.
-- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, scene fingerprints. Schema version 9 (`recommendations_db.py`). Survives face DB updates.
+- `performers.db` — Read-only, distributed via GitHub Releases on `AnonTester/stash-sense-data`. Face metadata, stash-box IDs, usearch ANN indices (buffalo_l: one 512-dim embedding per face). Built and published by a **separate, private** repo — `stash-sense-data-gen` — which crawls stash-box endpoints, embeds new/changed faces, and cuts a dated release (full + delta zips) roughly biweekly via cron. This repo's `database_updater.py` is what checks that release repo for updates; it has no involvement in producing them. See `stash-sense-data-gen`'s own `CLAUDE.md` for that pipeline's deployment/scheduling/publishing details — don't duplicate that documentation here.
+- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, scene fingerprints (full per-person candidate match list, not just a best-match summary — see `scene_fingerprint_matches`). Schema version 16 (`recommendations_db.py`). Survives face DB updates.
 
-**Startup sequence (`main.py`):** Hardware detection → model manager init → ResourceManager registration (face recognition registered as *lazy*, not loaded) → recommendations DB init → settings system → StashBox connection manager → queue manager start. Face recognition loads on first `/identify` request.
+**Startup sequence (`main.py`):** Hardware detection → model manager init → ResourceManager registration → recommendations DB init → settings system → StashBox connection manager → queue manager start. Face recognition eager-loads in the background right after settings init (a non-blocking `asyncio.create_task`, not gated on any request) — `/health`'s `face_recognition_loading` flag covers the loading-in-progress window; a request arriving mid-load just waits on that same in-flight load. Only the *unload* side stays lazy, governed by `idle_unload_minutes`.
 
 ## Key Systems
 
-### Face Recognition (lazy-loaded)
-3-phase batch pipeline in `recognizer.py`: extract frames (ffmpeg, 8 workers) → detect faces (RetinaFace ONNX) → batch embed + match (FaceNet512 + ArcFace ONNX, Voyager ANN index). `resource_manager.py` manages lazy load/unload with 30-min idle timeout.
+### Face Recognition (eager-loaded at startup, lazy-unloaded)
+3-phase batch pipeline in `recognizer.py`, using InsightFace's `buffalo_l` bundle throughout (SCRFD-10GF detection + ResNet50@WebFace600K recognition — a single model producing one embedding per face, not the legacy dual FaceNet512+ArcFace pipeline): extract frames (ffmpeg, up to 8 concurrent) → detect faces (pooled across a small set of warm generators) → batch embed + match against the usearch index (`matching.py`). `resource_manager.py` manages the eager load / idle-timeout unload.
 
 ### Recommendations Engine
-`BaseAnalyzer` (`analyzers/base.py`) + incremental watermarking pattern. Each analyzer type has a `logic_version` class attribute — bumping it auto-clears stale snapshots/watermarks for full re-analysis on next run. Analyzers: duplicate scenes, duplicate performers, upstream performer/scene/studio/tag changes, scene fingerprint matching, missing stash-box links.
+`BaseAnalyzer` (`analyzers/base.py`) + incremental watermarking pattern. Each analyzer type has a `logic_version` class attribute — bumping it auto-clears stale snapshots/watermarks for full re-analysis on next run. Analyzers (`recommendations_router.py`'s `ANALYZERS` dict): duplicate performers, duplicate scene files, duplicate scenes, upstream performer/tag/studio/scene changes, scene stash-box tagger (`scene_fingerprint_match` — links untagged scenes via stash-box's own scene-fingerprint matching), face recommendations (`scene_face_match` — reads the `fingerprint_generation`/`fingerprint_refresh_outdated` jobs' stored per-scene match data for performerless scenes, with an on-demand single-scene sprite top-up for scenes whose stored data predates sprite-tile coverage, instead of re-running detect+embed+match itself).
 
 Jobs run via `QueueManager` (`queue_manager.py`) with `JOB_REGISTRY` in `job_models.py`. `BaseJob` (`base_job.py`) provides `JobContext` with stop signaling, cursor-based checkpointing, and yield-to-higher-priority support.
 
@@ -128,15 +128,11 @@ Jobs run via `QueueManager` (`queue_manager.py`) with `JOB_REGISTRY` in `job_mod
 Candidate generation via SQL joins + inverted indices (O(n) pairs, not O(n²)). Scored with signal hierarchy: stash-box ID match = 100%, face fingerprint ≤ 85%, metadata ≤ 60%. Diminishing returns: `primary + secondary × 0.3`.
 
 ### Local Performer Database (dual-index identification)
-A second, much smaller Voyager index built from *this Stash instance's own* performer cover images (`local_performer_index.py`), queried alongside the main `performers.db` index during identification and merged into the same result list. Local candidates get their `combined_distance` multiplied by `LOCAL_MATCH_BOOST` (currently `0.85`, in `matching.py`) before merging — a face in the user's own library is more likely to be a performer they've already added than a random main-DB entry.
-
-**Requires both models to agree.** `fuse_local_results()` in `matching.py` only trusts a local candidate if *both* FaceNet and ArcFace ranked it — unlike the main index's `fuse_results()`, which tolerates a single-model match with a distance penalty (calibrated for ~450k candidates, where missing one model's top-K doesn't mean much). The local index only has ~1-2k candidates, so landing in just one model's top-K is common and weak evidence on its own; trusting it directly let a coincidental single-model agreement get boosted into a false high-confidence match in practice (confirmed live — see git history around the `LOCAL_MATCH_BOOST` fix for the concrete case). Don't relax this without re-deriving why it's there.
+A second, much smaller usearch index built from *this Stash instance's own* performer cover images (`local_performer_index.py`), queried alongside the main `performers.db` index during identification and merged into the same result list. Local candidates get their `combined_distance` multiplied by `LOCAL_MATCH_BOOST` (currently `0.85`, in `matching.py`) before merging — a face in the user's own library is more likely to be a performer they've already added than a random main-DB entry. `fuse_local_results()` builds these candidates (flat boost, no cross-model logic — buffalo_l is a single model, so there's nothing to arbitrate between; the legacy dual FaceNet512+ArcFace agreement-gating this used to need is gone along with that pipeline), and `merge_local_candidates()` combines them with the main index's own results.
 
 **Sync mechanism**: a `local_performer_sync` job (`jobs/local_performer_sync_job.py`, manual or scheduled from Operations) does a full diff-and-embed pass. An optional `Performer.Create/Update/Destroy.Post` hook (off by default, Settings → Local Performers) keeps it current in near-real-time; failures queue to a local retry-cache file (`pending_local_sync.json` in the plugin dir) and flush on the next successful hook call. **Merging one performer into another fires no Stash hook at all** (confirmed empirically, not just assumed) — only the scheduled/manual sync job picks up a merge.
 
 **Image-change detection**: hash the fetched image *bytes*, not the `image_path` URL — Stash's cache-busting query param on that URL tracks `updated_at`, which changes on *any* field edit, not just a cover swap. Hashing the URL instead of the bytes was tried and reverted after it caused every unrelated performer edit to trigger a pointless re-embed.
-
-**Voyager gotcha**: `del index[id]` (mark-deleted) can raise `RuntimeError: already deleted` even immediately after `id in index` reported it present — a tombstone-state inconsistency that surfaces after a save()/load() round-trip, not a logic bug in the calling code. `LocalPerformerIndex.remove()` treats that specific error as a no-op.
 
 ## Conventions
 
@@ -165,19 +161,19 @@ Translation: `recommendations_router.py:update_performer_fields()`
 
 ## Key Files
 
-- `api/main.py` — App entry point, lifespan, router wiring, lazy-load setup
+- `api/main.py` — App entry point, lifespan, router wiring, eager-load setup
 - `api/recommendations_router.py` — All recommendation API endpoints
-- `api/recommendations_db.py` — SQLite layer (schema v9), migrations
+- `api/recommendations_db.py` — SQLite layer (schema v16), migrations
 - `api/queue_router.py` / `api/queue_manager.py` — Job queue API and execution engine
 - `api/job_models.py` — `JOB_REGISTRY` and all job type definitions
 - `api/base_job.py` — `BaseJob` ABC and `JobContext`
 - `api/settings_router.py` — Settings and system info API
 - `api/upstream_field_mapper.py` — Field mapping, parsing, 3-way diff engine
 - `api/analyzers/base_upstream.py` — Base class with logic versioning
-- `api/resource_manager.py` — Lazy load / idle-unload for face recognition
+- `api/resource_manager.py` — Eager load / idle-unload for face recognition (also usable as a plain lazy loader for other resource groups; require() lazily loads whichever calls it first if nothing has yet)
 - `api/stash_client_unified.py` — Stash GraphQL client
 - `api/stashbox_client.py` — StashBox GraphQL client
-- `api/local_performer_index.py` — Local performer Voyager index (build/query/sync), see "Local Performer Database" above
+- `api/local_performer_index.py` — Local performer usearch index (build/query/sync), see "Local Performer Database" above
 - `api/jobs/local_performer_sync_job.py` — Full diff-and-embed sync job for the local performer index
 - `plugin/stash-sense-recommendations.js` — Recommendations dashboard UI
 - `plugin/stash-sense-settings.js` — Settings and model management UI

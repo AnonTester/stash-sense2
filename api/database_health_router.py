@@ -113,9 +113,12 @@ class UpdateStatusResponse(BaseModel):
 async def health_check(plugin_version: Optional[str] = None):
     """Check API health and database status.
 
-    Does NOT trigger lazy loading -- reports current state without
-    side effects. The face recognition database loads on first
-    /identify request.
+    Reports current state without side effects -- doesn't itself trigger a
+    load. Face recognition eager-loads via a background task right after
+    startup (see main.py's lifespan()); `status` is "degraded" until that
+    finishes (or until there's a database/models to load at all, on a
+    fresh install -- see README's "degraded is expected" callout),
+    "healthy" once `_recognizer` is set.
 
     `plugin_version`: the calling plugin's own PLUGIN_VERSION, passed on
     every poll (the plugin already polls this endpoint every 60s for
