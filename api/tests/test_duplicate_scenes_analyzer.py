@@ -327,6 +327,20 @@ class TestDuplicateCandidatesDB:
         assert db.count_candidates(run_id) == 3
 
 
+def _match_row(universal_id, person_id=0, frame_count=5, is_best_match=True, confidence=0.8):
+    """A minimal scene_fingerprint_matches row, best-match by default --
+    get_fingerprints_with_faces/generate_face_candidates both only consider
+    is_best_match=1 rows."""
+    return {
+        "person_id": person_id, "frame_count": frame_count, "match_rank": 0,
+        "is_best_match": is_best_match, "universal_id": universal_id,
+        "stashdb_id": None, "name": "P", "confidence": confidence, "distance": 1 - confidence,
+        "country": None, "image_url": None, "endpoint": None, "already_tagged": False,
+        "local_performer_id": None, "source": None, "catalogue_url": None,
+        "profile_url": None, "top_timestamps_sec": [],
+    }
+
+
 class TestFingerprintJoinQuery:
     """Tests for get_fingerprints_with_faces JOIN method."""
 
@@ -338,11 +352,13 @@ class TestFingerprintJoinQuery:
     def test_returns_fingerprints_with_faces(self, db):
         """JOIN query returns fingerprints grouped with their face entries."""
         fp1_id = db.create_scene_fingerprint(stash_scene_id=100, total_faces=3, frames_analyzed=60, fingerprint_status="complete")
-        db.add_fingerprint_face(fp1_id, "performer_1", face_count=10, avg_confidence=0.8, proportion=0.6)
-        db.add_fingerprint_face(fp1_id, "performer_2", face_count=5, avg_confidence=0.7, proportion=0.3)
+        db.replace_fingerprint_matches(fp1_id, [
+            _match_row("performer_1", person_id=0, frame_count=10, confidence=0.8),
+            _match_row("performer_2", person_id=1, frame_count=5, confidence=0.7),
+        ])
 
         fp2_id = db.create_scene_fingerprint(stash_scene_id=200, total_faces=1, frames_analyzed=60, fingerprint_status="complete")
-        db.add_fingerprint_face(fp2_id, "performer_1", face_count=8, avg_confidence=0.9, proportion=1.0)
+        db.replace_fingerprint_matches(fp2_id, [_match_row("performer_1", frame_count=8, confidence=0.9)])
 
         result = db.get_fingerprints_with_faces()
 
@@ -355,7 +371,7 @@ class TestFingerprintJoinQuery:
     def test_excludes_non_complete_fingerprints(self, db):
         """Only complete fingerprints are returned."""
         fp1_id = db.create_scene_fingerprint(stash_scene_id=100, total_faces=3, frames_analyzed=60, fingerprint_status="complete")
-        db.add_fingerprint_face(fp1_id, "performer_1", face_count=10, avg_confidence=0.8, proportion=0.6)
+        db.replace_fingerprint_matches(fp1_id, [_match_row("performer_1", frame_count=10)])
 
         db.create_scene_fingerprint(
             stash_scene_id=200, total_faces=0, frames_analyzed=0,
@@ -376,13 +392,29 @@ class TestFingerprintJoinQuery:
     def test_filtered_by_scene_ids(self, db):
         """Can filter to specific scene IDs."""
         fp1_id = db.create_scene_fingerprint(stash_scene_id=100, total_faces=1, frames_analyzed=60, fingerprint_status="complete")
-        db.add_fingerprint_face(fp1_id, "performer_1", face_count=5, avg_confidence=0.8, proportion=1.0)
+        db.replace_fingerprint_matches(fp1_id, [_match_row("performer_1", frame_count=5)])
 
         fp2_id = db.create_scene_fingerprint(stash_scene_id=200, total_faces=1, frames_analyzed=60, fingerprint_status="complete")
-        db.add_fingerprint_face(fp2_id, "performer_1", face_count=3, avg_confidence=0.7, proportion=1.0)
+        db.replace_fingerprint_matches(fp2_id, [_match_row("performer_1", frame_count=3, confidence=0.7)])
 
         result = db.get_fingerprints_with_faces(scene_ids={100})
         assert len(result) == 1
+
+    def test_same_performer_best_match_for_two_persons_sums(self, db):
+        """A performer that's the best match for two different detected
+        persons in one scene (imperfect clustering) sums face_count rather
+        than the old table's silent last-write-wins."""
+        fp_id = db.create_scene_fingerprint(stash_scene_id=100, total_faces=15, frames_analyzed=60, fingerprint_status="complete")
+        db.replace_fingerprint_matches(fp_id, [
+            _match_row("performer_1", person_id=0, frame_count=10, confidence=0.9),
+            _match_row("performer_1", person_id=1, frame_count=5, confidence=0.6),
+        ])
+
+        result = db.get_fingerprints_with_faces()
+
+        face = result["100"]["faces"]["performer_1"]
+        assert face["face_count"] == 15
+        assert face["avg_confidence"] == pytest.approx((10 * 0.9 + 5 * 0.6) / 15)
 
 
 class TestFaceCandidateGeneration:
@@ -394,16 +426,15 @@ class TestFaceCandidateGeneration:
         return RecommendationsDB(tmp_path / "test.db")
 
     def _add_fingerprint_with_faces(self, db, scene_id, performer_ids):
-        """Helper: create a complete fingerprint with face entries."""
+        """Helper: create a complete fingerprint with best-match rows."""
         fp_id = db.create_scene_fingerprint(
             stash_scene_id=scene_id, total_faces=len(performer_ids), frames_analyzed=60,
             fingerprint_status="complete"
         )
-        for i, pid in enumerate(performer_ids):
-            db.add_fingerprint_face(
-                fp_id, pid, face_count=5,
-                avg_confidence=0.8, proportion=1.0 / len(performer_ids)
-            )
+        db.replace_fingerprint_matches(fp_id, [
+            _match_row(pid, person_id=i, frame_count=5, confidence=0.8)
+            for i, pid in enumerate(performer_ids)
+        ])
         return fp_id
 
     def test_finds_scenes_sharing_performer(self, db):

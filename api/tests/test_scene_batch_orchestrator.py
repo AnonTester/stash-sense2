@@ -176,3 +176,24 @@ class TestIdentifyScenesBatched:
         # 1 normal-scene call + 2 vaapi calls (prepare doesn't get the hook,
         # but extract and compute each do) = 3.
         assert hook.call_count == 3
+
+    async def test_on_scene_start_called_once_per_scene_before_work_begins(self):
+        specs = [_spec("1", 1920, 1080), _spec("2", 3840, 2160)]
+        started = []
+
+        async def _on_start(scene_id):
+            started.append(scene_id)
+
+        patchers = _patch_router()
+        for p in patchers:
+            p.start()
+        try:
+            results = {sid: r async for sid, r in identify_scenes_batched(specs, on_scene_start=_on_start)}
+        finally:
+            for p in patchers:
+                p.stop()
+
+        assert set(results) == {"1", "2"}
+        # Once for the normal scene, once for the vaapi scene's decode step
+        # (not again for its compute step) -- see on_scene_start's docstring.
+        assert started == ["1", "2"]

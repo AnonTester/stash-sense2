@@ -176,6 +176,19 @@ class TestJobFactory:
         job = mgr._create_job_instance("fingerprint_generation")
         from jobs.fingerprint_job import FingerprintGenerationJob
         assert isinstance(job, FingerprintGenerationJob)
+        assert job.refresh_outdated is False
+
+    def test_create_fingerprint_refresh_outdated_job(self, tmp_path):
+        # Distinct job type from fingerprint_generation (see
+        # jobs/fingerprint_job.py's docstring) -- scope is fixed by which
+        # type_id dispatched here, not a cursor.
+        from recommendations_db import RecommendationsDB
+        db = RecommendationsDB(str(tmp_path / "test.db"))
+        mgr = QueueManager(db)
+        job = mgr._create_job_instance("fingerprint_refresh_outdated")
+        from jobs.fingerprint_job import FingerprintGenerationJob
+        assert isinstance(job, FingerprintGenerationJob)
+        assert job.refresh_outdated is True
 
     def test_create_database_update_job(self, tmp_path):
         from recommendations_db import RecommendationsDB

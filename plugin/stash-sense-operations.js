@@ -179,6 +179,12 @@
             button.disabled = true;
             button.textContent = 'Submitting...';
             try {
+              // "Fingerprint Missing" and "Refresh Outdated" are separate
+              // job types (fingerprint_generation / fingerprint_refresh_outdated)
+              // with scope fixed by type, not a cursor -- see
+              // fingerprint_job.py's docstring -- so this generic "run it"
+              // button needs no special-casing for either of them, only
+              // for the pre-existing force-full-scan pair below.
               const cursor = FORCE_FULL_SCAN_USER_JOB_TYPES.has(type.type_id) ? '__full__' : null;
               await QueueAPI.submit(type.type_id, cursor);
               await refreshContent(container);

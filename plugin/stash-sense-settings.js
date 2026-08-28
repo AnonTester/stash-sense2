@@ -45,11 +45,24 @@
     async getFingerprintStatus() {
       return apiCall('fp_status');
     },
-    async startFingerprintGeneration() {
-      return apiCall('queue_submit', { type: 'fingerprint_generation' });
+    async startFingerprintGeneration(options = {}) {
+      // Two distinct job types now (previously one type with the scope
+      // hidden inside its cursor, which made both Settings buttons react
+      // to "is *a* fingerprint job running" instead of their own scope --
+      // see fingerprint_job.py's docstring). refreshOutdated=false (the
+      // default here) is "Fingerprint Missing"; true is "Refresh Outdated".
+      const type = options.refreshOutdated ? 'fingerprint_refresh_outdated' : 'fingerprint_generation';
+      return apiCall('queue_submit', { type });
     },
     async getFingerprintJobs() {
-      return apiCall('queue_list', { type: 'fingerprint_generation' });
+      const [missing, outdated] = await Promise.all([
+        apiCall('queue_list', { type: 'fingerprint_generation' }),
+        apiCall('queue_list', { type: 'fingerprint_refresh_outdated' }),
+      ]);
+      return {
+        missing: (missing && missing.jobs) || [],
+        outdated: (outdated && outdated.jobs) || [],
+      };
     },
     async resetFingerprintsWithBackup() {
       return apiCall('fp_reset');
@@ -505,11 +518,14 @@
         SettingsAPI.getLocalPerformerStats().catch(() => null),
       ]);
 
-      const fpJobActive = !!(fpJobs && fpJobs.jobs || []).find(
+      const isActive = jobs => !!(jobs || []).find(
         j => j.status === 'queued' || j.status === 'running' || j.status === 'stopping'
       );
+      const missingJobActive = isActive(fpJobs && fpJobs.missing);
+      const outdatedJobActive = isActive(fpJobs && fpJobs.outdated);
 
       const fpCoverage = (fpStatus && fpStatus.complete_fingerprints) || 0;
+      const outdatedCount = (fpStatus && fpStatus.outdated_count) || 0;
       const totalScenes = fpStatus && fpStatus.total_scenes != null ? fpStatus.total_scenes : null;
       const dbVersion = (fpStatus && fpStatus.current_db_version) || dbInfo?.version || 'N/A';
       const performerCount = dbInfo?.performer_count || 0;
@@ -568,6 +584,15 @@
           <span class="ss-db-stat-value">${localFaceCount.toLocaleString()}</span>
           <span class="ss-db-stat-label">Local Faces</span>
         </div>
+        ${outdatedCount > 0 ? `
+        <div class="ss-db-stat ss-db-stat-warning" title="Scenes already identified, but last matched against an older performer database version than the one above.">
+          <span class="ss-db-stat-value">${outdatedCount.toLocaleString()}</span>
+          <span class="ss-db-stat-label">Outdated</span>
+        </div>
+        <button class="ss-btn ss-btn-secondary ss-btn-sm ss-refresh-outdated-btn" id="ss-refresh-outdated-btn" ${outdatedJobActive ? 'disabled' : ''}>
+          ${outdatedJobActive ? 'Refresh in Progress' : `Refresh Outdated (${outdatedCount.toLocaleString()})`}
+        </button>
+        ` : ''}
       `;
 
       const downloadDbBtn = performerStatsEl.querySelector('#ss-download-db-btn');
@@ -606,10 +631,15 @@
 
       // Row 2: this scene library's own fingerprint coverage (stash_sense.db,
       // local to this install -- not part of the downloaded performer
-      // database). "Missing" replaces the old "Need Refresh" figure: with
-      // cached signals, a performer-database update no longer invalidates
-      // existing fingerprints, so the only gap worth surfacing here is
-      // scenes that have never been fingerprinted at all.
+      // database). "Missing" is scenes that have never been detected/
+      // matched at all (new videos) -- belongs here, in the fingerprint
+      // pipeline itself. "Outdated" (already-identified scenes last
+      // matched against an older performer-database version) is the
+      // opposite: it's about the *performer* database being stale, not
+      // this scene's own fingerprint, so its stat + "Refresh Outdated"
+      // button live in Row 1 instead -- see performerStatsEl above.
+      // "Fingerprint Missing" only ever touches never-fingerprinted
+      // scenes; it never implicitly reprocesses the rest of the library.
       const missing = totalScenes != null ? Math.max(0, totalScenes - fpCoverage) : null;
       fingerprintStatsEl.className = 'ss-id-database-stats ss-id-database-stats-fingerprint';
       fingerprintStatsEl.innerHTML = `
@@ -626,33 +656,40 @@
           <span class="ss-db-stat-value">${missing.toLocaleString()}</span>
           <span class="ss-db-stat-label">Missing</span>
         </div>
-        <button class="ss-btn ss-btn-primary ss-btn-sm ss-start-fingerprinting-btn" id="ss-start-fingerprinting-btn" ${fpJobActive ? 'disabled' : ''}>
-          ${fpJobActive ? 'Fingerprinting in Progress' : 'Start Fingerprinting'}
+        <button class="ss-btn ss-btn-primary ss-btn-sm ss-start-fingerprinting-btn" id="ss-start-fingerprinting-btn" ${missingJobActive ? 'disabled' : ''}>
+          ${missingJobActive ? 'Fingerprinting in Progress' : `Fingerprint Missing (${missing.toLocaleString()})`}
         </button>
         ` : ''}
       `;
 
-      const startBtn = fingerprintStatsEl.querySelector('#ss-start-fingerprinting-btn');
-      if (startBtn) {
-        startBtn.addEventListener('click', async () => {
-          startBtn.disabled = true;
-          startBtn.textContent = 'Starting…';
+      // Two distinct job types (fingerprint_generation / fingerprint_refresh_outdated)
+      // now, each with its own queued/running state -- see
+      // SettingsAPI.startFingerprintGeneration's comment -- so this wiring
+      // is shared code, not a shared job/active-state.
+      const wireFingerprintButton = (container, selector, refreshOutdated, inProgressLabel, idleLabel) => {
+        const btn = container.querySelector(selector);
+        if (!btn) return;
+        btn.addEventListener('click', async () => {
+          btn.disabled = true;
+          btn.textContent = 'Starting…';
           try {
-            await SettingsAPI.startFingerprintGeneration();
-            startBtn.textContent = 'Fingerprinting in Progress';
+            await SettingsAPI.startFingerprintGeneration({ refreshOutdated });
+            btn.textContent = inProgressLabel;
           } catch (e) {
             const msg = String(e.message || '');
             const alreadyRunning = msg.includes('409') || msg.includes('already');
-            startBtn.textContent = alreadyRunning ? 'Fingerprinting in Progress' : 'Error';
+            btn.textContent = alreadyRunning ? inProgressLabel : 'Error';
             if (!alreadyRunning) {
               setTimeout(() => {
-                startBtn.textContent = 'Start Fingerprinting';
-                startBtn.disabled = false;
+                btn.textContent = idleLabel;
+                btn.disabled = false;
               }, 2500);
             }
           }
         });
-      }
+      };
+      wireFingerprintButton(fingerprintStatsEl, '#ss-start-fingerprinting-btn', false, 'Fingerprinting in Progress', `Fingerprint Missing (${(missing || 0).toLocaleString()})`);
+      wireFingerprintButton(performerStatsEl, '#ss-refresh-outdated-btn', true, 'Refresh in Progress', `Refresh Outdated (${outdatedCount.toLocaleString()})`);
     } catch (e) {
       const errHtml = `<span style="color:#888;font-size:13px;">Failed to load: ${e.message}</span>`;
       performerStatsEl.innerHTML = errHtml;

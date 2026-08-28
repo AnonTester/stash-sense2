@@ -2,46 +2,63 @@
 
 Extends BaseAnalyzer (not BaseUpstreamAnalyzer) -- like
 scene_fingerprint_match.py, this finds new candidates for scenes rather than
-diffing already-linked entities. Reuses the same manual-identify pipeline
-the scene-page "Identify" button calls (identification_router.py's
-_identify_scene_impl) instead of reimplementing frame extraction/detection/
-matching, so results and caching behavior stay identical to a manual run.
+diffing already-linked entities.
+
+Reads Face Identification's stored per-scene match data
+(scene_fingerprints/scene_fingerprint_matches, see identification_router.py's
+save_scene_fingerprint) instead of re-running detect+embed+match itself --
+that data is already there for any scene Face Identification has covered, so
+recreating it here would just be redundant work against the same underlying
+pipeline. The one thing that data might be missing is sprite-tile detection
+(Face Identification's bulk runs default to no sprites, for cost -- see
+fingerprint_generator.py); since a sprite-only face is exactly the kind of
+thing that turns a performerless scene into a recommendation, this analyzer
+does a small on-demand single-scene top-up (fresh identify, use_sprite=True)
+for exactly the scenes that still need one, which also upgrades that scene's
+stored data for next time (via the same save_scene_fingerprint path) --
+after the first pass over a given scene, subsequent runs are a pure DB read.
 """
 
 import logging
-from typing import Optional
 
 from fastapi import HTTPException
+
+from scene_matcher import match_universal_id as _match_universal_id
 
 from .base import BaseAnalyzer, AnalysisResult
 
 logger = logging.getLogger(__name__)
 
-# Matches per detected person/face-cluster. The plain "cluster" matching_mode
-# (unlike hybrid/frequency) doesn't drop single-appearance persons, which is
-# the "plus single frame matches" behavior this job is meant to surface.
-TOP_K_PER_PERSON = 5
-
 PAGE_SIZE = 100
 
 
-def _match_universal_id(match) -> Optional[str]:
-    """Reconstruct the universal_id a PerformerMatchResponse was built from.
-
-    The response model only carries the decomposed parts (endpoint,
-    stashdb_id, local_performer_id), not universal_id itself. Per
-    recognizer.py's recognize_face_v2: for a local-index match,
-    `stashdb_id` may hold that performer's *linked* StashDB uuid rather than
-    their local id, so local_performer_id (always the local id for a local
-    match) must be checked first -- endpoint+stashdb_id alone would silently
-    reconstruct the wrong key. For stashbox/catalogue matches, endpoint+
-    stashdb_id already exactly reproduces the original "<endpoint>:<id>".
-    """
-    if match.local_performer_id:
-        return f"local:{match.local_performer_id}"
-    if match.endpoint and match.stashdb_id:
-        return f"{match.endpoint}:{match.stashdb_id}"
-    return None
+def _make_details(
+    scene_id: str, scene_title: str, person_id: int, frame_count: int, is_best_match: bool,
+    universal_id: str, stashdb_id, name, confidence, distance, country, image_url, endpoint,
+    local_performer_id, source, catalogue_url, profile_url, top_timestamps_sec,
+) -> dict:
+    """Shared recommendation `details` shape -- built the same way whether
+    the match came from stored data or a fresh top-up identify."""
+    return {
+        "scene_id": scene_id,
+        "scene_title": scene_title,
+        "person_id": person_id,
+        "frame_count": frame_count,
+        "is_best_match": is_best_match,
+        "universal_id": universal_id,
+        "stashdb_id": stashdb_id,
+        "name": name,
+        "confidence": confidence,
+        "distance": distance,
+        "country": country,
+        "image_url": image_url,
+        "endpoint": endpoint,
+        "local_performer_id": local_performer_id,
+        "source": source,
+        "catalogue_url": catalogue_url,
+        "profile_url": profile_url,
+        "top_timestamps_sec": top_timestamps_sec,
+    }
 
 
 class SceneFaceMatchAnalyzer(BaseAnalyzer):
@@ -123,32 +140,65 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         self.set_items_total(len(scenes_to_scan))
         created = 0
         processed = 0
+        skipped_no_data = 0
         errors: list[str] = []
 
         scene_titles = {str(scene["id"]): scene.get("title") or f"Scene {scene['id']}" for scene in scenes_to_scan}
-        specs = []
+
+        # Partition: scenes whose stored data already has sprite coverage
+        # are a pure DB read (fast); everything else needs a small on-demand
+        # top-up identify (fresh sprite pass, cached video-frame detection).
+        stored_scenes: list[tuple[str, dict]] = []  # (scene_id, fingerprint row)
+        topup_specs = []
         for scene in scenes_to_scan:
             scene_id = str(scene["id"])
+            fp = self.rec_db.get_scene_fingerprint(int(scene_id))
+            if not fp or fp.get("fingerprint_status") != "complete":
+                skipped_no_data += 1
+                processed += 1
+                self.update_progress(processed, created)
+                continue
+            if fp.get("used_sprite"):
+                stored_scenes.append((scene_id, fp))
+                continue
             file_info = (scene.get("files") or [{}])[0]
-            specs.append(SceneBatchSpec(
+            topup_specs.append(SceneBatchSpec(
                 scene_id=scene_id,
                 width=file_info.get("width"),
                 height=file_info.get("height"),
                 request=SceneIdentifyRequest(
                     scene_id=scene_id,
-                    top_k=TOP_K_PER_PERSON,
-                    matching_mode="cluster",
+                    matching_mode="hybrid",
+                    top_k=5,
                     use_cache=True,
-                    # Matches the manual "Identify" button's full-video flow
-                    # (stash-sense.js's handleIdentifyFullVideo), which always
-                    # merges sprite/VTT scrubber-bar tile faces alongside
-                    # ffmpeg video-frame faces -- without this, a scene whose
-                    # sprite catches a face the sampled video frames miss
-                    # would silently get weaker results here than manual
-                    # identify would find for the same scene.
                     use_sprite=True,
                 ),
             ))
+
+        if skipped_no_data:
+            logger.warning(
+                "[scene_face_match] %d scene(s) have no completed Face Identification "
+                "data yet -- run that first to cover them",
+                skipped_no_data,
+            )
+
+        for scene_id, fp in stored_scenes:
+            scene_title = scene_titles[scene_id]
+            for row in self.rec_db.get_fingerprint_matches(fp["id"]):
+                details = _make_details(
+                    scene_id, scene_title, row["person_id"], row["frame_count"], row["is_best_match"],
+                    row["universal_id"], row["stashdb_id"], row["name"], row["confidence"], row["distance"],
+                    row["country"], row["image_url"], row["endpoint"], row["local_performer_id"],
+                    row["source"], row["catalogue_url"], row["profile_url"], row["top_timestamps_sec"],
+                )
+                rec_id = self.create_recommendation(
+                    target_type="scene", target_id=f"{scene_id}|{row['universal_id']}",
+                    details=details, confidence=row["confidence"],
+                )
+                if rec_id:
+                    created += 1
+            processed += 1
+            self.update_progress(processed, created)
 
         # require_db_available is passed through as identify_scenes_batched's
         # before_scene hook rather than called once up front -- it's both
@@ -166,12 +216,12 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         # Re-checking before every scene reloads if evicted and resets the
         # idle timer so it doesn't happen again for the rest of a long scan.
         async for scene_id, result in identify_scenes_batched(
-            specs, is_stop_requested=self.is_stop_requested, before_scene=require_db_available,
+            topup_specs, is_stop_requested=self.is_stop_requested, before_scene=require_db_available,
         ):
             scene_title = scene_titles[scene_id]
 
             if isinstance(result, Exception):
-                logger.warning("[scene_face_match] Failed to identify scene %s: %s", scene_id, result)
+                logger.warning("[scene_face_match] Sprite top-up failed for scene %s: %s", scene_id, result)
                 errors.append(f"scene {scene_id}: {result}")
                 processed += 1
                 self.update_progress(processed, created)
@@ -184,34 +234,16 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     universal_id = _match_universal_id(match)
                     if not universal_id:
                         continue
-
-                    target_id = f"{scene_id}|{universal_id}"
-                    details = {
-                        "scene_id": scene_id,
-                        "scene_title": scene_title,
-                        "person_id": person.person_id,
-                        "frame_count": person.frame_count,
-                        "is_best_match": universal_id == best_uid,
-                        "universal_id": universal_id,
-                        "stashdb_id": match.stashdb_id,
-                        "name": match.name,
-                        "confidence": match.confidence,
-                        "distance": match.distance,
-                        "country": match.country,
-                        "image_url": match.image_url,
-                        "endpoint": match.endpoint,
-                        "local_performer_id": match.local_performer_id,
-                        "source": match.source,
-                        "catalogue_url": match.catalogue_url,
-                        "profile_url": match.profile_url,
-                        "top_timestamps_sec": match.top_timestamps_sec,
-                    }
-
+                    details = _make_details(
+                        scene_id, scene_title, person.person_id, person.frame_count,
+                        universal_id == best_uid, universal_id, match.stashdb_id, match.name,
+                        match.confidence, match.distance, match.country, match.image_url, match.endpoint,
+                        match.local_performer_id, match.source, match.catalogue_url, match.profile_url,
+                        match.top_timestamps_sec,
+                    )
                     rec_id = self.create_recommendation(
-                        target_type="scene",
-                        target_id=target_id,
-                        details=details,
-                        confidence=match.confidence,
+                        target_type="scene", target_id=f"{scene_id}|{universal_id}",
+                        details=details, confidence=match.confidence,
                     )
                     if rec_id:
                         created += 1
@@ -226,8 +258,10 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
             )
 
         logger.warning(
-            "[scene_face_match] Complete: %d matches found from %d/%d scenes scanned",
+            "[scene_face_match] Complete: %d matches found from %d/%d scenes scanned "
+            "(%d from stored data, %d sprite top-ups, %d skipped -- no Face Identification data)",
             created, processed, len(scenes_to_scan),
+            len(stored_scenes), len(topup_specs), skipped_no_data,
         )
 
         # Only advance the watermark past a fully-completed sweep -- mirrors

@@ -127,10 +127,77 @@ class TestIdentifyScene:
 
 
 def _batched_results(pairs):
-    async def _gen(specs, is_stop_requested=None, before_scene=None):
+    async def _gen(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
         for scene_id, outcome in pairs:
+            if on_scene_start:
+                await on_scene_start(scene_id)
             yield scene_id, outcome
     return _gen
+
+
+class TestUseSpritePreservation:
+    """A bulk run defaults to use_sprite=False (real added cost), but must
+    preserve sprite coverage a scene already has (e.g. from Face
+    Recommendations' own on-demand top-up) rather than silently
+    downgrading it on a routine refresh."""
+
+    async def test_missing_scene_defaults_use_sprite_false(self):
+        gen, stash, rec_db = _generator()
+        _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
+        stash.get_scenes_for_fingerprinting = AsyncMock(
+            side_effect=[([_scene], 1), ([_scene], 1), ([], 1)]
+        )
+        rec_db.get_scene_fingerprint.return_value = None
+        captured_specs = []
+
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
+            captured_specs.extend(specs)
+            return _batched_results([("1", _response(faces_after_filter=1))])(specs)
+
+        with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
+            [p async for p in gen.generate_all(batch_size=100)]
+
+        assert captured_specs[0].request.use_sprite is False
+
+    async def test_refresh_preserves_existing_sprite_coverage(self):
+        gen, stash, rec_db = _generator()
+        _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
+        stash.get_scenes_for_fingerprinting = AsyncMock(
+            side_effect=[([_scene], 1), ([_scene], 1), ([], 1)]
+        )
+        rec_db.get_scene_fingerprint.return_value = {
+            "fingerprint_status": "complete", "db_version": "2025.01.01", "used_sprite": 1,
+        }
+        captured_specs = []
+
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
+            captured_specs.extend(specs)
+            return _batched_results([("1", _response(faces_after_filter=1))])(specs)
+
+        with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
+            [p async for p in gen.generate_all(batch_size=100, refresh_outdated=True)]
+
+        assert captured_specs[0].request.use_sprite is True
+
+    async def test_refresh_without_prior_sprite_coverage_stays_false(self):
+        gen, stash, rec_db = _generator()
+        _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
+        stash.get_scenes_for_fingerprinting = AsyncMock(
+            side_effect=[([_scene], 1), ([_scene], 1), ([], 1)]
+        )
+        rec_db.get_scene_fingerprint.return_value = {
+            "fingerprint_status": "complete", "db_version": "2025.01.01", "used_sprite": 0,
+        }
+        captured_specs = []
+
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
+            captured_specs.extend(specs)
+            return _batched_results([("1", _response(faces_after_filter=1))])(specs)
+
+        with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
+            [p async for p in gen.generate_all(batch_size=100, refresh_outdated=True)]
+
+        assert captured_specs[0].request.use_sprite is False
 
 
 class TestGenerateAllBatchedLoop:
@@ -171,9 +238,9 @@ class TestGenerateAllBatchedLoop:
         ):
             progresses = [p async for p in gen.generate_all(batch_size=100)]
 
-        # Pre-emptive error row, then the real call overwrites it -- both
-        # go through create_scene_fingerprint (INSERT OR REPLACE upstream),
-        # so at least one call happened for scene 1.
+        # on_scene_start's lazy pre-emptive error row (see
+        # scene_batch_orchestrator.py) goes through create_scene_fingerprint
+        # too, so at least one call happened for scene 1.
         assert rec_db.create_scene_fingerprint.call_count >= 1
         final = progresses[-1]
         assert final.successful == 1
@@ -192,7 +259,7 @@ class TestGenerateAllBatchedLoop:
 
         call_log = []
 
-        def _batched(specs, is_stop_requested=None, before_scene=None):
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
             call_log.append([s.scene_id for s in specs])
             if len(call_log) == 1:
                 return _batched_results([("1", _response(faces_after_filter=0))])(specs)
@@ -219,7 +286,7 @@ class TestGenerateAllBatchedLoop:
             ]
         )
 
-        def _batched(specs, is_stop_requested=None, before_scene=None):
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
             if specs and specs[0].scene_id == "1" and not hasattr(_batched, "_called"):
                 _batched._called = True
                 return _batched_results([("1", _response(faces_after_filter=0))])(specs)

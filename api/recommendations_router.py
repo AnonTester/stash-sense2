@@ -5,6 +5,7 @@ Endpoints for managing recommendations, running analysis, and configuration.
 """
 
 from copy import deepcopy
+import json
 import logging
 from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
@@ -84,55 +85,84 @@ def _invalidate_entity_name_cache(entity_type: str):
 def save_scene_fingerprint(
     scene_id: int,
     frames_analyzed: int,
-    performer_data: list[dict],
+    persons: list,
     db_version: Optional[str] = None,
+    used_sprite: bool = False,
 ) -> tuple[Optional[int], Optional[str]]:
     """
-    Persist a scene fingerprint to the database.
+    Persist a scene fingerprint to the database -- both the coverage/status
+    row (scene_fingerprints) and the full per-person candidate match list
+    (scene_fingerprint_matches, every entry of each person's all_matches,
+    not just the best one). Storing the full list is what lets recommendation
+    generation and the live Identify button be served from this stored data
+    instead of re-running detect+embed+match themselves.
 
     Args:
         scene_id: Stash scene ID
         frames_analyzed: Number of frames analyzed
-        performer_data: List of dicts with keys:
-            - performer_id: stashdb universal ID
-            - face_count: number of frames this performer appeared in
-            - avg_confidence: average match confidence (0-1)
+        persons: list[PersonResult] (identification_router.py) -- the
+            already-matched persons for this scene.
         db_version: Face recognition DB version
+        used_sprite: Whether this identify included sprite-tile detection
+            (request.use_sprite) -- persisted so a later bulk refresh can
+            tell whether it's safe to skip sprites for this scene without
+            regressing coverage. See fingerprint_generator.py's
+            use_sprite_by_scene and scene_face_match.py's sprite top-up.
 
     Returns:
         Tuple of (fingerprint_id, error_message). On success, error is None.
         On failure, fingerprint_id is None and error contains the message.
     """
+    from scene_matcher import match_universal_id
+
     if rec_db is None:
         return None, "Recommendations database not initialized"
 
     try:
-        total_faces = sum(p.get("face_count", 0) for p in performer_data)
+        # Matches pre-existing semantics: total_faces is the sum of
+        # frame_count across persons that *have* a best match, not every
+        # detected person -- get_fingerprints_with_faces' proportion
+        # calculation (face_count / total_faces) depends on this same
+        # denominator.
+        total_faces = sum(p.frame_count for p in persons if p.best_match)
 
-        # Create or update the fingerprint
         fingerprint_id = rec_db.create_scene_fingerprint(
             stash_scene_id=scene_id,
             total_faces=total_faces,
             frames_analyzed=frames_analyzed,
             fingerprint_status="complete",
             db_version=db_version,
+            used_sprite=used_sprite,
         )
 
-        # Clear existing faces and add new ones
-        rec_db.delete_fingerprint_faces(fingerprint_id)
-
-        # Calculate proportions
-        total_frames = sum(p.get("face_count", 0) for p in performer_data) or 1
-
-        for performer in performer_data:
-            face_count = performer.get("face_count", 0)
-            rec_db.add_fingerprint_face(
-                fingerprint_id=fingerprint_id,
-                performer_id=performer.get("performer_id", ""),
-                face_count=face_count,
-                avg_confidence=performer.get("avg_confidence"),
-                proportion=face_count / total_frames if total_frames > 0 else 0,
-            )
+        match_rows = []
+        for person in persons:
+            best_uid = match_universal_id(person.best_match) if person.best_match else None
+            for rank, match in enumerate(person.all_matches):
+                universal_id = match_universal_id(match)
+                if not universal_id:
+                    continue
+                match_rows.append({
+                    "person_id": person.person_id,
+                    "frame_count": person.frame_count,
+                    "match_rank": rank,
+                    "is_best_match": universal_id == best_uid,
+                    "universal_id": universal_id,
+                    "stashdb_id": match.stashdb_id,
+                    "name": match.name,
+                    "confidence": match.confidence,
+                    "distance": match.distance,
+                    "country": match.country,
+                    "image_url": match.image_url,
+                    "endpoint": match.endpoint,
+                    "already_tagged": match.already_tagged,
+                    "local_performer_id": match.local_performer_id,
+                    "source": match.source,
+                    "catalogue_url": match.catalogue_url,
+                    "profile_url": match.profile_url,
+                    "top_timestamps_sec": match.top_timestamps_sec,
+                })
+        rec_db.replace_fingerprint_matches(fingerprint_id, match_rows)
 
         return fingerprint_id, None
     except Exception as e:
@@ -145,7 +175,7 @@ def save_scene_fingerprint(
 #
 # Caches the DB-independent, expensive part of scene analysis (frame
 # extraction + face detection+embedding) separately from
-# scene_fingerprint_faces' match results, so a performer-database version
+# scene_fingerprint_matches' match results, so a performer-database version
 # bump can redo just the cheap matching/re-ranking step instead of the
 # whole pipeline. See identification_router.py's /identify/scene.
 
@@ -1730,6 +1760,7 @@ class FingerprintStatusResponse(BaseModel):
     current_db_version: Optional[str]
     current_version_count: Optional[int] = None
     needs_refresh_count: Optional[int] = None
+    outdated_count: Optional[int] = None
     total_scenes: Optional[int] = None
 
 
@@ -1786,6 +1817,7 @@ async def get_fingerprint_status():
         current_db_version=_current_db_version,
         current_version_count=stats.get("current_version_count"),
         needs_refresh_count=stats.get("needs_refresh_count"),
+        outdated_count=stats.get("outdated_count"),
         total_scenes=total_scenes,
     )
 
@@ -1820,16 +1852,114 @@ async def get_scene_fingerprint_status(scene_id: int):
     )
 
 
+def _match_row_to_response_dict(row: dict) -> dict:
+    """A stored scene_fingerprint_matches row -> a plain dict matching
+    identification_router.py's PerformerMatchResponse field shape. No
+    response_model on the route using this (see get_scene_identify_result)
+    -- importing that model at module level here would be circular
+    (identification_router.py already imports this module at its own
+    module level), so this is returned as plain JSON instead."""
+    return {
+        "stashdb_id": row["stashdb_id"],
+        "name": row["name"],
+        "confidence": row["confidence"],
+        "distance": row["distance"],
+        "country": row["country"],
+        "image_url": row["image_url"],
+        "endpoint": row["endpoint"],
+        "already_tagged": bool(row["already_tagged"]),
+        "local_performer_id": row["local_performer_id"],
+        "source": row["source"],
+        "catalogue_url": row["catalogue_url"],
+        "profile_url": row["profile_url"],
+        "top_timestamps_sec": row["top_timestamps_sec"],
+    }
+
+
+@router.get("/fingerprints/scene/{scene_id}/result")
+async def get_scene_identify_result(scene_id: int):
+    """Stored identification result for a scene, shaped exactly like
+    SceneIdentifyResponse (identification_router.py) so the scene page's
+    Identify button can render it directly with the same code it already
+    uses for a fresh /identify/scene call, instead of always re-running
+    detect+embed+match. Always 200 -- {"available": false} (no `result` key)
+    if Face Identification hasn't covered this scene yet, matching the
+    existing exists:false convention on the plain fingerprint-check
+    endpoint above rather than a 404, so the caller can tell "nothing
+    stored" apart from a real backend error using the same JSON-shape
+    check it already does. Caller falls back to the existing
+    fingerprint-prompt flow in that case (see stash-sense.js's
+    handleIdentifyFullVideo).
+
+    already_tagged on each match reflects whatever was true the last time
+    this scene was identified, not necessarily right now -- same staleness
+    tradeoff as everything else served from storage; a Re-identify gets a
+    fresh answer.
+    """
+    db = get_rec_db()
+    fp = db.get_scene_fingerprint(scene_id)
+    if not fp or fp.get("fingerprint_status") != "complete":
+        return {"available": False}
+
+    rows = db.get_fingerprint_matches(fp["id"])
+    persons_by_id: dict[int, list[dict]] = {}
+    for row in rows:
+        persons_by_id.setdefault(row["person_id"], []).append(row)
+
+    persons = []
+    for person_id in sorted(persons_by_id):
+        match_rows = sorted(persons_by_id[person_id], key=lambda r: r["match_rank"])
+        all_matches = [_match_row_to_response_dict(r) for r in match_rows]
+        best_match = next(
+            (m for m, r in zip(all_matches, match_rows) if r["is_best_match"]), None,
+        )
+        persons.append({
+            "person_id": person_id,
+            "frame_count": match_rows[0]["frame_count"],
+            "best_match": best_match,
+            "all_matches": all_matches,
+        })
+
+    return {
+        "available": True,
+        "result": {
+            "scene_id": str(scene_id),
+            "frames_analyzed": fp.get("frames_analyzed", 0),
+            "frames_requested": fp.get("frames_analyzed", 0),
+            "faces_detected": fp.get("total_faces", 0),
+            "faces_after_filter": fp.get("total_faces", 0),
+            "persons": persons,
+            "errors": [],
+            "fingerprint_saved": True,
+            "fingerprint_error": None,
+            "timing": None,
+            "used_cache": True,
+        },
+    }
+
+
 @router.post("/fingerprints/generate")
 async def start_fingerprint_generation(request: FingerprintGenerateRequest):
-    """Start fingerprint generation. Now delegates to the job queue."""
+    """Start fingerprint generation. Delegates to the job queue.
+
+    request.refresh_outdated selects which of the two distinct job types
+    to submit: True -> "fingerprint_refresh_outdated" (re-matches already-
+    identified scenes against the current performer database, cheap).
+    False -> "fingerprint_generation" (detects/identifies scenes that have
+    never been processed). These used to be one job type with the scope
+    hidden in its cursor -- split so the Operations tab and each of the
+    Settings tab's two buttons show independent progress/labels instead of
+    both reacting to "is *a* fingerprint job running" (see
+    fingerprint_job.py's docstring).
+    """
     from queue_router import _queue_manager
     from job_models import JobPriority
     if _queue_manager is None:
         raise HTTPException(status_code=503, detail="Queue manager not initialized")
 
+    type_id = "fingerprint_refresh_outdated" if request.refresh_outdated else "fingerprint_generation"
     job_id = _queue_manager.submit(
-        type_id="fingerprint_generation",
+        type_id=type_id,
         triggered_by="user",
         priority=JobPriority.HIGH,
     )
@@ -1841,15 +1971,22 @@ async def start_fingerprint_generation(request: FingerprintGenerateRequest):
 
 @router.post("/fingerprints/stop", response_model=MessageResponse)
 async def stop_fingerprint_generation():
-    """Stop fingerprint generation via queue."""
+    """Stop whichever fingerprint job is running -- either
+    fingerprint_generation (Fingerprint Missing) or
+    fingerprint_refresh_outdated (Refresh Outdated); see
+    fingerprint_job.py's docstring for why these are two job types."""
     from queue_router import _queue_manager
     if _queue_manager is None:
         raise HTTPException(status_code=503, detail="Queue manager not initialized")
 
-    running = _queue_manager.get_jobs(status="running", type="fingerprint_generation")
+    running = (
+        _queue_manager.get_jobs(status="running", type="fingerprint_generation")
+        + _queue_manager.get_jobs(status="running", type="fingerprint_refresh_outdated")
+    )
     if not running:
         return {"message": "No fingerprint generation running"}
-    _queue_manager.cancel(running[0]["id"])
+    for job in running:
+        _queue_manager.cancel(job["id"])
     return {"message": "Stop requested"}
 
 

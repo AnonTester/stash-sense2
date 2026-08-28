@@ -38,27 +38,46 @@ class TestSceneFingerprintSchema:
         assert fp["total_faces"] == 3
         assert fp["frames_analyzed"] == 40
 
-    def test_add_fingerprint_face(self, tmp_path):
+    def test_replace_fingerprint_matches(self, tmp_path):
         from recommendations_db import RecommendationsDB
 
         db = RecommendationsDB(tmp_path / "test.db")
 
         fp_id = db.create_scene_fingerprint(stash_scene_id=789, total_faces=2, frames_analyzed=40)
 
-        db.add_fingerprint_face(
-            fingerprint_id=fp_id,
-            performer_id="stashdb:abc-123",
-            face_count=10,
-            avg_confidence=0.85,
-            proportion=0.5,
-        )
+        db.replace_fingerprint_matches(fp_id, [
+            {
+                "person_id": 0, "frame_count": 10, "match_rank": 0, "is_best_match": True,
+                "universal_id": "stashdb.org:abc-123", "stashdb_id": "abc-123", "name": "Performer A",
+                "confidence": 0.85, "distance": 0.15, "country": None, "image_url": None,
+                "endpoint": "stashdb.org", "already_tagged": False, "local_performer_id": None,
+                "source": None, "catalogue_url": None, "profile_url": None, "top_timestamps_sec": [],
+            },
+        ])
 
-        faces = db.get_fingerprint_faces(fp_id)
+        matches = db.get_fingerprint_matches(fp_id)
 
-        assert len(faces) == 1
-        assert faces[0]["performer_id"] == "stashdb:abc-123"
-        assert faces[0]["face_count"] == 10
-        assert faces[0]["proportion"] == 0.5
+        assert len(matches) == 1
+        assert matches[0]["universal_id"] == "stashdb.org:abc-123"
+        assert matches[0]["frame_count"] == 10
+        assert matches[0]["is_best_match"] is True
+
+    def test_replace_fingerprint_matches_clears_previous(self, tmp_path):
+        from recommendations_db import RecommendationsDB
+
+        db = RecommendationsDB(tmp_path / "test.db")
+        fp_id = db.create_scene_fingerprint(stash_scene_id=789, total_faces=1, frames_analyzed=40)
+        row = {
+            "person_id": 0, "frame_count": 5, "match_rank": 0, "is_best_match": True,
+            "universal_id": "local:1", "stashdb_id": None, "name": "P", "confidence": 0.5,
+            "distance": 0.5, "country": None, "image_url": None, "endpoint": None,
+            "already_tagged": False, "local_performer_id": "1", "source": None,
+            "catalogue_url": None, "profile_url": None, "top_timestamps_sec": [],
+        }
+        db.replace_fingerprint_matches(fp_id, [row])
+        db.replace_fingerprint_matches(fp_id, [])
+
+        assert db.get_fingerprint_matches(fp_id) == []
 
     def test_get_all_fingerprints(self, tmp_path):
         from recommendations_db import RecommendationsDB
@@ -118,10 +137,20 @@ class TestMarkFingerprintsForRefresh:
 
 class TestResetSceneFingerprintsWithBackup:
     """reset_scene_fingerprints_with_backup() backs up scene_fingerprints +
-    scene_fingerprint_faces to timestamped tables, then marks everything
+    scene_fingerprint_matches to timestamped tables, then marks everything
     for refresh -- added for the Settings UI's Detection Resolution change
     modal, so existing fingerprints can be safely regenerated under a new
     detection_size instead of silently staying stale."""
+
+    @staticmethod
+    def _match_row(universal_id, frame_count):
+        return {
+            "person_id": 0, "frame_count": frame_count, "match_rank": 0, "is_best_match": True,
+            "universal_id": universal_id, "stashdb_id": None, "name": "P", "confidence": 0.5,
+            "distance": 0.5, "country": None, "image_url": None, "endpoint": None,
+            "already_tagged": False, "local_performer_id": None, "source": None,
+            "catalogue_url": None, "profile_url": None, "top_timestamps_sec": [],
+        }
 
     def test_backs_up_and_marks_all_for_refresh(self, tmp_path):
         from recommendations_db import RecommendationsDB
@@ -129,8 +158,8 @@ class TestResetSceneFingerprintsWithBackup:
         db = RecommendationsDB(tmp_path / "test.db")
         fp1 = db.create_scene_fingerprint(stash_scene_id=1, total_faces=2, frames_analyzed=60, db_version="2026.01.01")
         fp2 = db.create_scene_fingerprint(stash_scene_id=2, total_faces=1, frames_analyzed=60, db_version="2026.01.01")
-        db.add_fingerprint_face(fingerprint_id=fp1, performer_id="stashdb:abc", face_count=5)
-        db.add_fingerprint_face(fingerprint_id=fp2, performer_id="stashdb:def", face_count=3)
+        db.replace_fingerprint_matches(fp1, [self._match_row("stashdb.org:abc", 5)])
+        db.replace_fingerprint_matches(fp2, [self._match_row("stashdb.org:def", 3)])
 
         result = db.reset_scene_fingerprints_with_backup()
 

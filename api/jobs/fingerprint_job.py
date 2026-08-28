@@ -15,12 +15,24 @@ logger = logging.getLogger(__name__)
 class FingerprintGenerationJob(BaseJob):
     """Wraps SceneFingerprintGenerator as a queue-managed job.
 
-    Cursor format (JSON string):
-        {"offset": <int>, "processed": <int>}
+    Backs two distinct, separately-tracked queue job types that used to be
+    one job type with the scope hidden inside its cursor -- that made the
+    Operations tab's single "Face Identification" Quick Action ambiguous
+    (which scope would it run?), and made the Settings tab's two buttons
+    both show "in progress" off one shared "is *a* fingerprint_generation
+    job running" flag even when only one of the two scopes was actually
+    active. See queue_manager.py's _create_job_instance -- the two type_ids
+    ("fingerprint_generation" / "fingerprint_refresh_outdated") each
+    construct this class with `refresh_outdated` fixed at dispatch time, so
+    scope is now a property of *which job type ran*, not something buried
+    in a cursor.
 
-    The cursor is saved after each batch of 100 scenes so the job resumes
-    from roughly where it was interrupted rather than restarting at offset 0.
+    Cursor format (JSON string): {"offset": <int>, "processed": <int>} --
+    purely a resume checkpoint now, saved after each batch of 100 scenes.
     """
+
+    def __init__(self, refresh_outdated: bool):
+        self.refresh_outdated = refresh_outdated
 
     async def run(self, context: JobContext, cursor: Optional[str] = None) -> Optional[str]:
         if context.is_stop_requested():
@@ -44,10 +56,12 @@ class FingerprintGenerationJob(BaseJob):
                     cursor,
                 )
 
+        resuming = start_offset > 0 or start_processed > 0
+
         logger.warning(
             "Fingerprint generation job starting (job_id=%d, db_version=%s, "
-            "start_offset=%d, start_processed=%d)",
-            context.job_id, db_version, start_offset, start_processed,
+            "start_offset=%d, start_processed=%d, refresh_outdated=%s)",
+            context.job_id, db_version, start_offset, start_processed, self.refresh_outdated,
         )
 
         stash = get_stash_client()
@@ -63,7 +77,8 @@ class FingerprintGenerationJob(BaseJob):
         async for progress in generator.generate_all(
             start_offset=start_offset,
             start_processed=start_processed,
-            skip_errors=bool(cursor),
+            skip_errors=resuming,
+            refresh_outdated=self.refresh_outdated,
         ):
             if progress.batch_completed:
                 # Persist cursor after each full batch for crash recovery

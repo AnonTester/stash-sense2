@@ -334,6 +334,12 @@ class TestImageFingerprintMigration:
                 updated_at TEXT DEFAULT (datetime('now'))
             );
 
+            -- NOTE: intentionally the *old* (pre-v15) shape/name here, not
+            -- scene_fingerprint_matches -- this fixture depicts a schema_version=5
+            -- database for an image-fingerprints migration test, unrelated to
+            -- the scene-fingerprint-matches work; _migrate_schema's v15 step
+            -- (run as part of upgrading this fixture) creates the new table
+            -- itself, so pre-creating it here under the new name would collide.
             CREATE TABLE scene_fingerprint_faces (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 fingerprint_id INTEGER NOT NULL REFERENCES scene_fingerprints(id) ON DELETE CASCADE,

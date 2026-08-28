@@ -635,7 +635,7 @@
           description: 'Searches untagged Scenes on all Stash-Box endpoints',
         },
         scene_face_match: {
-          title: 'Scene Face Matches',
+          title: 'Face Recommendations',
           icon: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4zm9-6l1.5-3L24 4l-1.5-1L21 0l-1 1.5L18 3l1.5 1L21 8zm-3.5-1.5L19 3l-1.5-.5L17 1l-.5 1.5L15 3l1.5.5L17 5z"/></svg>`,
           description: 'Performers identified in scenes that have none assigned yet',
         },
@@ -944,7 +944,7 @@
       upstream_studio_changes: 'Upstream Studio Changes',
       upstream_scene_changes: 'Upstream Scene Changes',
       scene_fingerprint_match: 'Scene Stash-Box Tagger',
-      scene_face_match: 'Scene Face Matches',
+      scene_face_match: 'Face Recommendations',
     };
 
     container.innerHTML = `

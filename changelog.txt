@@ -1,5 +1,164 @@
 ## 2026-08-28
 
+### 0.21.0 (sidecar) / 0.18.0 (plugin)
+- Fix: "Fingerprint Missing" and "Refresh Outdated" were the same
+  underlying job type (fingerprint_generation) with scope hidden inside
+  its resumption cursor. This made the Operations tab's single "Face
+  Identification" Quick Action ambiguous about which scope it would run,
+  and made the Settings tab's two dedicated buttons both flip to
+  "Fingerprinting in Progress" off one shared "is *a* fingerprint job
+  running" check -- so the Missing button showed as busy while an Outdated
+  refresh was actually what was running, and vice versa. Split into two
+  real, independently-tracked job types:
+  fingerprint_generation ("Fingerprint Missing", always missing-only) and
+  the new fingerprint_refresh_outdated ("Refresh Outdated", always
+  refresh-outdated) -- scope is now fixed by which job type ran, not
+  something a cursor could carry. The Operations tab now shows both as
+  separate Quick Actions with independent progress; the Settings tab's two
+  buttons now only react to their own job type ("Refresh in Progress" vs
+  "Fingerprinting in Progress").
+
+### 0.20.0 (sidecar) / 0.17.0 (plugin)
+- Feature: the scene page's "Identify full video" action now checks for a
+  stored Face Identification result first (new
+  GET /recommendations/fingerprints/scene/{id}/result, reconstructing the
+  same shape a fresh /identify/scene call returns) and renders it directly
+  when available -- no detect+embed+match call at all, instant instead of
+  however long the video takes to decode. Falls back to the existing
+  fingerprint-prompt flow ("Fingerprint now" / "Skip, sprite only") when
+  nothing's stored yet, unchanged.
+- Feature: added a "Re-identify" action to the results view (both a
+  stored-data render and after any fresh identify) -- since results can
+  now come from storage, this is the explicit way to force a fresh
+  detect+embed+match pass (e.g. after tagging a performer on the scene,
+  or after a performer-database update) instead of always getting one
+  automatically. A stored-data render is labeled "from last
+  identification" so it's clear where it came from.
+
+### 0.19.0 (sidecar) / 0.16.3 (plugin)
+- Feature: Face Recommendations (renamed from Scene Face Matches, job
+  type_id unchanged) no longer re-runs detect+embed+match itself -- it
+  reads Face Identification's stored scene_fingerprint_matches data
+  directly for scenes that already have it, so the two jobs stop
+  redundantly identifying the same scenes independently. Face
+  Identification's bulk runs default to no sprite-tile detection (real
+  per-scene cost, see 0.18.0's Face Identification standardization) --
+  since a sprite-only face is exactly the kind of thing that turns a
+  performerless scene into a recommendation, Face Recommendations does a
+  small on-demand single-scene sprite top-up (fresh identify,
+  use_sprite=True, matching_mode="hybrid") only for scenes whose stored
+  data doesn't have sprite coverage yet. That top-up updates the scene's
+  stored data too (via the same save path Face Identification uses), so
+  it's paid at most once per scene -- after that, both jobs read the
+  same up-to-date data for free.
+- Added scene_fingerprints.used_sprite (schema v16) to track this per
+  scene. A bulk Face Identification refresh checks this before deciding
+  its own use_sprite setting for that scene, so a routine "Refresh
+  Outdated" run never silently discards sprite coverage Face
+  Recommendations already paid for.
+
+### 0.18.0 (sidecar only)
+- Feature: scene identification now stores the full per-person candidate
+  match list (every entry of all_matches, ranked, not just the single best
+  match) in a new scene_fingerprint_matches table (schema v15, replacing
+  scene_fingerprint_faces). This is the first step towards Face
+  Identification becoming the single source of truth that both
+  recommendation generation and the live Identify button read from,
+  instead of each independently re-running detect+embed+match for the
+  same scenes (those two consumers land in a follow-up).
+- Feature: Face Identification (the renamed Fingerprint Generation job)
+  now runs with matching_mode="hybrid" (unchanged), use_sprite=True, and
+  top_k=5 -- standardized to match what the live Identify button and
+  Scene Face Matches already use, so this job's stored output is a
+  faithful, reusable superset instead of a narrower fingerprinting-only
+  view. Adds sprite-tile processing cost per scene that wasn't there
+  before.
+- get_fingerprints_with_faces/generate_face_candidates (duplicate-scene
+  detection's inputs) were rewritten to derive their existing return shape
+  from the new table (filtered to best matches only) -- duplicate_scenes.py
+  itself needed no changes. A performer that's the best match for two
+  different detected persons in one scene now has its face_count summed
+  and confidence weighted-averaged, instead of the old table's silent
+  last-write-wins from its per-performer upsert.
+- Migration note: existing scene_fingerprint_faces data (best-match
+  summaries only) is dropped, not converted -- it's rebuilt the next time
+  each scene is (re-)identified. This does NOT require redoing face
+  detection/embedding (that's cached separately in scene_face_embeddings,
+  unaffected by this migration) -- only the cheap re-matching step, same
+  ~100ms/scene fast path as a normal cache-hit re-identify. Duplicate-scene
+  detection coverage will read as 0 until scenes are re-identified.
+
+### 0.17.1 (sidecar) / 0.16.2 (plugin)
+- Fix: fingerprint generation submitted with no cursor at all (the
+  Operations tab's generic per-job-type "Quick Actions" button, which has
+  no scope picker, and a scheduled/automatic run) fell back to
+  `refresh_outdated=True` -- the old always-full-refresh behavior --
+  completely bypassing the Missing/Outdated split added earlier today
+  (0.17.0/0.16.0). Confirmed live: triggering it via Quick Actions with
+  zero missing scenes still launched a full outdated-refresh of the whole
+  library. `fingerprint_job.py`'s no-cursor default is now the safe
+  missing-only scope; a cursor that parses but omits the key (a legacy
+  paused/crashed job from before this key existed) still defaults to a
+  full refresh, so resuming an old in-flight job doesn't silently narrow
+  its scope. The Quick Actions button additionally now sends an explicit
+  `refresh_outdated=false` cursor for this job type, mirroring the
+  existing per-type cursor special-casing already there for
+  scene_fingerprint_match/upstream_scene_changes.
+
+### 0.16.1 (plugin only)
+- Fix: moved the "Outdated" stat and "Refresh Outdated" button from the
+  fingerprint-coverage row to the performer-database row (Settings tab).
+  Outdated means a scene's *matching* was last run against an older
+  performer-database version -- it's the performer database being stale,
+  not this scene's own fingerprint, so it belongs alongside that
+  database's Version/Performers/Faces stats, not next to Scenes/
+  Fingerprints/Missing (which are genuinely about this install's local
+  fingerprint coverage: new videos never detected/matched at all).
+
+### 0.17.0 (sidecar) / 0.16.0 (plugin)
+- Feature: scene fingerprinting now actually uses the cached-face-signal
+  fast path it was designed for -- a performer-database version bump no
+  longer requires redoing ffmpeg decode + buffalo_l detection/embedding
+  for every scene, only the cheap DB-dependent matching step
+  (`_identify_scene_from_cache` in `identification_router.py`). This
+  path existed in code already but was silently a permanent no-op:
+  `scene_face_embeddings`'s schema (and its write path,
+  `save_face_signal_cache`) were left disabled during the earlier
+  FaceNet512/ArcFace -> buffalo_l migration, since that table's columns
+  (`facenet_vector`/`arcface_vector`, both `NOT NULL`) were sized for the
+  old dual-embedding pipeline. Migrated the table to a single `embedding`
+  column (schema v14) and restored the write path -- also wipes
+  `scene_signal_cache` in the same migration, since every existing row
+  there was written while face-embedding caching was off and would
+  otherwise look like a valid, compatible cache pointing at zero cached
+  faces (indistinguishable from a scene that legitimately has none).
+  Every scene needs exactly one more full pipeline run after upgrading
+  to populate the new cache; after that, db-version bumps are cheap.
+- Feature: "Fingerprint Missing" and "Refresh Outdated" are now separate,
+  explicit actions (Settings tab) instead of one button that silently
+  reprocessed the whole library on every performer-database version
+  bump. `refresh_outdated` is now a real, respected parameter end to
+  end -- it previously existed on the `/fingerprints/generate` request
+  model but was discarded before reaching the job. It travels through
+  the fingerprint job's resumption cursor (`fingerprint_job.py`) so
+  pausing and resuming a "missing-only" run doesn't silently widen back
+  to a full refresh. `/recommendations/fingerprints/status` also now
+  reports `outdated_count` (complete fingerprints with a stale
+  `db_version`) distinct from the existing `needs_refresh_count` (which
+  conflates that with never-completed rows), so the UI can show and act
+  on the two separately.
+- Fix: fingerprint generation was pre-marking an entire fetched page (up
+  to 100 scenes) as `error` status before any of them were actually
+  attempted, as a SIGKILL crash-safety measure -- with `scene_batch_orchestrator.py`
+  processing normal-res scenes one at a time, this meant up to 99
+  not-yet-reached scenes looked broken for the whole page's processing
+  duration, visibly regressing the Settings tab's fingerprint-coverage
+  count instead of monotonically climbing. `identify_scenes_batched()`
+  gained an `on_scene_start` hook so each scene is marked in-flight
+  lazily, right before its own work begins, instead of the whole page
+  up front -- same crash-safety guarantee, no false-positive blast
+  radius.
+
 ### 0.16.1 (sidecar only)
 - Feature: delta updates can now carry field-only changes to faces that
   already shipped in an earlier release -- e.g. gender/age inference or

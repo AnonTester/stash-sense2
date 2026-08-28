@@ -874,19 +874,10 @@ async def _identify_scene_from_cache(
     the DB-dependent steps (matching, clustering).
 
     Skips ffmpeg frame extraction and buffalo_l detection+embedding
-    entirely -- reused verbatim from a prior full run on this scene.
-
-    TODO(buffalo_l migration): recommendations_db.py's scene_face_embeddings
-    table (and save_face_signal_cache/load_face_signal_cache in
-    recommendations_router.py) still store the legacy dual facenet_vector/
-    arcface_vector columns -- out of scope for the core matching-path
-    migration, deferred to a follow-up pass on the recommendations
-    subsystem. Every cache row was written under the old database version
-    anyway, so this code path is unreachable in practice until v2 has been
-    used to identify at least one scene AND that scene is re-identified a
-    second time -- by then this needs the real fix, not just the
-    crash-avoidance below (bbox_json/confidence/yaw are still valid; only
-    the embedding reconstruction needs the schema migration).
+    entirely -- reused verbatim from a prior full run on this scene. This is
+    what makes a performer-database version bump cheap: is_scene_cache_compatible()
+    deliberately doesn't check db_version, so a stale-version scene still
+    hits this path and only redoes matching, not detection.
 
     `extra_results` (optional) are results computed by the caller outside
     the cache -- currently just freshly-fetched sprite results, since
@@ -903,20 +894,18 @@ async def _identify_scene_from_cache(
 
     _set_stage(request.scene_id, "cache_check")
     cached_faces = load_face_signal_cache(scene_id_int)
-    if not cached_faces:
-        # identify_scene() still writes scene-level cache metadata
-        # (save_scene_signal_cache) even though face-embedding caching is
-        # disabled for this migration (see this function's docstring), so
-        # cache_meta existing no longer implies cached face rows exist.
-        # Raise so the caller's existing try/except falls back to the real
-        # pipeline, instead of silently returning a wrong "0 faces" result.
-        raise RuntimeError(f"No cached face embeddings for scene {scene_id_int} (face cache disabled)")
+    # Empty is a legitimate cached result here (this scene genuinely has no
+    # detectable faces), not a cache miss -- the caller already confirmed
+    # cache_meta exists and is param-compatible before calling this
+    # function, and scene_signal_cache/scene_face_embeddings are always
+    # written together (see _identify_scene_compute), so a scene can't have
+    # one without the other.
     all_results: list[tuple[int, RecognitionResult]] = []
     for row in cached_faces:
         bbox = json.loads(row["bbox_json"])
         face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
         embedding = FaceEmbedding(
-            embedding=np.frombuffer(row["facenet_vector"], dtype=np.float32),
+            embedding=np.frombuffer(row["embedding"], dtype=np.float32),
         )
         matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
         all_results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
@@ -935,29 +924,20 @@ async def _identify_scene_from_cache(
 
     # Save the fingerprint even when zero performers matched -- that's a
     # valid, complete result (this scene simply has nobody recognizable in
-    # it), not an error. Gating the save on non-empty performer_data left
-    # the pre-emptive "error" status row (written before matching ever
-    # runs) permanently in place for any such scene, so it never flipped
-    # to "complete" no matter how many times fingerprinting re-ran.
+    # it), not an error. Gating the save on non-empty persons left the
+    # pre-emptive "error" status row (written before matching ever runs)
+    # permanently in place for any such scene, so it never flipped to
+    # "complete" no matter how many times fingerprinting re-ran.
     fingerprint_saved = False
     fingerprint_error = None
-    performer_data = []
-    for person in persons:
-        if person.best_match:
-            avg_distance = person.best_match.distance
-            avg_confidence = max(0, 1 - avg_distance) if avg_distance is not None else None
-            performer_data.append({
-                "performer_id": person.best_match.stashdb_id,
-                "face_count": person.frame_count,
-                "avg_confidence": avg_confidence,
-            })
     current_db_version = _db_manifest.get("version")
     _set_stage(request.scene_id, "saving_fingerprint")
     fp_id, fp_error = save_scene_fingerprint(
         scene_id=scene_id_int,
         frames_analyzed=cache_meta["frames_analyzed"],
-        performer_data=performer_data,
+        persons=persons,
         db_version=current_db_version,
+        used_sprite=request.use_sprite,
     )
     if fp_id:
         fingerprint_saved = True
@@ -1197,8 +1177,14 @@ async def _identify_scene_compute(
     all_results: list[tuple[int, RecognitionResult]] = []
     t_recognize_total = 0.0
 
-    # NOTE: face_cache_rows/save_face_signal_cache removed for this
-    # migration -- see the comment where rows used to be appended, below.
+    # Collected alongside matching and persisted via save_face_signal_cache
+    # below -- this is what lets a later re-identify (e.g. after a
+    # performer-database version bump) skip straight to
+    # _identify_scene_from_cache instead of redoing detection+embedding.
+    # Video-frame faces only, matching _identify_scene_from_cache's read
+    # side -- screenshot/sprite faces are always recomputed fresh (see that
+    # function's docstring).
+    face_cache_rows: list[dict] = []
 
     for (frame_idx, face, frame_image), embedding in zip(detected_faces, embeddings):
         t_rec = time.time()
@@ -1207,14 +1193,13 @@ async def _identify_scene_compute(
 
         result = RecognitionResult(face=face, matches=matches, embedding=embedding)
         all_results.append((frame_idx, result))
-        # face_cache_rows collection removed -- recommendations_db.py's
-        # scene_face_embeddings table still has the legacy NOT NULL dual
-        # facenet_vector/arcface_vector columns (deferred to a follow-up
-        # migration of the recommendations subsystem, out of scope here).
-        # Until that lands, the scene-fingerprint cache is a no-op: every
-        # identify_scene call does full detection+embedding+matching, same
-        # as a cache miss always did -- slower on repeat identification of
-        # the same scene, but correct.
+        face_cache_rows.append({
+            "frame_index": frame_idx,
+            "bbox": face.bbox,
+            "confidence": face.confidence,
+            "yaw": face.yaw,
+            "embedding": np.asarray(embedding.embedding, dtype=np.float32).tobytes(),
+        })
 
     t_face_loop_total = time.time() - t_face_loop
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching: {t_recognize_total:.1f}s | Total face pipeline: {t_face_loop_total:.1f}s")
@@ -1263,9 +1248,6 @@ async def _identify_scene_compute(
         except Exception as e:
             print(f"[identify_scene] Screenshot processing failed: {e}")
 
-    # save_face_signal_cache() call removed -- see the earlier comment
-    # where face_cache_rows used to be collected.
-
     # Merge in sprite results resolved up front (see the comment where
     # sprite_extra_results was computed, near the top of this function).
     if sprite_extra_results:
@@ -1275,6 +1257,10 @@ async def _identify_scene_compute(
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
 
+    # Written together, unconditionally (including when face_cache_rows is
+    # empty -- a scene with genuinely zero detectable faces is still a
+    # valid, fast-path-cacheable result) so the two tables can never
+    # diverge -- see _identify_scene_from_cache's cache_check comment.
     save_scene_signal_cache(
         scene_id_int,
         num_frames=num_frames,
@@ -1284,6 +1270,7 @@ async def _identify_scene_compute(
         end_offset_pct=request.end_offset_pct,
         frames_analyzed=len(extraction_result.frames),
     )
+    save_face_signal_cache(scene_id_int, face_cache_rows)
 
     # Choose matching mode
     t_match_end = 0.0
@@ -1301,37 +1288,26 @@ async def _identify_scene_compute(
     #
     # Save even when zero performers matched -- that's a valid, complete
     # result (nobody recognizable in this scene), not an error. Gating the
-    # save on non-empty performer_data left the pre-emptive "error" status
-    # row (written before matching ever runs, see the fingerprint generator's
+    # save on non-empty persons left the pre-emptive "error" status row
+    # (written before matching ever runs, see the fingerprint generator's
     # create_scene_fingerprint call) permanently in place for any such
     # scene: it never flipped to "complete" no matter how many times
     # fingerprinting re-ran, silently inflating the "missing" count forever.
     fingerprint_saved = False
     fingerprint_error = None
 
-    performer_data = []
-    for person in persons:
-        if person.best_match:
-            # Convert distance to confidence (0-1 scale, lower distance = higher confidence)
-            avg_distance = person.best_match.distance
-            avg_confidence = max(0, 1 - avg_distance) if avg_distance is not None else None
-            performer_data.append({
-                "performer_id": person.best_match.stashdb_id,
-                "face_count": person.frame_count,
-                "avg_confidence": avg_confidence,
-            })
-
     current_db_version = _db_manifest.get("version")
     _set_stage(request.scene_id, "saving_fingerprint")
     fp_id, fp_error = save_scene_fingerprint(
         scene_id=int(request.scene_id),
         frames_analyzed=len(extraction_result.frames),
-        performer_data=performer_data,
+        persons=persons,
         db_version=current_db_version,
+        used_sprite=request.use_sprite,
     )
     if fp_id:
         fingerprint_saved = True
-        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Saved fingerprint #{fp_id} with {len(performer_data)} performers")
+        print(f"[identify_scene] [{time.time()-t_start:.1f}s] Saved fingerprint #{fp_id} with {len(persons)} persons")
     else:
         fingerprint_error = fp_error
         print(f"[identify_scene] [{time.time()-t_start:.1f}s] Failed to save fingerprint: {fp_error}")

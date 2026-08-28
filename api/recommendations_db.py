@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 16
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -50,8 +50,7 @@ SCENE_SIGNAL_CACHE_SCHEMA = """
         bbox_json TEXT NOT NULL,
         confidence REAL NOT NULL,
         yaw REAL,
-        facenet_vector BLOB NOT NULL,
-        arcface_vector BLOB NOT NULL
+        embedding BLOB NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_scene_face_emb_scene ON scene_face_embeddings(stash_scene_id);
 
@@ -238,6 +237,7 @@ class RecommendationsDB:
                 frames_analyzed INTEGER NOT NULL DEFAULT 0,
                 fingerprint_status TEXT NOT NULL DEFAULT 'pending',
                 db_version TEXT,  -- Face recognition DB version used to generate this fingerprint
+                used_sprite INTEGER NOT NULL DEFAULT 0,  -- whether the identify that produced the current data included sprite-tile detection
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -245,19 +245,35 @@ class RecommendationsDB:
             CREATE INDEX idx_scene_fp_status ON scene_fingerprints(fingerprint_status);
             CREATE INDEX idx_scene_fp_db_version ON scene_fingerprints(db_version);
 
-            -- Face entries within scene fingerprints
-            CREATE TABLE scene_fingerprint_faces (
+            -- Full per-person candidate match list within scene fingerprints
+            -- (every entry of PersonResult.all_matches, ranked) -- lets
+            -- recommendation generation and the live Identify button be
+            -- served from stored data instead of re-running detect+embed+match.
+            CREATE TABLE scene_fingerprint_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 fingerprint_id INTEGER NOT NULL REFERENCES scene_fingerprints(id) ON DELETE CASCADE,
-                performer_id TEXT NOT NULL,
-                face_count INTEGER NOT NULL DEFAULT 0,
-                avg_confidence REAL,
-                proportion REAL,
-                created_at TEXT DEFAULT (datetime('now')),
-                UNIQUE(fingerprint_id, performer_id)
+                person_id INTEGER NOT NULL,
+                frame_count INTEGER NOT NULL,
+                match_rank INTEGER NOT NULL,
+                is_best_match INTEGER NOT NULL DEFAULT 0,
+                universal_id TEXT NOT NULL,
+                stashdb_id TEXT,
+                name TEXT,
+                confidence REAL,
+                distance REAL,
+                country TEXT,
+                image_url TEXT,
+                endpoint TEXT,
+                already_tagged INTEGER NOT NULL DEFAULT 0,
+                local_performer_id TEXT,
+                source TEXT,
+                catalogue_url TEXT,
+                profile_url TEXT,
+                top_timestamps_sec TEXT,
+                UNIQUE(fingerprint_id, person_id, match_rank)
             );
-            CREATE INDEX idx_scene_fp_faces_fingerprint ON scene_fingerprint_faces(fingerprint_id);
-            CREATE INDEX idx_scene_fp_faces_performer ON scene_fingerprint_faces(performer_id);
+            CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
+            CREATE INDEX idx_sfm_universal_id ON scene_fingerprint_matches(universal_id);
 
             -- Image fingerprints for gallery/image identification
             CREATE TABLE image_fingerprints (
@@ -559,6 +575,127 @@ class RecommendationsDB:
                 ALTER TABLE job_queue ADD COLUMN resource_used TEXT;
 
                 UPDATE schema_version SET version = 13;
+            """)
+
+        if from_version < 14:
+            # scene_face_embeddings was created (schema v12) with the old
+            # dual facenet_vector/arcface_vector columns, sized for the
+            # pre-buffalo_l dual-model pipeline, and was never actually
+            # written to under v2 (the write path was disabled during the
+            # buffalo_l migration -- see identification_router.py). Every
+            # row in it predates buffalo_l and is in the wrong embedding
+            # space regardless of db_version, so there's nothing worth
+            # preserving -- drop and recreate with a single embedding
+            # column instead of trying to convert existing rows.
+            #
+            # scene_signal_cache also gets wiped here even though its own
+            # shape isn't changing: it's the "this scene was fully analyzed
+            # and is safe to fast-path" signal consulted before ever
+            # touching scene_face_embeddings (see is_scene_cache_compatible
+            # callers), and every existing row was written while face-
+            # embedding caching was disabled -- i.e. it would look
+            # compatible while pointing at zero cached faces, which the
+            # fast path can't distinguish from a scene that legitimately
+            # has zero faces. Wiping both together forces exactly one real
+            # pipeline run per scene going forward, after which both tables
+            # populate together and stay consistent.
+            conn.executescript("""
+                DROP TABLE IF EXISTS scene_face_embeddings;
+                DROP TABLE IF EXISTS scene_signal_cache;
+
+                CREATE TABLE scene_signal_cache (
+                    stash_scene_id INTEGER PRIMARY KEY,
+                    num_frames INTEGER NOT NULL,
+                    min_face_size INTEGER NOT NULL,
+                    min_face_confidence REAL NOT NULL,
+                    start_offset_pct REAL NOT NULL,
+                    end_offset_pct REAL NOT NULL,
+                    frames_analyzed INTEGER NOT NULL,
+                    body_shoulder_hip_ratio REAL,
+                    body_leg_torso_ratio REAL,
+                    body_arm_span_height_ratio REAL,
+                    body_confidence REAL,
+                    tattoos_detected INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT DEFAULT (datetime('now'))
+                );
+
+                CREATE TABLE scene_face_embeddings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stash_scene_id INTEGER NOT NULL,
+                    frame_index INTEGER NOT NULL,
+                    bbox_json TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    yaw REAL,
+                    embedding BLOB NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_scene_face_emb_scene ON scene_face_embeddings(stash_scene_id);
+
+                UPDATE schema_version SET version = 14;
+            """)
+
+        if from_version < 15:
+            # scene_fingerprint_faces stored one row per (fingerprint,
+            # performer) -- only ever the single best match, no room for
+            # alternate candidates. Replaced with scene_fingerprint_matches,
+            # which stores every entry of a person's all_matches (ranked),
+            # so downstream consumers (recommendation generation, the live
+            # Identify button) can be served from this stored data instead
+            # of re-running the whole detect+embed+match pipeline. See
+            # identification_router.py's save_scene_fingerprint.
+            #
+            # Existing scene_fingerprint_faces rows are dropped outright
+            # rather than migrated -- they only ever held a best-match
+            # summary, which is exactly the subset save_scene_fingerprint
+            # will repopulate the first time each scene is next identified.
+            # duplicate_scenes.py's coverage (via get_fingerprints_with_faces/
+            # generate_face_candidates, both rewritten to read the new table)
+            # drops to 0 until then and rebuilds as scenes get re-identified
+            # -- same one-time-cost shape as the v14 migration above.
+            conn.executescript("""
+                DROP TABLE IF EXISTS scene_fingerprint_faces;
+
+                CREATE TABLE scene_fingerprint_matches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint_id INTEGER NOT NULL REFERENCES scene_fingerprints(id) ON DELETE CASCADE,
+                    person_id INTEGER NOT NULL,
+                    frame_count INTEGER NOT NULL,
+                    match_rank INTEGER NOT NULL,
+                    is_best_match INTEGER NOT NULL DEFAULT 0,
+                    universal_id TEXT NOT NULL,
+                    stashdb_id TEXT,
+                    name TEXT,
+                    confidence REAL,
+                    distance REAL,
+                    country TEXT,
+                    image_url TEXT,
+                    endpoint TEXT,
+                    already_tagged INTEGER NOT NULL DEFAULT 0,
+                    local_performer_id TEXT,
+                    source TEXT,
+                    catalogue_url TEXT,
+                    profile_url TEXT,
+                    top_timestamps_sec TEXT,
+                    UNIQUE(fingerprint_id, person_id, match_rank)
+                );
+                CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
+                CREATE INDEX idx_sfm_universal_id ON scene_fingerprint_matches(universal_id);
+
+                UPDATE schema_version SET version = 15;
+            """)
+
+        if from_version < 16:
+            # Tracks whether the identify that produced a scene's *current*
+            # stored data included sprite-tile detection. Needed so a bulk
+            # Face Identification run (which defaults to sprites off, for
+            # cost) never silently downgrades a scene Face Recommendations
+            # already paid the sprite cost for -- see fingerprint_generator.py
+            # (reads this to decide whether to preserve use_sprite=True on
+            # a refresh) and scene_face_match.py (does an on-demand,
+            # single-scene sprite top-up only for scenes still at 0).
+            conn.executescript("""
+                ALTER TABLE scene_fingerprints ADD COLUMN used_sprite INTEGER NOT NULL DEFAULT 0;
+
+                UPDATE schema_version SET version = 16;
             """)
 
     @contextmanager
@@ -1545,6 +1682,7 @@ class RecommendationsDB:
         frames_analyzed: int,
         fingerprint_status: str = "pending",
         db_version: Optional[str] = None,
+        used_sprite: bool = False,
     ) -> int:
         """
         Create or update a scene fingerprint. Returns the fingerprint ID.
@@ -1556,21 +1694,27 @@ class RecommendationsDB:
             frames_analyzed: Number of frames analyzed
             fingerprint_status: Status ('pending', 'complete', 'error')
             db_version: Face recognition DB version used for this fingerprint
+            used_sprite: Whether the identify producing this data included
+                sprite-tile detection. Callers doing a pre-emptive "error"
+                status write (see fingerprint_generator.py's _mark_scene_started)
+                should leave this at the default -- it only matters once a
+                fingerprint_status='complete' save reflects what actually ran.
         """
         with self._connection() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO scene_fingerprints (stash_scene_id, total_faces, frames_analyzed, fingerprint_status, db_version)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO scene_fingerprints (stash_scene_id, total_faces, frames_analyzed, fingerprint_status, db_version, used_sprite)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(stash_scene_id) DO UPDATE SET
                     total_faces = excluded.total_faces,
                     frames_analyzed = excluded.frames_analyzed,
                     fingerprint_status = excluded.fingerprint_status,
                     db_version = excluded.db_version,
+                    used_sprite = excluded.used_sprite,
                     updated_at = datetime('now')
                 RETURNING id
                 """,
-                (stash_scene_id, total_faces, frames_analyzed, fingerprint_status, db_version)
+                (stash_scene_id, total_faces, frames_analyzed, fingerprint_status, db_version, int(used_sprite))
             )
             return cursor.fetchone()[0]
 
@@ -1597,47 +1741,59 @@ class RecommendationsDB:
                 rows = conn.execute("SELECT * FROM scene_fingerprints").fetchall()
             return [dict(row) for row in rows]
 
-    def add_fingerprint_face(
-        self,
-        fingerprint_id: int,
-        performer_id: str,
-        face_count: int,
-        avg_confidence: Optional[float] = None,
-        proportion: Optional[float] = None,
-    ) -> int:
-        """Add or update a face entry in a scene fingerprint. Returns the face entry ID."""
-        with self._connection() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO scene_fingerprint_faces (fingerprint_id, performer_id, face_count, avg_confidence, proportion)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(fingerprint_id, performer_id) DO UPDATE SET
-                    face_count = excluded.face_count,
-                    avg_confidence = excluded.avg_confidence,
-                    proportion = excluded.proportion
-                RETURNING id
-                """,
-                (fingerprint_id, performer_id, face_count, avg_confidence, proportion)
-            )
-            return cursor.fetchone()[0]
+    def replace_fingerprint_matches(self, fingerprint_id: int, matches: list[dict]) -> None:
+        """Clear and bulk-insert the full candidate match list for a scene
+        fingerprint -- every entry of every detected person's all_matches,
+        not just the best one. Replaces the old add_fingerprint_face (which
+        stored one best-match-only row per performer).
 
-    def get_fingerprint_faces(self, fingerprint_id: int) -> list[dict]:
-        """Get all face entries for a scene fingerprint."""
+        Each dict in `matches`: person_id, frame_count, match_rank,
+        is_best_match (bool), universal_id, stashdb_id, name, confidence,
+        distance, country, image_url, endpoint, already_tagged (bool),
+        local_performer_id, source, catalogue_url, profile_url,
+        top_timestamps_sec (list[float], stored as JSON).
+        """
+        with self._connection() as conn:
+            conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
+            conn.executemany(
+                """
+                INSERT INTO scene_fingerprint_matches (
+                    fingerprint_id, person_id, frame_count, match_rank, is_best_match,
+                    universal_id, stashdb_id, name, confidence, distance, country,
+                    image_url, endpoint, already_tagged, local_performer_id,
+                    source, catalogue_url, profile_url, top_timestamps_sec
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        fingerprint_id, m["person_id"], m["frame_count"], m["match_rank"],
+                        int(bool(m["is_best_match"])), m["universal_id"], m.get("stashdb_id"),
+                        m.get("name"), m.get("confidence"), m.get("distance"), m.get("country"),
+                        m.get("image_url"), m.get("endpoint"), int(bool(m.get("already_tagged"))),
+                        m.get("local_performer_id"), m.get("source"), m.get("catalogue_url"),
+                        m.get("profile_url"), json.dumps(m.get("top_timestamps_sec") or []),
+                    )
+                    for m in matches
+                ],
+            )
+
+    def get_fingerprint_matches(self, fingerprint_id: int) -> list[dict]:
+        """Get all stored candidate matches for a scene fingerprint, ordered
+        by person then rank -- ready to be grouped back into per-person
+        match lists by the caller."""
         with self._connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM scene_fingerprint_faces WHERE fingerprint_id = ?",
+                "SELECT * FROM scene_fingerprint_matches WHERE fingerprint_id = ? ORDER BY person_id, match_rank",
                 (fingerprint_id,)
             ).fetchall()
-            return [dict(row) for row in rows]
-
-    def delete_fingerprint_faces(self, fingerprint_id: int) -> int:
-        """Delete all face entries for a scene fingerprint. Returns count deleted."""
-        with self._connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM scene_fingerprint_faces WHERE fingerprint_id = ?",
-                (fingerprint_id,)
-            )
-            return cursor.rowcount
+            results = []
+            for row in rows:
+                d = dict(row)
+                d["top_timestamps_sec"] = json.loads(d["top_timestamps_sec"]) if d.get("top_timestamps_sec") else []
+                d["is_best_match"] = bool(d["is_best_match"])
+                d["already_tagged"] = bool(d["already_tagged"])
+                results.append(d)
+            return results
 
     def get_fingerprinted_scene_ids(self) -> set[int]:
         """Scene IDs with a complete fingerprint.
@@ -1684,7 +1840,7 @@ class RecommendationsDB:
                 if fp_ids:
                     fp_placeholders = ",".join("?" * len(fp_ids))
                     conn.execute(
-                        f"DELETE FROM scene_fingerprint_faces WHERE fingerprint_id IN ({fp_placeholders})", fp_ids
+                        f"DELETE FROM scene_fingerprint_matches WHERE fingerprint_id IN ({fp_placeholders})", fp_ids
                     )
                 cursor = conn.execute(
                     f"DELETE FROM scene_fingerprints WHERE stash_scene_id IN ({placeholders})", chunk
@@ -1704,7 +1860,7 @@ class RecommendationsDB:
     #
     # Caches the DB-independent, expensive part of scene analysis (frame
     # extraction + detection + embedding) separately from the match
-    # results in scene_fingerprint_faces, so a performer-database version
+    # results in scene_fingerprint_matches, so a performer-database version
     # bump can re-run just the cheap matching/re-ranking step instead of
     # the whole pipeline. See identification_router.py's /identify/scene.
 
@@ -1756,21 +1912,20 @@ class RecommendationsDB:
     def replace_face_embeddings(self, stash_scene_id: int, faces: list[dict]) -> None:
         """Clear and bulk-insert cached face detections for a scene.
 
-        Each dict: frame_index, bbox (dict), confidence, yaw, facenet_vector
-        (bytes), arcface_vector (bytes).
+        Each dict: frame_index, bbox (dict), confidence, yaw, embedding
+        (bytes, buffalo_l's single embedding vector).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_face_embeddings WHERE stash_scene_id = ?", (stash_scene_id,))
             conn.executemany(
                 """
                 INSERT INTO scene_face_embeddings (
-                    stash_scene_id, frame_index, bbox_json, confidence, yaw,
-                    facenet_vector, arcface_vector
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (stash_scene_id, f["frame_index"], json.dumps(f["bbox"]), f["confidence"],
-                     f.get("yaw"), f["facenet_vector"], f["arcface_vector"])
+                     f.get("yaw"), f["embedding"])
                     for f in faces
                 ],
             )
@@ -1830,6 +1985,20 @@ class RecommendationsDB:
                     "SELECT COUNT(*) FROM scene_fingerprints WHERE db_version IS NULL OR db_version != ?",
                     (current_db_version,)
                 ).fetchone()[0]
+                # Distinct from needs_refresh_count, which also counts rows
+                # that were never completed at all (status='error' with a
+                # stale/NULL db_version) -- this is specifically "already-
+                # identified scenes whose db_version is stale," the set a
+                # "refresh outdated" action should touch, as opposed to
+                # "missing" (total_scenes - complete_fingerprints, computed
+                # by the caller) which a "fingerprint missing" action should
+                # touch. See recommendations_router.py's fingerprint status/
+                # generate endpoints.
+                stats['outdated_count'] = conn.execute(
+                    "SELECT COUNT(*) FROM scene_fingerprints "
+                    "WHERE fingerprint_status = 'complete' AND (db_version IS NULL OR db_version != ?)",
+                    (current_db_version,)
+                ).fetchone()[0]
 
             return stats
 
@@ -1857,7 +2026,7 @@ class RecommendationsDB:
             return cursor.rowcount
 
     def reset_scene_fingerprints_with_backup(self) -> dict:
-        """Back up scene_fingerprints + scene_fingerprint_faces to
+        """Back up scene_fingerprints + scene_fingerprint_matches to
         timestamped tables, then mark every fingerprint for refresh (same
         effect as mark_fingerprints_for_refresh(None), so the next
         fingerprint generation run fully reprocesses every scene).
@@ -1872,10 +2041,10 @@ class RecommendationsDB:
         """
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         backup_fp_table = f"scene_fingerprints_backup_{timestamp}"
-        backup_faces_table = f"scene_fingerprint_faces_backup_{timestamp}"
+        backup_faces_table = f"scene_fingerprint_matches_backup_{timestamp}"
         with self._connection() as conn:
             conn.execute(f"CREATE TABLE {backup_fp_table} AS SELECT * FROM scene_fingerprints")
-            conn.execute(f"CREATE TABLE {backup_faces_table} AS SELECT * FROM scene_fingerprint_faces")
+            conn.execute(f"CREATE TABLE {backup_faces_table} AS SELECT * FROM scene_fingerprint_matches")
             fingerprints_backed_up = conn.execute(f"SELECT COUNT(*) FROM {backup_fp_table}").fetchone()[0]
             faces_backed_up = conn.execute(f"SELECT COUNT(*) FROM {backup_faces_table}").fetchone()[0]
             cursor = conn.execute(
@@ -2134,39 +2303,43 @@ class RecommendationsDB:
         scene_ids: Optional[set[int]] = None,
     ) -> dict:
         """
-        Load all complete fingerprints with their faces in a single JOIN query.
+        Load all complete fingerprints with their best-match performers in a
+        single JOIN query, derived from scene_fingerprint_matches (which
+        holds every candidate match, not just the best one -- filtered here
+        to is_best_match=1 to reproduce the old scene_fingerprint_faces
+        "one best match per performer" shape duplicate_scenes.py depends on).
         Returns dict keyed by str(stash_scene_id) with structure:
         {stash_scene_id, total_faces, frames_analyzed, faces: {performer_id -> {face_count, avg_confidence, proportion}}}
         Optionally filtered to specific scene IDs.
+
+        A performer can legitimately be the best match for more than one
+        detected person in the same scene (e.g. clustering imperfectly split
+        one real person into two groups) -- grouped here by summing
+        frame_count and taking a frame_count-weighted average confidence,
+        rather than the old table's silent last-write-wins (it upserted one
+        row per performer per save, so an earlier person's row was simply
+        overwritten by a later one with the same best match).
+        """
+        query = """
+            SELECT sf.stash_scene_id, sf.total_faces, sf.frames_analyzed,
+                   sfm.universal_id AS performer_id, sfm.frame_count, sfm.confidence
+            FROM scene_fingerprints sf
+            LEFT JOIN scene_fingerprint_matches sfm
+                ON sf.id = sfm.fingerprint_id AND sfm.is_best_match = 1
+            WHERE sf.fingerprint_status = 'complete'
         """
         with self._connection() as conn:
             if scene_ids:
                 placeholders = ",".join("?" for _ in scene_ids)
                 rows = conn.execute(
-                    f"""
-                    SELECT sf.stash_scene_id, sf.total_faces, sf.frames_analyzed,
-                           sff.performer_id, sff.face_count, sff.avg_confidence, sff.proportion
-                    FROM scene_fingerprints sf
-                    LEFT JOIN scene_fingerprint_faces sff ON sf.id = sff.fingerprint_id
-                    WHERE sf.fingerprint_status = 'complete'
-                      AND sf.stash_scene_id IN ({placeholders})
-                    ORDER BY sf.stash_scene_id
-                    """,
+                    f"{query} AND sf.stash_scene_id IN ({placeholders}) ORDER BY sf.stash_scene_id",
                     list(scene_ids),
                 ).fetchall()
             else:
-                rows = conn.execute(
-                    """
-                    SELECT sf.stash_scene_id, sf.total_faces, sf.frames_analyzed,
-                           sff.performer_id, sff.face_count, sff.avg_confidence, sff.proportion
-                    FROM scene_fingerprints sf
-                    LEFT JOIN scene_fingerprint_faces sff ON sf.id = sff.fingerprint_id
-                    WHERE sf.fingerprint_status = 'complete'
-                    ORDER BY sf.stash_scene_id
-                    """,
-                ).fetchall()
+                rows = conn.execute(f"{query} ORDER BY sf.stash_scene_id").fetchall()
 
-        # Group by scene
+        # Group by scene, then by performer within scene (summing across
+        # persons that best-matched the same performer).
         result = {}
         for row in rows:
             scene_id = str(row["stash_scene_id"])
@@ -2178,34 +2351,45 @@ class RecommendationsDB:
                     "faces": {},
                 }
             if row["performer_id"] is not None:
-                result[scene_id]["faces"][row["performer_id"]] = {
-                    "performer_id": row["performer_id"],
-                    "face_count": row["face_count"],
-                    "avg_confidence": row["avg_confidence"],
-                    "proportion": row["proportion"],
-                }
+                faces = result[scene_id]["faces"]
+                pid = row["performer_id"]
+                if pid not in faces:
+                    faces[pid] = {"performer_id": pid, "face_count": 0, "_confidence_weighted_sum": 0.0}
+                faces[pid]["face_count"] += row["frame_count"]
+                if row["confidence"] is not None:
+                    faces[pid]["_confidence_weighted_sum"] += row["confidence"] * row["frame_count"]
+
+        for scene in result.values():
+            total_faces = scene["total_faces"] or 0
+            for face in scene["faces"].values():
+                face_count = face.pop("face_count")
+                weighted_sum = face.pop("_confidence_weighted_sum")
+                face["face_count"] = face_count
+                face["avg_confidence"] = (weighted_sum / face_count) if face_count else None
+                face["proportion"] = (face_count / total_faces) if total_faces else 0
 
         return result
 
     def generate_face_candidates(self) -> list[tuple[int, int]]:
         """
         Find all scene pairs that share an identified performer via SQL self-join
-        on scene_fingerprint_faces. Returns list of (scene_a_id, scene_b_id) tuples
-        in canonical order (a < b).
+        on scene_fingerprint_matches (best matches only). Returns list of
+        (scene_a_id, scene_b_id) tuples in canonical order (a < b).
         """
         with self._connection() as conn:
             rows = conn.execute(
                 """
                 SELECT DISTINCT sfa.stash_scene_id AS scene_a_id,
                                 sfb.stash_scene_id AS scene_b_id
-                FROM scene_fingerprint_faces fa
-                JOIN scene_fingerprint_faces fb ON fa.performer_id = fb.performer_id
+                FROM scene_fingerprint_matches fa
+                JOIN scene_fingerprint_matches fb ON fa.universal_id = fb.universal_id
                 JOIN scene_fingerprints sfa ON fa.fingerprint_id = sfa.id
                 JOIN scene_fingerprints sfb ON fb.fingerprint_id = sfb.id
-                WHERE sfa.fingerprint_status = 'complete'
+                WHERE fa.is_best_match = 1 AND fb.is_best_match = 1
+                  AND sfa.fingerprint_status = 'complete'
                   AND sfb.fingerprint_status = 'complete'
                   AND sfa.stash_scene_id < sfb.stash_scene_id
-                  AND fa.performer_id != 'unknown'
+                  AND fa.universal_id != 'unknown'
                 """
             ).fetchall()
             return [(row[0], row[1]) for row in rows]

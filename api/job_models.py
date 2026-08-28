@@ -263,8 +263,19 @@ _register(
 
 _register(
     "fingerprint_generation",
-    "Fingerprint Generation",
-    "Generates face recognition fingerprints for scenes",
+    "Fingerprint Missing",
+    "Detects and identifies performers in scenes that have never been processed, storing full results for reuse by Face Recommendations and the live Identify button",
+    ResourceType.GPU,
+    JobPriority.LOW,
+    supports_incremental=True,
+    schedulable=True,
+    allowed_intervals=INTERVALS_INFREQUENT,
+)
+
+_register(
+    "fingerprint_refresh_outdated",
+    "Refresh Outdated",
+    "Re-matches already-identified scenes against the current performer database -- cheap (reuses cached detection), unlike Fingerprint Missing",
     ResourceType.GPU,
     JobPriority.LOW,
     supports_incremental=True,
@@ -285,8 +296,8 @@ _register(
 
 _register(
     "scene_face_match",
-    "Scene Face Matches",
-    "Identifies performers in scenes with no performers assigned",
+    "Face Recommendations",
+    "Generates recommendations for scenes with no performers assigned, from Face Identification's stored results",
     ResourceType.GPU,
     JobPriority.LOW,
     supports_incremental=True,

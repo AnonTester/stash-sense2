@@ -328,7 +328,9 @@ class QueueManager:
             raise ValueError(f"Unknown job type: {type_id}")
 
         if type_id == "fingerprint_generation":
-            return FingerprintGenerationJob()
+            return FingerprintGenerationJob(refresh_outdated=False)
+        if type_id == "fingerprint_refresh_outdated":
+            return FingerprintGenerationJob(refresh_outdated=True)
         if type_id == "database_update":
             return DatabaseUpdateJob()
         if type_id == "local_performer_sync":

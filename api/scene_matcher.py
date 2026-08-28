@@ -18,6 +18,32 @@ from recognizer import FaceRecognizer, PerformerMatch, RecognitionResult
 logger = logging.getLogger(__name__)
 
 
+def match_universal_id(match) -> Optional[str]:
+    """Reconstruct the universal_id a PerformerMatchResponse was built from.
+
+    The response model only carries the decomposed parts (endpoint,
+    stashdb_id, local_performer_id), not universal_id itself. For a
+    local-index match, `stashdb_id` may hold that performer's *linked*
+    StashDB uuid rather than their local id, so local_performer_id (always
+    the local id for a local match) must be checked first -- endpoint+
+    stashdb_id alone would silently reconstruct the wrong key. For
+    stashbox/catalogue matches, endpoint+stashdb_id already exactly
+    reproduces the original "<endpoint>:<id>".
+
+    Shared by scene_face_match.py (recommendation creation) and
+    identification_router.py's save_scene_fingerprint (persisted match
+    storage) -- both need the same dedup/join key for the same match.
+    Duck-typed on `.local_performer_id`/`.endpoint`/`.stashdb_id` rather
+    than importing PerformerMatchResponse, to avoid a circular import with
+    identification_router.py.
+    """
+    if match.local_performer_id:
+        return f"local:{match.local_performer_id}"
+    if match.endpoint and match.stashdb_id:
+        return f"{match.endpoint}:{match.stashdb_id}"
+    return None
+
+
 def _cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     """Compute cosine distance between two vectors."""
     dot = np.dot(a, b)

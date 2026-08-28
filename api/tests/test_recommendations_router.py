@@ -1,7 +1,7 @@
 """Tests for the recommendations API router."""
 
 import pytest
-from unittest.mock import Mock, AsyncMock
+from unittest.mock import Mock, AsyncMock, patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -922,6 +922,55 @@ class TestFindLinkedEntityAction:
         assert data["result"]["aliases"] == ["JD"]
 
 
+class TestFingerprintGenerateDispatch:
+    """POST /fingerprints/generate and /fingerprints/stop -- dispatch to
+    one of two distinct job types (fingerprint_generation /
+    fingerprint_refresh_outdated) based on refresh_outdated, instead of the
+    old single-type-with-a-cursor-flag design. See fingerprint_job.py's
+    docstring for why these are separate types now."""
+
+    def test_generate_missing_only_submits_fingerprint_generation(self, client, db):
+        mock_mgr = Mock()
+        mock_mgr.submit.return_value = 42
+        with patch("queue_router._queue_manager", mock_mgr):
+            resp = client.post("/recommendations/fingerprints/generate", json={"refresh_outdated": False})
+
+        assert resp.status_code == 200
+        assert resp.json()["job_id"] == 42
+        assert mock_mgr.submit.call_args.kwargs["type_id"] == "fingerprint_generation"
+        assert "cursor" not in mock_mgr.submit.call_args.kwargs
+
+    def test_generate_refresh_outdated_submits_distinct_type(self, client, db):
+        mock_mgr = Mock()
+        mock_mgr.submit.return_value = 43
+        with patch("queue_router._queue_manager", mock_mgr):
+            resp = client.post("/recommendations/fingerprints/generate", json={"refresh_outdated": True})
+
+        assert resp.status_code == 200
+        assert mock_mgr.submit.call_args.kwargs["type_id"] == "fingerprint_refresh_outdated"
+
+    def test_stop_cancels_running_jobs_of_either_type(self, client, db):
+        mock_mgr = Mock()
+        mock_mgr.get_jobs.side_effect = lambda status, type: (
+            [{"id": 7}] if type == "fingerprint_refresh_outdated" else []
+        )
+        with patch("queue_router._queue_manager", mock_mgr):
+            resp = client.post("/recommendations/fingerprints/stop")
+
+        assert resp.status_code == 200
+        mock_mgr.cancel.assert_called_once_with(7)
+
+    def test_stop_with_nothing_running_is_a_noop(self, client, db):
+        mock_mgr = Mock()
+        mock_mgr.get_jobs.return_value = []
+        with patch("queue_router._queue_manager", mock_mgr):
+            resp = client.post("/recommendations/fingerprints/stop")
+
+        assert resp.status_code == 200
+        assert "No fingerprint generation running" in resp.json()["message"]
+        mock_mgr.cancel.assert_not_called()
+
+
 class TestFingerprintReset:
     """POST /fingerprints/reset -- backs up + marks all scene fingerprints
     for refresh. Used by the Settings UI's Detection Resolution change
@@ -944,3 +993,72 @@ class TestFingerprintReset:
 
         assert resp.status_code == 200
         assert resp.json()["fingerprints_backed_up"] == 0
+
+
+class TestGetSceneIdentifyResult:
+    """GET /fingerprints/scene/{scene_id}/result -- reconstructs a
+    SceneIdentifyResponse-shaped payload from stored data, so the scene
+    page's Identify button can render it without a fresh identify call."""
+
+    def _match_row(self, universal_id, person_id=0, match_rank=0, is_best_match=True, confidence=0.75):
+        return {
+            "person_id": person_id, "frame_count": 20, "match_rank": match_rank,
+            "is_best_match": is_best_match, "universal_id": universal_id,
+            "stashdb_id": "abc", "name": "Performer", "confidence": confidence,
+            "distance": 1 - confidence, "country": "US", "image_url": "http://x/img.jpg",
+            "endpoint": "stashdb.org", "already_tagged": False, "local_performer_id": None,
+            "source": None, "catalogue_url": None, "profile_url": None, "top_timestamps_sec": [1.0, 2.0],
+        }
+
+    def test_no_fingerprint_returns_available_false(self, client, db):
+        resp = client.get("/recommendations/fingerprints/scene/999/result")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"available": False}
+
+    def test_incomplete_fingerprint_returns_available_false(self, client, db):
+        db.create_scene_fingerprint(stash_scene_id=1, total_faces=0, frames_analyzed=0, fingerprint_status="error")
+
+        resp = client.get("/recommendations/fingerprints/scene/1/result")
+
+        assert resp.json() == {"available": False}
+
+    def test_complete_fingerprint_reconstructs_persons(self, client, db):
+        fp_id = db.create_scene_fingerprint(
+            stash_scene_id=1, total_faces=20, frames_analyzed=60, fingerprint_status="complete",
+        )
+        db.replace_fingerprint_matches(fp_id, [
+            self._match_row("stashdb.org:best", match_rank=0, is_best_match=True, confidence=0.9),
+            self._match_row("stashdb.org:alt", match_rank=1, is_best_match=False, confidence=0.4),
+        ])
+
+        resp = client.get("/recommendations/fingerprints/scene/1/result")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is True
+        result = data["result"]
+        assert result["scene_id"] == "1"
+        assert result["frames_analyzed"] == 60
+        assert len(result["persons"]) == 1
+        person = result["persons"][0]
+        assert person["frame_count"] == 20
+        assert person["best_match"]["stashdb_id"] == "abc"
+        assert len(person["all_matches"]) == 2
+        assert person["all_matches"][0]["confidence"] == 0.9
+        assert person["all_matches"][1]["confidence"] == 0.4
+
+    def test_multiple_persons_grouped_separately(self, client, db):
+        fp_id = db.create_scene_fingerprint(
+            stash_scene_id=1, total_faces=20, frames_analyzed=60, fingerprint_status="complete",
+        )
+        db.replace_fingerprint_matches(fp_id, [
+            self._match_row("stashdb.org:p1", person_id=0),
+            self._match_row("stashdb.org:p2", person_id=1),
+        ])
+
+        resp = client.get("/recommendations/fingerprints/scene/1/result")
+
+        result = resp.json()["result"]
+        assert len(result["persons"]) == 2
+        assert {p["person_id"] for p in result["persons"]} == {0, 1}

@@ -73,6 +73,9 @@ def main():
     elif mode == "fingerprint_check_scene":
         scene_id = args.get("scene_id")
         result = sidecar_get(sidecar_url, f"/recommendations/fingerprints/scene/{scene_id}")
+    elif mode == "fingerprint_get_scene_result":
+        scene_id = args.get("scene_id")
+        result = sidecar_get(sidecar_url, f"/recommendations/fingerprints/scene/{scene_id}/result")
     elif mode == "identify_scene_progress":
         scene_id = args.get("scene_id")
         result = sidecar_get(sidecar_url, f"/identify/scene/{scene_id}/progress", timeout=10)

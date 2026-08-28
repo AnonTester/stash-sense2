@@ -540,12 +540,26 @@
         if (loadingDetail) loadingDetail.textContent = detail;
       },
 
-      async renderResults(modal, results, sceneId) {
+      async renderResults(modal, results, sceneId, options = {}) {
         const loading = modal.querySelector('.ss-loading');
         const resultsDiv = modal.querySelector('.ss-results');
         const errorDiv = modal.querySelector('.ss-error');
 
         loading.style.display = 'none';
+
+        // options.onReidentify, if given, wires up a "Re-identify" action --
+        // shown whenever results came from storage (options.fromStorage) or
+        // after any fresh identify, so it's always available to get an
+        // up-to-date answer (e.g. the performer database updated, or a
+        // performer was just tagged on this scene since the stored result
+        // was computed).
+        const reidentifyBtnHtml = options.onReidentify
+          ? '<button class="ss-btn ss-btn-secondary ss-reidentify-btn">Re-identify</button>'
+          : '';
+        const wireReidentifyBtn = (container) => {
+          const btn = container.querySelector('.ss-reidentify-btn');
+          if (btn) btn.addEventListener('click', () => options.onReidentify());
+        };
 
         if (!results.persons || results.persons.length === 0) {
           errorDiv.innerHTML = `
@@ -558,8 +572,10 @@
             <p class="ss-error-hint">
               This could mean the scene doesn't have clear face shots, or the sprite sheet quality is too low.
             </p>
+            ${reidentifyBtnHtml}
           `;
           errorDiv.style.display = 'block';
+          wireReidentifyBtn(errorDiv);
           return;
         }
 
@@ -589,10 +605,13 @@
             Analyzed <strong>${results.frames_analyzed}</strong> frames,
             detected <strong>${results.faces_detected}</strong> faces,
             found <strong>${clusterCount}</strong> distinct person(s)${singleFrame.length ? ` + ${singleFrame.length} single-frame detection(s)` : ''}.
+            ${options.fromStorage ? '<span class="ss-stored-badge" title="Shown from this scene\'s last identification, not re-run just now">from last identification</span>' : ''}
           </p>
+          ${reidentifyBtnHtml}
           <div class="ss-persons"></div>
           ${singleFrame.length ? '<div class="ss-singletons"></div>' : ''}
         `;
+        wireReidentifyBtn(resultsDiv);
 
         const personsDiv = resultsDiv.querySelector('.ss-persons');
 
@@ -1501,26 +1520,44 @@
         const sceneId = route.id;
 
         const modal = this.createModal();
-        this.updateLoading(modal, 'Checking fingerprint status...');
+        this.updateLoading(modal, 'Checking for existing identification...');
+
+        // Re-identify always goes through the same "fingerprinting" flow as
+        // a first-time full analysis (fresh detect+embed+match, hits the
+        // video-frame cache if nothing's changed since last time) -- wired
+        // into every results view (stored or fresh) via renderResults'
+        // onReidentify, not just the initial prompt.
+        const reidentify = async () => {
+          const settings = await SS.getSettings();
+          await this._runFullVideoIdentify(
+            modal, sceneId, settings,
+            { use_sprite: true, skip_frame_extraction: false },
+            this.FULL_VIDEO_STEPS.cached,
+            { onReidentify: reidentify },
+          );
+        };
 
         try {
           const settings = await SS.getSettings();
-          const fpStatus = await SS.runPluginOperation('fingerprint_check_scene', {
+
+          // Face Identification's stored result (if this scene already has
+          // one) renders instantly with no fresh /identify/scene call at
+          // all -- see recommendations_router.py's
+          // /fingerprints/scene/{id}/result.
+          const stored = await SS.runPluginOperation('fingerprint_get_scene_result', {
             scene_id: sceneId, sidecar_url: settings.sidecarUrl,
           });
-          if (fpStatus && fpStatus.error) {
-            throw new Error(fpStatus.error);
+          if (stored && stored.error) {
+            throw new Error(stored.error);
           }
-
-          if (fpStatus && fpStatus.exists) {
-            await this._runFullVideoIdentify(
-              modal, sceneId, settings,
-              { use_sprite: true, skip_frame_extraction: false },
-              this.FULL_VIDEO_STEPS.cached,
-            );
+          if (stored && stored.available) {
+            await this.renderResults(modal, stored.result, sceneId, {
+              fromStorage: true, onReidentify: reidentify,
+            });
             return;
           }
 
+          // Nothing stored yet -- same fingerprint-prompt flow as before.
           this._showFingerprintPrompt(modal, async (fingerprintNow) => {
             try {
               if (fingerprintNow) {
@@ -1528,6 +1565,7 @@
                   modal, sceneId, settings,
                   { use_sprite: true, skip_frame_extraction: false },
                   this.FULL_VIDEO_STEPS.fingerprinting,
+                  { onReidentify: reidentify },
                 );
               } else {
                 await this._runFullVideoIdentify(
@@ -1565,8 +1603,17 @@
         loading.querySelector('.ss-fp-prompt-no').addEventListener('click', () => onChoice(false));
       },
 
-      async _runFullVideoIdentify(modal, sceneId, settings, flags, steps) {
+      async _runFullVideoIdentify(modal, sceneId, settings, flags, steps, renderOptions = {}) {
         const loading = modal.querySelector('.ss-loading');
+        const resultsDiv = modal.querySelector('.ss-results');
+        const errorDiv = modal.querySelector('.ss-error');
+        // A Re-identify click starts this from an already-rendered results/
+        // error view (both currently visible, .ss-loading hidden) -- switch
+        // back to the loading view explicitly rather than relying on
+        // renderResults' own display toggles, which only ever show it, not hide it.
+        resultsDiv.style.display = 'none';
+        errorDiv.style.display = 'none';
+        loading.style.display = '';
         loading.innerHTML = `
           <div class="ss-spinner"></div>
           <p class="ss-loading-text">Identifying performers...</p>
@@ -1580,7 +1627,7 @@
           const results = await this.identifyScene(sceneId, (stage) => {
             this.updateLoading(modal, stage);
           }, flags);
-          await this.renderResults(modal, results, sceneId);
+          await this.renderResults(modal, results, sceneId, renderOptions);
         } finally {
           stopStepPolling();
         }

@@ -56,6 +56,7 @@ async def identify_scenes_batched(
     specs: list[SceneBatchSpec],
     is_stop_requested: Optional[Callable[[], bool]] = None,
     before_scene: Optional[Callable[[], Awaitable[None]]] = None,
+    on_scene_start: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncIterator[tuple[str, Union["SceneIdentifyResponse", Exception]]]:
     """Identifies every scene in `specs`, yielding (scene_id, result) as
     each completes -- result is either a SceneIdentifyResponse or the
@@ -78,6 +79,17 @@ async def identify_scenes_batched(
     on every request, so without this a scan running longer than the idle-
     unload timeout gets the face recognition model evicted mid-run (see
     scene_face_match.py's own comment on this, confirmed live previously).
+
+    `on_scene_start`, if given, is awaited exactly once per scene, right
+    before that scene's actual work begins (before _identify_scene_impl for
+    a normal scene; before decode for a vaapi-batch scene). This exists so a
+    caller doing its own crash-safety bookkeeping (see
+    fingerprint_generator.py's create_scene_fingerprint pre-write) can mark
+    a scene as "in flight" lazily, one at a time, instead of bulk-marking
+    every spec in `specs` before any of them actually start -- bulk-marking
+    made every not-yet-reached scene in a batch look identically broken for
+    the whole batch's duration (confirmed live: a 100-scene page produced a
+    visibly regressing fingerprint-coverage count in the Settings UI).
     """
     from identification_router import (
         PreparedSceneIdentify,
@@ -98,6 +110,8 @@ async def identify_scenes_batched(
         try:
             if before_scene:
                 await before_scene()
+            if on_scene_start:
+                await on_scene_start(spec.scene_id)
             response = await _identify_scene_impl(spec.request)
             yield spec.scene_id, response
         except Exception as e:
@@ -136,6 +150,8 @@ async def identify_scenes_batched(
             try:
                 if before_scene:
                     await before_scene()
+                if on_scene_start:
+                    await on_scene_start(spec.scene_id)
                 bundles[spec.scene_id] = await _extract_scene_frames(
                     spec.request, p.num_frames, p.t_start,
                 )

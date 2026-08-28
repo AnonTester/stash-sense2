@@ -287,6 +287,9 @@ class SceneFingerprintGenerator:
 
                 to_process: list[dict] = []
                 scene_titles: dict[int, str] = {}
+                # Per-scene use_sprite decision -- see _spec()'s docstring
+                # below for why this can't just be a single job-wide setting.
+                use_sprite_by_scene: dict[int, bool] = {}
                 for scene in scenes:
                     if self._stop_requested:
                         break
@@ -340,22 +343,17 @@ class SceneFingerprintGenerator:
                     else:
                         logger.debug("Scene %d (%s): no existing fingerprint", scene_id, scene_title)
 
+                    # Bulk runs default to no sprite processing (real added
+                    # cost per scene -- see _build_identify_request) EXCEPT
+                    # when refreshing a scene that already has sprite
+                    # coverage: Face Recommendations may have separately
+                    # paid that cost for this scene (its own on-demand
+                    # top-up, see scene_face_match.py), and a routine bulk
+                    # refresh must not silently discard it.
+                    use_sprite_by_scene[scene_id] = bool(existing and existing.get("used_sprite"))
                     to_process.append(scene)
 
                 if to_process and not self._stop_requested:
-                    # Pre-emptively mark every scene about to be attempted as
-                    # error, up front, before any of them actually runs. If
-                    # the sidecar is SIGKILL'd mid-batch, no Python cleanup
-                    # code runs, so these records survive -- a scene that
-                    # never got this far still correctly shows as never
-                    # attempted. A successful run overwrites its own row
-                    # with "complete" (INSERT OR REPLACE).
-                    for scene in to_process:
-                        self.rec_db.create_scene_fingerprint(
-                            stash_scene_id=int(scene["id"]), total_faces=0, frames_analyzed=0,
-                            fingerprint_status="error", db_version=self.db_version,
-                        )
-
                     from identification_router import require_db_available
                     from scene_batch_orchestrator import SceneBatchSpec, identify_scenes_batched
 
@@ -366,7 +364,10 @@ class SceneFingerprintGenerator:
                             scene_id=str(sid),
                             width=file_info.get("width"),
                             height=file_info.get("height"),
-                            request=self._build_identify_request(sid, start_offset_pct, end_offset_pct),
+                            request=self._build_identify_request(
+                                sid, start_offset_pct, end_offset_pct,
+                                use_sprite=use_sprite_by_scene.get(sid, False),
+                            ),
                         )
 
                     # First pass, batched -- normal-res scenes through the
@@ -379,6 +380,7 @@ class SceneFingerprintGenerator:
                         first_pass_specs,
                         is_stop_requested=lambda: self._stop_requested,
                         before_scene=require_db_available,
+                        on_scene_start=self._mark_scene_started,
                     ):
                         scene_id = int(scene_id_str)
                         result = self._response_to_result(scene_id, outcome)
@@ -408,6 +410,7 @@ class SceneFingerprintGenerator:
                             retry_specs,
                             is_stop_requested=lambda: self._stop_requested,
                             before_scene=require_db_available,
+                            on_scene_start=self._mark_scene_started,
                         ):
                             scene_id = int(scene_id_str)
                             retry_result = self._response_to_result(scene_id, outcome)
@@ -505,6 +508,7 @@ class SceneFingerprintGenerator:
 
     def _build_identify_request(
         self, scene_id: int, start_offset_pct: float, end_offset_pct: float,
+        use_sprite: bool = False,
     ) -> "SceneIdentifyRequest":
         from identification_router import SceneIdentifyRequest
         return SceneIdentifyRequest(
@@ -515,6 +519,29 @@ class SceneFingerprintGenerator:
             start_offset_pct=start_offset_pct,
             end_offset_pct=end_offset_pct,
             matching_mode="hybrid",
+            # top_k standardized to match the live Identify button / Face
+            # Recommendations -- this job's stored output is now the
+            # canonical source both read from instead of re-running their
+            # own identify pass. use_sprite stays off by default here (real
+            # added per-scene cost, and this job runs over the whole
+            # library including scenes nobody needs a new recommendation
+            # for) -- callers pass use_sprite=True only to preserve
+            # existing sprite coverage on a refresh; see generate_all()'s
+            # use_sprite_by_scene.
+            top_k=5,
+            use_sprite=use_sprite,
+        )
+
+    async def _mark_scene_started(self, scene_id_str: str) -> None:
+        """Marks one scene as in-flight, right before its actual work
+        begins -- see scene_batch_orchestrator.py's on_scene_start docstring.
+        If the sidecar is SIGKILL'd right after this, this row correctly
+        shows the scene as never-completed rather than never-attempted; a
+        successful run overwrites it with "complete" (INSERT OR REPLACE, see
+        _finalize_scene_result/_response_to_result)."""
+        self.rec_db.create_scene_fingerprint(
+            stash_scene_id=int(scene_id_str), total_faces=0, frames_analyzed=0,
+            fingerprint_status="error", db_version=self.db_version,
         )
 
     def _response_to_result(

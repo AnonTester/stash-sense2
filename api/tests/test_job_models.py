@@ -351,6 +351,7 @@ class TestJobRegistry:
             "upstream_studio_changes",
             "scene_fingerprint_match",
             "fingerprint_generation",
+            "fingerprint_refresh_outdated",
             "database_update",
             "local_performer_sync",
             "scene_face_match",
@@ -400,6 +401,12 @@ class TestJobRegistry:
         assert d.schedulable is True
         assert d.default_interval_hours is None
         assert d.allowed_intervals == INTERVALS_INFREQUENT
+
+    def test_fingerprint_refresh_outdated(self):
+        d = JOB_REGISTRY["fingerprint_refresh_outdated"]
+        assert d.resource == ResourceType.GPU
+        assert d.default_priority == JobPriority.LOW
+        assert d.schedulable is True
 
     def test_database_update(self):
         d = JOB_REGISTRY["database_update"]
