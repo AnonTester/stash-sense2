@@ -1083,7 +1083,19 @@ class StashClientUnified:
         return streams[0]["url"] if streams else None
 
     async def get_scene_by_id(self, scene_id: str) -> Optional[dict]:
-        """Get a scene by ID with full metadata."""
+        """Get a scene by ID with full metadata.
+
+        Includes `sceneStreams` (multiple negotiated stream variants --
+        direct file, HLS, WEBM/lower-res transcodes) alongside the single
+        `paths.stream` direct-file URL -- Stash's own native player only
+        ever uses `sceneStreams`, letting the browser fall back to a
+        transcoded variant when the source codec (e.g. HEVC) isn't
+        natively decodable. A consumer that renders `paths.stream` alone
+        as a single `<video src>` will fail with "No video with
+        supported format" on exactly the scenes Stash's own player
+        transcodes around -- confirmed live via the Recommendations
+        tab's scene-face-match detail view (see stash-sense-
+        recommendations.js's renderSceneFaceMatchDetail)."""
         query = """
         query GetScene($id: ID!) {
           findScene(id: $id) {
@@ -1095,6 +1107,11 @@ class StashClientUnified:
               screenshot
               preview
               stream
+            }
+            sceneStreams {
+              url
+              mime_type
+              label
             }
             studio {
               id

@@ -822,7 +822,21 @@
         if (match.source) {
           const href = match.profile_url || match.catalogue_url;
           if (!href) return '';
-          const label = match.profile_url ? 'View profile' : `View on ${match.source}`;
+          // Same "View on <domain>" style as the StashBox link below --
+          // a real external profile_url (e.g. onlyfans.com for seekfans
+          // matches) gets labeled by its own hostname rather than the
+          // generic "View profile", so it reads the same way "View on
+          // stashdb.org" does. Falls back to the source name for a
+          // catalogue_url-only match (no external profile, just the
+          // catalogue site's own page) or if the URL fails to parse.
+          let label = `View on ${match.source}`;
+          if (match.profile_url) {
+            try {
+              label = `View on ${new URL(match.profile_url).hostname.replace(/^www\./, '')}`;
+            } catch (e) {
+              label = 'View profile';
+            }
+          }
           return `<a href="${href}" target="_blank" rel="noopener" class="ss-link">${label}</a>`;
         }
         if (!match.local_performer_id) {

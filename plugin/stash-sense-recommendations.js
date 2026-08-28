@@ -5788,7 +5788,26 @@
       if (sceneId) scene = await RecommendationsAPI.getSceneDetail(sceneId);
     } catch (_) {}
 
+    // sceneStreams (multiple negotiated variants -- direct file, HLS,
+    // WEBM/lower-res transcodes, same set Stash's own native player
+    // uses) lets the browser fall back past a codec it can't natively
+    // decode (e.g. HEVC), unlike a single <video src> pointed straight
+    // at paths.stream -- confirmed live: a scene playing fine in Stash's
+    // own page threw "No video with supported format and MIME type
+    // found" here because only the raw direct-file URL was offered, no
+    // fallback source. Falls back to the single paths.stream source only
+    // if sceneStreams is empty/missing (e.g. an older Stash without that
+    // field) -- same behavior as before this fix in that case.
+    const sceneStreams = Array.isArray(scene?.sceneStreams) ? scene.sceneStreams : [];
     const streamUrl = relativeUrl(scene?.paths?.stream);
+    const videoSourcesHtml = sceneStreams.length
+      ? sceneStreams.map(s => {
+          const url = relativeUrl(s.url);
+          if (!url) return '';
+          const typeAttr = s.mime_type ? ` type="${escapeHtml(s.mime_type)}"` : '';
+          return `<source src="${escapeHtml(url)}"${typeAttr} />`;
+        }).join('')
+      : (streamUrl ? `<source src="${escapeHtml(streamUrl)}" />` : '');
     const sceneTitle = scene?.title || d.scene_title || `Scene ${sceneId}`;
 
     // Same link-building convention the manual scene-identify result view
@@ -5877,8 +5896,8 @@
           <a class="ss-detail-entity-link" href="${escapeHtml(sceneHref)}" target="_blank" rel="noopener">Open in Stash</a>
         </div>
 
-        ${streamUrl
-          ? `<video class="ss-sfm-video" controls preload="metadata" src="${escapeHtml(streamUrl)}"></video>`
+        ${videoSourcesHtml
+          ? `<video class="ss-sfm-video" controls preload="metadata">${videoSourcesHtml}</video>`
           : '<div class="ss-no-image ss-sfm-no-video">No video preview available</div>'
         }
 
