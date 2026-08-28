@@ -28,8 +28,11 @@ falling back to CPU.
 """
 import os
 import io
+import asyncio
 import logging
+import threading
 import warnings
+from contextlib import asynccontextmanager
 import cv2
 import numpy as np
 from PIL import Image
@@ -50,6 +53,38 @@ warnings.filterwarnings(
     module=r"insightface\.utils\.face_align",
 )
 
+
+# Serializes actual GPU inference (any FaceEmbeddingGenerator.detect_faces
+# call, from any of this process's several independent callers --
+# identification_router.py's live /identify/scene endpoint and batch jobs,
+# local_performer_sync_job.py's own separate generator pool running in its
+# own raw OS thread, etc.) across the whole process. Confirmed live: two of
+# these calls running concurrently (an in-flight batch job's detection_pool
+# threads + a live identify request's own) produced real ROCm/MIOpen
+# failures ("No invoker was registered for convolution forward"), not just
+# slowness -- this GPU/driver combination doesn't tolerate concurrent
+# inference sessions.
+#
+# A plain threading.Lock, not asyncio.Lock -- local_performer_sync_job.py's
+# _embed_worker acquires it directly from a raw OS thread with no event
+# loop, which an asyncio.Lock can't do safely. Async callers use
+# gpu_compute_lock() below instead of this directly, so waiting for it
+# doesn't block the event loop.
+GPU_COMPUTE_LOCK = threading.Lock()
+
+
+@asynccontextmanager
+async def gpu_compute_lock():
+    """Async-context-manager wrapper around GPU_COMPUTE_LOCK for callers on
+    an asyncio event loop (identification_router.py) -- acquires/releases
+    via asyncio.to_thread so waiting doesn't block the loop, while still
+    sharing the exact same underlying lock a raw-thread caller
+    (local_performer_sync_job.py) acquires directly."""
+    await asyncio.to_thread(GPU_COMPUTE_LOCK.acquire)
+    try:
+        yield
+    finally:
+        GPU_COMPUTE_LOCK.release()
 
 # Model search paths: DATA_DIR/models first, then ./models (relative to this file)
 MODELS_DIR = Path(__file__).parent / "models"

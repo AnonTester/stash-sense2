@@ -59,7 +59,7 @@ import httpx
 
 from base_job import BaseJob, JobContext
 from config import DatabaseConfig
-from embeddings import FaceEmbeddingGenerator, load_image
+from embeddings import FaceEmbeddingGenerator, load_image, GPU_COMPUTE_LOCK
 from local_performer_index import (
     STASHDB_ENDPOINT,
     LocalPerformerIndex,
@@ -166,7 +166,15 @@ def _embed_worker(embed_queue: "queue.Queue", event_queue: "queue.Queue") -> Non
         performer_id, position, image_bytes, fingerprint, meta = item
         try:
             image = load_image(image_bytes)
-            faces = generator.detect_faces(image, min_confidence=0.5)
+            # GPU_COMPUTE_LOCK: a plain threading.Lock, acquired directly
+            # since this runs in its own raw OS thread (no event loop) --
+            # see embeddings.py's docstring. Serializes against
+            # identification_router.py's identify calls too, not just
+            # other _embed_worker threads -- confirmed live, an in-flight
+            # GPU job's detection concurrent with a live identify request
+            # produced real ROCm/MIOpen failures on this hardware.
+            with GPU_COMPUTE_LOCK:
+                faces = generator.detect_faces(image, min_confidence=0.5)
         except Exception as e:
             logger.warning("Local performer sync: decode/detect failed for performer %d: %s", performer_id, e)
             event_queue.put(("embed_error", performer_id, position, None))

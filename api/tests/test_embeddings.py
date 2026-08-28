@@ -7,6 +7,7 @@ unit-test. These tests instead cover what this module actually owns:
 image loading, device/provider selection, and the detect_faces() filtering/
 yaw-estimation logic around InsightFace's `FaceAnalysis.get()` call.
 """
+import asyncio
 import io
 import sys
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from embeddings import (
     DetectedFace,
     FaceEmbedding,
     FaceEmbeddingGenerator,
+    GPU_COMPUTE_LOCK,
+    gpu_compute_lock,
     load_image,
     load_image_from_path,
 )
@@ -238,3 +241,47 @@ class TestGetEmbeddings:
         results = generator.get_embeddings_batch(faces)
 
         assert [r.embedding[0] for r in results] == [0.0, 1.0, 2.0]
+
+
+class TestGpuComputeLock:
+    """GPU_COMPUTE_LOCK/gpu_compute_lock() -- serializes actual GPU
+    inference across every caller in the process (identification_router.py's
+    live endpoints, local_performer_sync_job.py's raw-thread worker,
+    local_performer_index.py's hook handler). See embeddings.py's own
+    docstring for why this exists (confirmed live: concurrent inference
+    sessions produced real ROCm/MIOpen failures on the reference GPU) and
+    why it's a plain threading.Lock rather than asyncio.Lock (shared with a
+    raw-OS-thread caller, which can't use an asyncio.Lock safely)."""
+
+    def test_is_a_plain_threading_lock_not_asyncio_lock(self):
+        import threading
+        assert isinstance(GPU_COMPUTE_LOCK, type(threading.Lock()))
+
+    def test_raw_thread_can_acquire_and_release_directly(self):
+        # local_performer_sync_job.py's _embed_worker does exactly this --
+        # no event loop involved.
+        acquired = GPU_COMPUTE_LOCK.acquire(timeout=1)
+        try:
+            assert acquired is True
+        finally:
+            GPU_COMPUTE_LOCK.release()
+
+    @pytest.mark.asyncio
+    async def test_async_wrapper_serializes_two_concurrent_callers(self):
+        order = []
+
+        async def _hold(name, delay):
+            async with gpu_compute_lock():
+                order.append(f"{name}-start")
+                await asyncio.sleep(delay)
+                order.append(f"{name}-end")
+
+        await asyncio.gather(_hold("a", 0.02), _hold("b", 0.0))
+
+        # Whichever ran first, it must fully finish (both -start and -end)
+        # before the other one's -start -- true mutual exclusion, not just
+        # interleaved-but-eventually-both-run.
+        assert order in (
+            ["a-start", "a-end", "b-start", "b-end"],
+            ["b-start", "b-end", "a-start", "a-end"],
+        )

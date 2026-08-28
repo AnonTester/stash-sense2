@@ -163,19 +163,40 @@ class FaceRecognizer:
             work_queue.put(None)
 
         results: list[Optional[list[DetectedFace]]] = [None] * len(frames)
+        # A raw threading.Thread that raises just dies silently (Python
+        # prints the traceback to stderr but nothing propagates to the
+        # caller) -- left alone, a real failure (e.g. a GPU/ROCm inference
+        # error) here would leave that frame's results[i] at its initial
+        # None forever, surfacing much later as a confusing
+        # "'NoneType' object is not iterable" wherever the caller assumes
+        # every entry is a real (possibly empty) list. Capture and re-raise
+        # instead, matching the <=1-generator fallback path above, which
+        # already propagates a detect_faces() exception directly.
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
 
         def _worker(gen: FaceEmbeddingGenerator) -> None:
             while True:
                 i = work_queue.get()
                 if i is None:
                     return
-                results[i] = gen.detect_faces(frames[i], min_confidence=min_confidence)
+                try:
+                    results[i] = gen.detect_faces(frames[i], min_confidence=min_confidence)
+                except BaseException as e:  # noqa: BLE001 -- re-raised below, not swallowed
+                    with errors_lock:
+                        errors.append(e)
 
         threads = [threading.Thread(target=_worker, args=(gen,), daemon=True) for gen in generators]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+
+        if errors:
+            raise RuntimeError(
+                f"Face detection failed for {len(errors)}/{len(frames)} frame(s) "
+                f"in the detection pool: {errors[0]}"
+            ) from errors[0]
 
         return results
 

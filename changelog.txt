@@ -1,5 +1,29 @@
 ## 2026-08-28
 
+### 0.21.1 (sidecar only)
+- Fix: a live /identify request running concurrently with a GPU batch job
+  (Fingerprint Missing / Refresh Outdated / etc.) could hang or crash --
+  confirmed live, an in-flight Refresh Outdated job and a live scene
+  identify each spinning up their own detection threads at the same time
+  produced real ROCm/MIOpen failures ("No invoker was registered for
+  convolution forward"). queue_manager.py already limits GPU *jobs* to one
+  at a time, but the live /identify/scene, /identify, /identify/image, and
+  /identify/gallery endpoints bypass the job queue entirely and had no
+  coordination with it at all. Added a single process-wide lock
+  (embeddings.py's GPU_COMPUTE_LOCK, a plain threading.Lock so
+  local_performer_sync_job.py's raw-thread worker can share it too, not
+  just async callers) held around every actual detect/embed call --
+  extraction (ffmpeg) and matching (usearch query) stay unserialized,
+  only the GPU inference itself is now mutually exclusive across every
+  caller in the process.
+- Fix: a face-detection-pool worker thread that raised (recognizer.py's
+  detect_faces_parallel, e.g. from the same GPU failure above) died
+  silently -- a raw threading.Thread's uncaught exception doesn't
+  propagate to the caller, so that frame's result stayed at its initial
+  None forever instead of surfacing an error, corrupting a much later,
+  unrelated-looking crash ("'NoneType' object is not iterable") instead
+  of a clear one. Now captured and re-raised.
+
 ### 0.21.0 (sidecar) / 0.18.0 (plugin)
 - Fix: "Fingerprint Missing" and "Refresh Outdated" were the same
   underlying job type (fingerprint_generation) with scope hidden inside

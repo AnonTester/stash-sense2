@@ -157,9 +157,15 @@ async def sync_one_performer(
     if index.get_image_hash(performer_id) == fingerprint:
         return "unchanged"
 
-    from embeddings import load_image
+    from embeddings import load_image, gpu_compute_lock
     image = load_image(image_bytes)
-    faces = generator.detect_faces(image, min_confidence=0.5)
+    # See embeddings.py's gpu_compute_lock() docstring -- this runs as a
+    # real coroutine on the event loop (the Performer hook handler calls it
+    # directly), so it needs the async wrapper, not the raw
+    # threading.Lock local_performer_sync_job.py's _embed_worker uses from
+    # its own plain OS thread.
+    async with gpu_compute_lock():
+        faces = generator.detect_faces(image, min_confidence=0.5)
 
     if not faces:
         # No detectable face -- either a default placeholder (no custom

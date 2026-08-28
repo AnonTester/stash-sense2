@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 import face_config
 from recognizer import FaceRecognizer, PerformerMatch, RecognitionResult
-from embeddings import load_image, DetectedFace, FaceEmbedding
+from embeddings import load_image, DetectedFace, FaceEmbedding, gpu_compute_lock
 from frame_extractor import (
     ExtractionResult,
     FrameExtractionConfig,
@@ -90,6 +90,15 @@ _db_manifest = {}
 _db_updater = None
 _stash_url = ""
 _stash_api_key = ""
+
+# See embeddings.py's GPU_COMPUTE_LOCK/gpu_compute_lock() docstrings --
+# shared process-wide, not local to this module, since
+# local_performer_sync_job.py's own separate generator pool needs to
+# serialize against the same GPU. Held only around actual detect calls,
+# not extraction (ffmpeg, CPU-only), get_embeddings_batch (pure Python
+# read-back, no GPU call -- see embeddings.py's own docstring), or matching
+# (usearch query, cheap) -- see _process_sprite_frames/_identify_scene_compute.
+_gpu_compute_lock = gpu_compute_lock
 
 
 def init_identification_router(
@@ -443,12 +452,13 @@ async def identify_performers(request: IdentifyRequest, _=Depends(require_db_ava
 
     # Run recognition
     try:
-        results = _recognizer.recognize_image(
-            image,
-            top_k=request.top_k,
-            max_distance=request.max_distance,
-            min_face_confidence=request.min_face_confidence,
-        )
+        async with _gpu_compute_lock():
+            results = _recognizer.recognize_image(
+                image,
+                top_k=request.top_k,
+                max_distance=request.max_distance,
+                min_face_confidence=request.min_face_confidence,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recognition failed: {e}")
 
@@ -524,12 +534,13 @@ async def identify_image(request: ImageIdentifyRequest, _=Depends(require_db_ava
 
     # Run recognition
     try:
-        results = _recognizer.recognize_image(
-            image,
-            top_k=request.top_k,
-            max_distance=request.max_distance,
-            min_face_confidence=request.min_face_confidence,
-        )
+        async with _gpu_compute_lock():
+            results = _recognizer.recognize_image(
+                image,
+                top_k=request.top_k,
+                max_distance=request.max_distance,
+                min_face_confidence=request.min_face_confidence,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Recognition failed: {e}")
 
@@ -626,12 +637,13 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
                 resp.raise_for_status()
                 image = load_image(resp.content)
 
-                results = _recognizer.recognize_image(
-                    image,
-                    top_k=request.top_k,
-                    max_distance=request.max_distance,
-                    min_face_confidence=request.min_face_confidence,
-                )
+                async with _gpu_compute_lock():
+                    results = _recognizer.recognize_image(
+                        image,
+                        top_k=request.top_k,
+                        max_distance=request.max_distance,
+                        min_face_confidence=request.min_face_confidence,
+                    )
 
                 img_h, img_w = image.shape[:2]
                 total_faces += len(results)
@@ -840,11 +852,12 @@ async def _process_sprite_frames(
         return []
 
     detected: list[tuple[float, "DetectedFace", "np.ndarray"]] = []
-    per_tile_faces = await asyncio.to_thread(
-        _recognizer.detect_faces_parallel,
-        [sf.image for sf in sprite_frames],
-        min_face_confidence,
-    )
+    async with _gpu_compute_lock():
+        per_tile_faces = await asyncio.to_thread(
+            _recognizer.detect_faces_parallel,
+            [sf.image for sf in sprite_frames],
+            min_face_confidence,
+        )
     for sf, faces in zip(sprite_frames, per_tile_faces):
         for face in faces:
             if face.bbox["w"] >= min_face_size and face.bbox["h"] >= min_face_size:
@@ -854,6 +867,9 @@ async def _process_sprite_frames(
     if not detected:
         return []
 
+    # get_embeddings_batch is pure Python (reads embeddings buffalo_l
+    # already computed during detect_faces_parallel above), no separate GPU
+    # call -- doesn't need _gpu_compute_lock.
     embeddings = _recognizer.generator.get_embeddings_batch([face for _, face, _ in detected])
 
     extra_results: list[tuple[int, RecognitionResult]] = []
@@ -1148,11 +1164,12 @@ async def _identify_scene_compute(
 
     t_face_loop = time.time()
     t_det = time.time()
-    per_frame_faces = await asyncio.to_thread(
-        _recognizer.detect_faces_parallel,
-        [frame.image for frame in extraction_result.frames],
-        request.min_face_confidence,
-    )
+    async with _gpu_compute_lock():
+        per_frame_faces = await asyncio.to_thread(
+            _recognizer.detect_faces_parallel,
+            [frame.image for frame in extraction_result.frames],
+            request.min_face_confidence,
+        )
     t_detect_total = time.time() - t_det
 
     for frame, faces in zip(extraction_result.frames, per_frame_faces):
@@ -1228,14 +1245,17 @@ async def _identify_scene_compute(
                         print(f"[identify_scene] [{time.time()-t_start:.1f}s] Screenshot upscaled: {img_w}x{img_h} -> {new_w}x{new_h}")
                         img_w, img_h = new_w, new_h
 
-                    screenshot_detected = _recognizer.generator.detect_faces(
-                        screenshot_image,
-                        min_confidence=request.min_face_confidence,
-                    )
+                    async with _gpu_compute_lock():
+                        screenshot_detected = _recognizer.generator.detect_faces(
+                            screenshot_image,
+                            min_confidence=request.min_face_confidence,
+                        )
                     # Filter and batch-embed screenshot faces
                     ss_faces = [f for f in screenshot_detected
                                 if f.bbox["w"] >= request.min_face_size and f.bbox["h"] >= request.min_face_size]
                     if ss_faces:
+                        # Pure Python read-back (see the Phase 2 comment
+                        # above) -- no GPU call, no lock needed.
                         ss_embeddings = _recognizer.generator.get_embeddings_batch(ss_faces)
                         for face, emb in zip(ss_faces, ss_embeddings):
                             matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb, image=screenshot_image)
