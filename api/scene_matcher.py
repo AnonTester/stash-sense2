@@ -193,8 +193,12 @@ def aggregate_matches(
             the live ffmpeg extraction pass). When provided, each aggregated
             match's 4 lowest-distance frames are resolved to timestamps and
             attached as top_timestamps_sec, for "jump to this frame" UI.
-            Frame indices with no mapping entry (e.g. the -1/-2 screenshot/
-            sprite sentinels, or no mapping at all) are silently skipped.
+            Frame indices with no mapping entry (e.g. the -1 screenshot
+            sentinel, or no mapping at all) are silently skipped. Sprite-tile
+            faces each get their own unique negative frame_index (-2, -3,
+            ...) rather than sharing one sentinel, specifically so they can
+            resolve real per-face timestamps here too -- see
+            identification_router.py's _process_sprite_frames.
     """
     # Lazy import to avoid circular dependency
     if _match_to_response is None:
@@ -591,6 +595,7 @@ def hybrid_matching(
     min_appearances: int = 2,
     min_unique_frames: int = 2,
     min_confidence: float = 0.35,
+    frame_timestamps: Optional[dict[int, float]] = None,
     _match_to_response=None,
     _distance_to_confidence=None,
 ) -> list:
@@ -615,6 +620,16 @@ def hybrid_matching(
         min_appearances: Minimum face matches required per performer
         min_unique_frames: Minimum unique frames a performer must appear in
         min_confidence: Minimum confidence threshold (1 - distance)
+        frame_timestamps: Optional frame_index -> timestamp_sec mapping (see
+            aggregate_matches's own docstring). Threaded only into this
+            function's internal cluster-mode component -- frequency_based_
+            matching has no per-frame-cluster concept to resolve timestamps
+            from, so a performer found only by frequency never gets
+            top_timestamps_sec here, same as calling frequency mode
+            directly. When a performer is found by both methods, the
+            cluster component's timestamps (if any) are kept even though
+            the frequency component's match object wins for display
+            fields -- see the "found_by" branch below.
     """
     # Lazy import to avoid circular dependency
     if _match_to_response is None:
@@ -643,7 +658,7 @@ def hybrid_matching(
     cluster_persons = []
     for cluster in clusters:
         aggregated = aggregate_matches(
-            cluster, top_k=3,
+            cluster, top_k=3, frame_timestamps=frame_timestamps,
             _match_to_response=_match_to_response,
             _distance_to_confidence=_distance_to_confidence,
         )
@@ -654,6 +669,7 @@ def hybrid_matching(
                 "frame_count": len(cluster),
                 "distance": aggregated[0].distance,
                 "match": aggregated[0],
+                "top_timestamps_sec": aggregated[0].top_timestamps_sec,
             })
 
     cluster_by_id = {p["stashdb_id"]: p for p in cluster_persons}
@@ -705,6 +721,12 @@ def hybrid_matching(
             "hybrid_score": hybrid_score,
             "found_by": found_by,
             "match": match_obj,
+            # Only the cluster component ever resolves real timestamps
+            # (see aggregate_matches) -- kept independently of which
+            # match_obj won for display fields, so a performer found by
+            # both methods doesn't lose jump-to-frame data just because
+            # frequency's match object was preferred above.
+            "top_timestamps_sec": cluster_result["top_timestamps_sec"] if cluster_result else [],
         })
 
     # Sort by hybrid score (higher is better)
@@ -729,6 +751,7 @@ def hybrid_matching(
             match,
             confidence=_distance_to_confidence(p["distance"]),
             distance=p["distance"],
+            top_timestamps_sec=p["top_timestamps_sec"],
         )
         persons.append(PersonResult(
             person_id=i,

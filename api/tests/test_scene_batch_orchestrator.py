@@ -38,7 +38,7 @@ def _response(scene_id: str):
 def _prepared(scene_id: str):
     return _FakePrepared(
         num_frames=60, match_config=object(), scene_id_int=int(scene_id),
-        sprite_extra_results=[], t_start=0.0,
+        sprite_extra_results=[], sprite_timestamps={}, t_start=0.0,
     )
 
 
@@ -48,7 +48,7 @@ def _patch_router(**overrides):
         _prepare_scene_identify=AsyncMock(side_effect=lambda req: _prepared(req.scene_id)),
         _extract_scene_frames=AsyncMock(side_effect=lambda req, num_frames, t_start: SimpleNamespace(scene_id=req.scene_id)),
         _identify_scene_compute=AsyncMock(
-            side_effect=lambda req, bundle, num_frames, match_config, scene_id_int, sprite, t_start: _response(req.scene_id)
+            side_effect=lambda req, bundle, num_frames, match_config, scene_id_int, sprite, t_start, sprite_timestamps=None: _response(req.scene_id)
         ),
     )
     defaults.update(overrides)
@@ -89,7 +89,7 @@ class TestIdentifyScenesBatched:
             call_order.append(("extract", req.scene_id))
             return SimpleNamespace(scene_id=req.scene_id)
 
-        async def _compute(req, bundle, num_frames, match_config, scene_id_int, sprite, t_start):
+        async def _compute(req, bundle, num_frames, match_config, scene_id_int, sprite, t_start, sprite_timestamps=None):
             call_order.append(("compute", req.scene_id))
             return _response(req.scene_id)
 

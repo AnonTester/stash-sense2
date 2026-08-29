@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.18.1';
+  const PLUGIN_VERSION = '0.19.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -582,6 +582,95 @@
     return div.innerHTML;
   }
 
+  // Strip an absolute sidecar-origin URL down to a same-origin-relative
+  // path -- the sidecar's own STASH_URL isn't necessarily the address the
+  // browser uses to reach Stash (reverse proxy, different LAN
+  // hostname/port), so an absolute URL from it can point somewhere the
+  // browser can't reach. Was duplicated identically in stash-sense.js and
+  // stash-sense-recommendations.js; centralized here now that
+  // renderPerformerCandidateCards (below) needs it too.
+  function relativeUrl(url) {
+    if (!url) return url;
+    try { return new URL(url).pathname; }
+    catch (e) { return url; }
+  }
+
+  /**
+   * Render a set of local-performer candidates as visual cards (cover
+   * image, name, alias preview, verifiable external links) for the user
+   * to explicitly pick from or reject -- replaces matching by name/alias
+   * text alone, which is exactly what let an alias collision silently
+   * pick the wrong same-named performer in the past (a real incident: see
+   * the sidecar's recommendations_router.py, PerformerIdentityAmbiguous).
+   * A same-name text row can't be told apart; a real cover photo and a
+   * verifiable "View on stashdb.org" link can.
+   *
+   * @param container - element to render into (innerHTML replaced)
+   * @param candidates - [{id, name, image_path, alias_list, stash_ids, urls}, ...]
+   *   (image_path is an absolute sidecar-origin URL, relativized here)
+   * @param options.onSelectExisting(performerId) - called when a card's
+   *   "Use this performer" is clicked
+   * @param options.onCreateNew() - called when "create as new" is clicked;
+   *   omit to hide that action (e.g. when creation isn't offered here)
+   * @param options.localPerformerUrl(id) - builds the "View local
+   *   performer" href, default `/performers/{id}`
+   * @param options.stashboxPerformerUrl(domain, stashId) - builds a
+   *   "View on {domain}" href, default `https://{domain}/performers/{id}`
+   */
+  function renderPerformerCandidateCards(container, candidates, options = {}) {
+    const onSelectExisting = options.onSelectExisting;
+    const onCreateNew = options.onCreateNew;
+    const localPerformerUrl = options.localPerformerUrl || ((id) => `/performers/${id}`);
+    const stashboxPerformerUrl = options.stashboxPerformerUrl
+      || ((domain, stashId) => `https://${domain}/performers/${stashId}`);
+
+    const cardHtml = (c) => {
+      const aliasPreview = (c.alias_list || []).slice(0, 4).join(', ');
+      const stashLinks = (c.stash_ids || []).map((sid) => {
+        const domain = String(sid.endpoint || '').replace(/^https?:\/\//, '').replace(/\/graphql$/, '');
+        const href = stashboxPerformerUrl(domain, sid.stash_id);
+        return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" class="ss-link">View on ${escapeHtml(domain)}</a>`;
+      }).join(' ');
+      return `
+        <div class="ss-candidate-card" data-performer-id="${escapeHtml(c.id)}">
+          <div class="ss-candidate-card-image">
+            ${c.image_path
+              ? `<img src="${escapeHtml(relativeUrl(c.image_path))}" alt="" onerror="this.style.display='none'" />`
+              : '<div class="ss-no-image">No Image</div>'
+            }
+          </div>
+          <div class="ss-candidate-card-body">
+            <div class="ss-candidate-card-name">${escapeHtml(c.name || 'Unknown')}</div>
+            ${aliasPreview ? `<div class="ss-candidate-card-aliases">aka ${escapeHtml(aliasPreview)}</div>` : ''}
+            <div class="ss-candidate-card-links">
+              <a href="${escapeHtml(localPerformerUrl(c.id))}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>
+              ${stashLinks}
+            </div>
+            <button type="button" class="ss-btn ss-btn-secondary ss-candidate-card-select">Use this performer</button>
+          </div>
+        </div>
+      `;
+    };
+
+    container.innerHTML = `
+      <div class="ss-candidate-cards">
+        ${candidates.map(cardHtml).join('')}
+      </div>
+      ${onCreateNew ? '<button type="button" class="ss-btn ss-btn-secondary ss-candidate-create-new">None of these — create as new performer</button>' : ''}
+    `;
+
+    container.querySelectorAll('.ss-candidate-card').forEach((card) => {
+      const btn = card.querySelector('.ss-candidate-card-select');
+      btn.addEventListener('click', () => {
+        if (onSelectExisting) onSelectExisting(card.dataset.performerId);
+      });
+    });
+    const createBtn = container.querySelector('.ss-candidate-create-new');
+    if (createBtn && onCreateNew) {
+      createBtn.addEventListener('click', onCreateNew);
+    }
+  }
+
   // ==================== Tab URL State ====================
 
   function getTabFromUrl() {
@@ -694,6 +783,8 @@
     distanceToConfidence,
     getConfidenceClass,
     escapeHtml,
+    relativeUrl,
+    renderPerformerCandidateCards,
   };
 
   console.log(`[${PLUGIN_NAME}] Core module loaded`);

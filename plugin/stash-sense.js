@@ -1087,7 +1087,7 @@
             <input type="checkbox" class="ss-update-meta-checkbox" checked />
             Link StashBox ID to performer
           </label>`}
-          <ul class="ss-search-results"></ul>
+          <div class="ss-search-results"></div>
         `;
 
         // Insert after the parent actions div
@@ -1099,9 +1099,72 @@
         }
 
         const input = panel.querySelector('.ss-search-input');
-        const resultsList = panel.querySelector('.ss-search-results');
+        const resultsDiv2 = panel.querySelector('.ss-search-results');
         const updateMetaCheckbox = panel.querySelector('.ss-update-meta-checkbox');
         const self = this;
+
+        // Real cover photos and a verifiable "View on stashdb.org" link
+        // per candidate, instead of a same-looking text row per result --
+        // a same-name/alias collision is exactly what silently linked the
+        // wrong performer once already (see the sidecar's
+        // PerformerIdentityAmbiguous). See stash-sense-core.js's
+        // renderPerformerCandidateCards.
+        async function linkTo(performerId, performerName) {
+          const updateMeta = updateMetaCheckbox ? updateMetaCheckbox.checked : false;
+          const staged = !!self._findSaveButton();
+
+          resultsDiv2.innerHTML = '<div class="ss-search-loading">Linking...</div>';
+
+          try {
+            const stashIds = updateMeta ? [{ endpoint: graphqlUrl, stash_id: stashdbId }] : [];
+            const settings = await SS.getSettings();
+            const linkResult = await SS.runPluginOperation('link_performer_stashbox', {
+              // Omitted (not just empty) when staged -- see the
+              // "Add to Stash + Scene" handler above for why.
+              ...(staged ? {} : (sceneId ? { scene_id: sceneId } : { image_id: imageId })),
+              performer_id: performerId,
+              stash_ids: stashIds,
+              update_metadata: updateMeta,
+              sidecar_url: settings.sidecarUrl,
+            });
+
+            if (linkResult.error) throw new Error(linkResult.error);
+
+            // A UUID search only has something to find once the
+            // stash_id link above has actually been written.
+            const success = staged
+              ? await self._selectPerformerInPendingForm(performerId, {
+                  name: performerName,
+                  stashdbId: updateMeta ? stashdbId : undefined,
+                })
+              : true;
+
+            if (panel._cleanup) panel._cleanup();
+            panel.remove();
+            triggerBtn.style.display = 'none';
+            // Hide the create button next to it
+            const createBtn = triggerBtn.closest('.ss-actions, .ss-alt-match-actions')?.querySelector('.ss-btn-create');
+            if (createBtn) createBtn.style.display = 'none';
+            // Update status text
+            const notInLib = triggerBtn.closest('.ss-actions, .ss-alt-match-actions')?.querySelector('.ss-not-in-library');
+            if (notInLib) {
+              notInLib.textContent = success
+                ? `Added as: ${performerName}`
+                : `Linked as: ${performerName} (add to form manually)`;
+              notInLib.classList.remove('ss-not-in-library');
+            }
+            // Note: staged here reflects whether an edit tab was
+            // open (so a reload would risk losing unsaved edits),
+            // not whether the verified-select itself succeeded --
+            // a failed select still leaves an open form's other
+            // pending edits in place, which a reload would lose.
+            const modal = triggerBtn.closest('#ss-modal');
+            await self._finishMutation(modal, { staged });
+          } catch (err) {
+            resultsDiv2.innerHTML = `<div class="ss-search-error">Failed: ${SS.escapeHtml(err.message)}</div>`;
+            console.error('Failed to link performer:', err);
+          }
+        }
 
         let debounceTimer;
 
@@ -1110,10 +1173,10 @@
           debounceTimer = setTimeout(async () => {
             const query = input.value.trim();
             if (query.length < 2) {
-              resultsList.innerHTML = '';
+              resultsDiv2.innerHTML = '';
               return;
             }
-            resultsList.innerHTML = '<li class="ss-search-loading">Searching...</li>';
+            resultsDiv2.innerHTML = '<div class="ss-search-loading">Searching...</div>';
 
             try {
               const settings = await SS.getSettings();
@@ -1126,80 +1189,19 @@
 
               const performers = result.performers || result || [];
               if (performers.length === 0) {
-                resultsList.innerHTML = '<li class="ss-search-empty">No performers found</li>';
+                resultsDiv2.innerHTML = '<div class="ss-search-empty">No performers found</div>';
                 return;
               }
 
-              resultsList.innerHTML = performers.map(p => `
-                <li class="ss-search-result-item" data-performer-id="${p.id}" data-performer-name="${SS.escapeHtml ? SS.escapeHtml(p.name) : p.name}">
-                  ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" class="ss-search-result-img" onerror="this.style.display='none'" />` : ''}
-                  <span>${p.name}${p.disambiguation ? ` (${p.disambiguation})` : ''}</span>
-                </li>
-              `).join('');
-
-              // Click handlers for search results
-              resultsList.querySelectorAll('.ss-search-result-item').forEach(li => {
-                li.addEventListener('click', async () => {
-                  const performerId = li.dataset.performerId;
-                  const performerName = li.dataset.performerName;
-                  const updateMeta = updateMetaCheckbox ? updateMetaCheckbox.checked : false;
-                  const staged = !!self._findSaveButton();
-
-                  panel.innerHTML = '<div class="ss-search-loading">Linking...</div>';
-
-                  try {
-                    const stashIds = updateMeta ? [{ endpoint: graphqlUrl, stash_id: stashdbId }] : [];
-                    const settings = await SS.getSettings();
-                    const linkResult = await SS.runPluginOperation('link_performer_stashbox', {
-                      // Omitted (not just empty) when staged -- see the
-                      // "Add to Stash + Scene" handler above for why.
-                      ...(staged ? {} : (sceneId ? { scene_id: sceneId } : { image_id: imageId })),
-                      performer_id: performerId,
-                      stash_ids: stashIds,
-                      update_metadata: updateMeta,
-                      sidecar_url: settings.sidecarUrl,
-                    });
-
-                    if (linkResult.error) throw new Error(linkResult.error);
-
-                    // A UUID search only has something to find once the
-                    // stash_id link above has actually been written.
-                    const success = staged
-                      ? await self._selectPerformerInPendingForm(performerId, {
-                          name: performerName,
-                          stashdbId: updateMeta ? stashdbId : undefined,
-                        })
-                      : true;
-
-                    if (panel._cleanup) panel._cleanup();
-                    panel.remove();
-                    triggerBtn.style.display = 'none';
-                    // Hide the create button next to it
-                    const createBtn = triggerBtn.closest('.ss-actions, .ss-alt-match-actions')?.querySelector('.ss-btn-create');
-                    if (createBtn) createBtn.style.display = 'none';
-                    // Update status text
-                    const notInLib = triggerBtn.closest('.ss-actions, .ss-alt-match-actions')?.querySelector('.ss-not-in-library');
-                    if (notInLib) {
-                      notInLib.textContent = success
-                        ? `Added as: ${performerName}`
-                        : `Linked as: ${performerName} (add to form manually)`;
-                      notInLib.classList.remove('ss-not-in-library');
-                    }
-                    // Note: staged here reflects whether an edit tab was
-                    // open (so a reload would risk losing unsaved edits),
-                    // not whether the verified-select itself succeeded --
-                    // a failed select still leaves an open form's other
-                    // pending edits in place, which a reload would lose.
-                    const modal = triggerBtn.closest('#ss-modal');
-                    await self._finishMutation(modal, { staged });
-                  } catch (err) {
-                    panel.innerHTML = `<div class="ss-search-error">Failed: ${SS.escapeHtml(err.message)}</div>`;
-                    console.error('Failed to link performer:', err);
-                  }
-                });
+              const byId = new Map(performers.map(p => [String(p.id), p]));
+              SS.renderPerformerCandidateCards(resultsDiv2, performers, {
+                onSelectExisting: (performerId) => {
+                  const p = byId.get(String(performerId));
+                  linkTo(performerId, p ? p.name : performerId);
+                },
               });
             } catch (err) {
-              resultsList.innerHTML = `<li class="ss-search-error">Search failed: ${SS.escapeHtml(err.message)}</li>`;
+              resultsDiv2.innerHTML = `<div class="ss-search-error">Search failed: ${SS.escapeHtml(err.message)}</div>`;
             }
           }, 300);
         });

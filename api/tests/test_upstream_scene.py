@@ -1135,6 +1135,9 @@ class TestEntityCreation:
         stash.search_tags = AsyncMock(return_value=[])
         stash.get_all_tags_with_aliases = AsyncMock(return_value=[])
         stash.update_tag = AsyncMock(return_value={"id": "300"})
+        # _find_linked_entity_by_stash_id's raw GraphQL call -- empty by
+        # default (no performer already linked to this stash_id).
+        stash._execute = AsyncMock(return_value={"findPerformers": {"performers": []}})
         return stash
 
     @pytest.mark.asyncio
@@ -1154,16 +1157,96 @@ class TestEntityCreation:
         assert call_kwargs["stash_ids"] == [{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"}]
 
     @pytest.mark.asyncio
-    async def test_create_performer_from_stashbox_links_existing_alias_match(self, mock_stash):
-        """Links stash_id to an existing local performer by alias instead of creating."""
-        from recommendations_router import _create_performer_from_stashbox
+    async def test_create_performer_from_stashbox_alias_match_raises_ambiguous(self, mock_stash):
+        """A name/alias match alone is never sufficient grounds to link or
+        create -- confirmed live, this exact pattern silently linked a real
+        StashBox performer's id onto an unrelated existing local performer
+        whose alias list happened to contain the same name, corrupting that
+        performer's own stash_ids in the process. Must raise instead of
+        silently picking a side."""
+        from recommendations_router import _create_performer_from_stashbox, PerformerIdentityAmbiguous
         mock_stash.search_performers = AsyncMock(return_value=[
             {"id": "42", "name": "Main Name", "alias_list": ["Jane Doe"], "stash_ids": []}
         ])
 
+        with pytest.raises(PerformerIdentityAmbiguous) as exc_info:
+            await _create_performer_from_stashbox(
+                mock_stash,
+                stashbox_data={"name": "Jane Doe"},
+                endpoint="https://theporndb.net/graphql",
+                stashbox_id="perf-uuid-2",
+            )
+
+        assert exc_info.value.candidates[0]["id"] == "42"
+        mock_stash.create_performer.assert_not_called()
+        mock_stash.update_performer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_performer_from_stashbox_duplicate_error_raises_ambiguous(self, mock_stash):
+        """If create fails with duplicate-name error, the now-visible
+        same-named performer is still just a name match -- must raise
+        ambiguous rather than assume it's the same performer and link it."""
+        from recommendations_router import _create_performer_from_stashbox, PerformerIdentityAmbiguous
+        mock_stash.search_performers = AsyncMock(side_effect=[
+            [],
+            [{"id": "42", "name": "Jane Doe", "alias_list": [], "stash_ids": []}],
+        ])
+        mock_stash.create_performer = AsyncMock(
+            side_effect=RuntimeError(
+                "GraphQL error: [{'message': \"performer with name 'Jane Doe' already exists\", 'path': ['performerCreate']}]"
+            )
+        )
+
+        with pytest.raises(PerformerIdentityAmbiguous) as exc_info:
+            await _create_performer_from_stashbox(
+                mock_stash,
+                stashbox_data={"name": "Jane Doe"},
+                endpoint="https://stashdb.org/graphql",
+                stashbox_id="perf-uuid-1",
+            )
+
+        assert exc_info.value.candidates[0]["id"] == "42"
+        mock_stash.update_performer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_performer_from_stashbox_hard_match_via_existing_stash_id_link(self, mock_stash):
+        """A performer already linked to this exact (endpoint, stashbox_id)
+        is hard evidence -- safe to resolve directly, no ambiguity, no
+        name/alias matching involved at all."""
+        from recommendations_router import _create_performer_from_stashbox
+        mock_stash._execute = AsyncMock(return_value={
+            "findPerformers": {"performers": [
+                {"id": "42", "name": "Totally Different Name", "disambiguation": None,
+                 "alias_list": [], "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"}]},
+            ]}
+        })
+
         result = await _create_performer_from_stashbox(
             mock_stash,
             stashbox_data={"name": "Jane Doe"},
+            endpoint="https://stashdb.org/graphql",
+            stashbox_id="perf-uuid-1",
+        )
+
+        assert result["id"] == "42"
+        mock_stash.create_performer.assert_not_called()
+        mock_stash.search_performers.assert_not_called()
+        mock_stash.update_performer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_performer_from_stashbox_hard_match_via_matching_url(self, mock_stash):
+        """A candidate's profile URL matching a local performer's own urls
+        (www./scheme/trailing-slash tolerant) is hard evidence -- safe to
+        link without asking, even though the name is only an alias match."""
+        from recommendations_router import _create_performer_from_stashbox
+        mock_stash.search_performers = AsyncMock(return_value=[
+            {"id": "42", "name": "Main Name", "alias_list": ["Jane Doe"], "stash_ids": [],
+             "urls": ["https://www.onlyfans.com/janedoe/"]},
+        ])
+
+        result = await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={"name": "Jane Doe", "profile_url": "http://onlyfans.com/janedoe"},
             endpoint="https://theporndb.net/graphql",
             stashbox_id="perf-uuid-2",
         )
@@ -1176,31 +1259,72 @@ class TestEntityCreation:
         )
 
     @pytest.mark.asyncio
-    async def test_create_performer_from_stashbox_duplicate_error_falls_back_to_link(self, mock_stash):
-        """If create fails with duplicate-name error, fallback links existing performer."""
-        from recommendations_router import _create_performer_from_stashbox
-        mock_stash.search_performers = AsyncMock(side_effect=[
-            [],
-            [{"id": "42", "name": "Jane Doe", "alias_list": [], "stash_ids": []}],
-        ])
-        mock_stash.create_performer = AsyncMock(
-            side_effect=RuntimeError(
-                "GraphQL error: [{'message': \"performer with name 'Jane Doe' already exists\", 'path': ['performerCreate']}]"
-            )
-        )
+    async def test_resolved_link_adds_a_new_profile_url_the_performer_did_not_have(self, mock_stash):
+        """The explicit "link to this performer" resolution path (user
+        picked a card after an ambiguous match) should also save the
+        candidate's profile URL onto the performer if it's genuinely new --
+        not just the stash_id."""
+        from recommendations_router import CreatePerformerRequest, create_performer_action
+        import recommendations_router as rec_mod
 
-        result = await _create_performer_from_stashbox(
-            mock_stash,
-            stashbox_data={"name": "Jane Doe"},
+        mock_stash.get_performer = AsyncMock(return_value={
+            "id": "42", "name": "Main Name", "stash_ids": [], "urls": ["https://twitter.com/janedoe"],
+        })
+        rec_mod.stash_client = mock_stash
+
+        result = await create_performer_action(CreatePerformerRequest(
+            stashbox_data={"name": "Jane Doe", "profile_url": "https://www.onlyfans.com/janedoe/"},
             endpoint="https://stashdb.org/graphql",
             stashbox_id="perf-uuid-1",
-        )
+            resolved_performer_id="42",
+        ))
 
-        assert result["id"] == "42"
-        mock_stash.update_performer.assert_called_once_with(
-            "42",
-            stash_ids=[{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"}],
-        )
+        assert result["success"] is True
+        assert mock_stash.update_performer.call_count == 2
+        calls = {tuple(sorted(c.kwargs.keys())): c for c in mock_stash.update_performer.call_args_list}
+        assert calls[("stash_ids",)].kwargs["stash_ids"] == [
+            {"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"},
+        ]
+        assert calls[("urls",)].kwargs["urls"] == [
+            "https://twitter.com/janedoe", "https://www.onlyfans.com/janedoe/",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_creating_a_new_performer_stores_stash_id_cover_image_and_urls(self, mock_stash):
+        """Confirms the full create path already covers stash_id (at
+        create time) plus cover image and urls (via the post-create
+        enrichment fetch from the stashbox endpoint) -- nothing extra
+        needed here, this is a coverage gap fix, not a behavior change."""
+        from recommendations_router import _create_performer_from_stashbox
+
+        mock_sbc = MagicMock()
+        mock_sbc.get_performer = AsyncMock(return_value={
+            "urls": [
+                {"url": "https://onlyfans.com/janedoe", "type": "ONLYFANS"},
+                {"url": "https://twitter.com/janedoe", "type": "TWITTER"},
+            ],
+            "images": [{"id": "img-1", "url": "https://stashdb.org/images/img-1.jpg"}],
+        })
+        mock_mgr = MagicMock()
+        mock_mgr.get_client.return_value = mock_sbc
+
+        with patch("stashbox_connection_manager.get_connection_manager", return_value=mock_mgr):
+            result = await _create_performer_from_stashbox(
+                mock_stash,
+                stashbox_data={"name": "Jane Doe"},
+                endpoint="https://stashdb.org/graphql",
+                stashbox_id="perf-uuid-1",
+            )
+
+        assert result["id"] == "200"
+        create_kwargs = mock_stash.create_performer.call_args.kwargs
+        assert create_kwargs["stash_ids"] == [{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"}]
+
+        mock_stash.update_performer.assert_called_once()
+        enrich_kwargs = mock_stash.update_performer.call_args.kwargs
+        assert enrich_kwargs["urls"] == ["https://onlyfans.com/janedoe", "https://twitter.com/janedoe"]
+        assert enrich_kwargs["image"] == "https://stashdb.org/images/img-1.jpg"
+
 
     @pytest.mark.asyncio
     async def test_create_tag_from_stashbox(self, mock_stash):
@@ -1342,6 +1466,133 @@ class TestEntityCreation:
             "55",
             stash_ids=[{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-uuid-1"}],
         )
+
+
+class TestCatalogueSourcedPerformers:
+    """Catalogue sources (seekfans, pornbox, etc -- see
+    classify_universal_id's "catalogue" category) have no real stash-box
+    connection: `endpoint` is just the source's own name, `stashbox_id` is
+    that source's internal id, and there's no metadata API to fetch a
+    cover/urls from after create -- see _create_performer_from_stashbox's
+    own is_catalogue docstring. These mirror stashbox_router.py's existing
+    create_performer_from_catalogue endpoint (used by the live Identify
+    modal for the exact same case), just reached through the accept flows
+    fixed for the alias-collision bug."""
+
+    @pytest.fixture
+    def mock_stash(self):
+        stash = MagicMock()
+        stash.create_performer = AsyncMock(return_value={"id": "200", "name": "New Performer"})
+        stash.search_performers = AsyncMock(return_value=[])
+        stash.update_performer = AsyncMock(return_value={"id": "200"})
+        stash.get_all_performers = AsyncMock(return_value=[])
+        stash._execute = AsyncMock(return_value={"findPerformers": {"performers": []}})
+        return stash
+
+    @pytest.mark.asyncio
+    async def test_creates_with_image_and_urls_but_no_stash_ids(self, mock_stash):
+        from recommendations_router import _create_performer_from_stashbox
+
+        result = await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={
+                "name": "Jane Doe", "source": "seekfans",
+                "image_url": "https://seekfans.example/janedoe.jpg",
+                "profile_url": "https://onlyfans.com/janedoe",
+                "catalogue_url": "https://seekfans.example/model/janedoe",
+            },
+            endpoint="seekfans",
+            stashbox_id="4821",
+        )
+
+        assert result["id"] == "200"
+        # No stash_id hard-match pre-check for catalogue sources -- there's
+        # no real linkage concept, so nothing to look up first.
+        mock_stash._execute.assert_not_called()
+
+        create_kwargs = mock_stash.create_performer.call_args.kwargs
+        assert "stash_ids" not in create_kwargs
+        assert create_kwargs["image"] == "https://seekfans.example/janedoe.jpg"
+        assert create_kwargs["disambiguation"] == "(Seekfans)"
+        assert create_kwargs["alias_list"] == ["janedoe"]  # from the profile_url handle
+
+        mock_stash.update_performer.assert_called_once_with(
+            "200", urls=["https://onlyfans.com/janedoe", "https://seekfans.example/model/janedoe"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_alias_collision_still_raises_ambiguous(self, mock_stash):
+        """The alias-collision protection applies identically regardless
+        of source -- a catalogue candidate matching an unrelated local
+        performer's alias must still be confirmed, not silently linked."""
+        from recommendations_router import _create_performer_from_stashbox, PerformerIdentityAmbiguous
+        mock_stash.search_performers = AsyncMock(return_value=[
+            {"id": "42", "name": "Main Name", "alias_list": ["Jane Doe"], "stash_ids": [], "urls": []},
+        ])
+
+        with pytest.raises(PerformerIdentityAmbiguous) as exc_info:
+            await _create_performer_from_stashbox(
+                mock_stash,
+                stashbox_data={"name": "Jane Doe", "source": "seekfans", "profile_url": "https://onlyfans.com/different-person"},
+                endpoint="seekfans",
+                stashbox_id="4821",
+            )
+
+        assert exc_info.value.candidates[0]["id"] == "42"
+        mock_stash.create_performer.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_hard_match_via_url_links_without_writing_stash_ids(self, mock_stash):
+        """A local performer whose own urls already include this
+        catalogue candidate's profile URL is hard evidence -- link, don't
+        create a duplicate -- but never write a bogus stash_ids entry
+        (there's no real "seekfans" stash-box connection to link to)."""
+        from recommendations_router import _create_performer_from_stashbox
+        mock_stash.search_performers = AsyncMock(return_value=[
+            {"id": "42", "name": "Main Name", "alias_list": ["Jane Doe"], "stash_ids": [],
+             "urls": ["https://onlyfans.com/janedoe"]},
+        ])
+
+        result = await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={"name": "Jane Doe", "source": "seekfans", "profile_url": "https://onlyfans.com/janedoe"},
+            endpoint="seekfans",
+            stashbox_id="4821",
+        )
+
+        assert result["id"] == "42"
+        mock_stash.create_performer.assert_not_called()
+        mock_stash.update_performer.assert_not_called()  # URL already present, nothing new to add
+
+    @pytest.mark.asyncio
+    async def test_scene_face_match_accept_creates_catalogue_performer_correctly(self, mock_stash):
+        """End-to-end through the actual entry point that hits this: Face
+        Recommendations accepting a seekfans-sourced candidate with no
+        existing local match."""
+        from recommendations_router import _resolve_scene_face_match_performer_id, SceneFaceMatchSelection
+        from recommendations_db import Recommendation
+
+        rec = Recommendation(
+            id=1, type="scene_face_match", status="pending", target_type="scene", target_id="1|seekfans:4821",
+            details={
+                "scene_id": "1", "name": "Jane Doe", "stashdb_id": "4821", "endpoint": "seekfans",
+                "source": "seekfans", "image_url": "https://seekfans.example/janedoe.jpg",
+                "profile_url": "https://onlyfans.com/janedoe", "catalogue_url": None,
+            },
+            resolution_action=None, resolution_details=None, resolved_at=None,
+            confidence=0.8, source_analysis_id=None, created_at="", updated_at="",
+        )
+        selection = SceneFaceMatchSelection(recommendation_id=1)
+
+        with patch("stashbox_connection_manager.get_connection_manager", return_value=MagicMock(
+            get_endpoint_url=MagicMock(return_value=None),
+        )):
+            performer_id = await _resolve_scene_face_match_performer_id(mock_stash, rec, selection)
+
+        assert performer_id == "200"
+        create_kwargs = mock_stash.create_performer.call_args.kwargs
+        assert "stash_ids" not in create_kwargs
+        assert create_kwargs["image"] == "https://seekfans.example/janedoe.jpg"
 
 
 class TestUpdateSceneAction:

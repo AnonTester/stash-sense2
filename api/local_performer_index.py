@@ -59,16 +59,26 @@ class LocalPerformerIndex:
     def upsert(
         self, performer_id: int, name: str, stashdb_id: Optional[str],
         image_hash: str, image_url: Optional[str], embedding: np.ndarray,
+        urls: Optional[list[str]] = None,
     ) -> None:
         """Add or replace this performer's embedding (delete-then-add for
         clarity/consistency with the main build pipeline's convention,
         though usearch's own `add()` would also happily overwrite a key
-        in place)."""
+        in place).
+
+        `urls` -- this performer's own Stash `urls` field (plain strings,
+        unlike a stash-box performer's `{url, type}` shape) -- lets
+        matching.py's merge_local_candidates() cross-check a catalogue
+        (seekfans/pornbox) main-index candidate's profile/catalogue url
+        against this local performer, catching a same-person duplicate
+        that a stash_id-only comparison can't (catalogue sources have no
+        stash_id to link)."""
         self.remove(performer_id)
         self.index.add(performer_id, embedding.astype(np.float32))
         self.mapping[str(performer_id)] = {
             "name": name, "stashdb_id": stashdb_id,
             "image_hash": image_hash, "image_url": image_url,
+            "urls": urls or [],
         }
 
     def remove(self, performer_id: int) -> None:
@@ -79,6 +89,22 @@ class LocalPerformerIndex:
     def get_image_hash(self, performer_id: int) -> Optional[str]:
         entry = self.mapping.get(str(performer_id))
         return entry["image_hash"] if entry else None
+
+    def update_urls(self, performer_id: int, urls: list[str]) -> bool:
+        """Refreshes just the stored `urls` for an already-indexed
+        performer, without touching the embedding -- used by
+        sync_one_performer() when the cover image is unchanged (so the
+        normal upsert() path is skipped) but the caller's own `urls` still
+        need to stay current, e.g. right after the identity-resolution
+        flow in recommendations_router.py writes a new profile URL onto
+        an existing performer via a Stash "update" hook that doesn't touch
+        the cover. Returns whether anything actually changed (false =
+        no-op, matching the existing "unchanged" status)."""
+        entry = self.mapping.get(str(performer_id))
+        if entry is None or entry.get("urls") == urls:
+            return False
+        entry["urls"] = urls
+        return True
 
     def __contains__(self, performer_id: int) -> bool:
         return str(performer_id) in self.mapping
@@ -128,8 +154,9 @@ async def sync_one_performer(
 
     event_type is one of "create"/"update"/"destroy" (case-insensitive,
     matches the Stash hook operation names). Returns a short status for
-    logging/response: "removed", "added", "updated", "skipped_no_image",
-    or "unchanged".
+    logging/response: "removed", "added", "updated", "urls_updated"
+    (cover unchanged, but `urls` differed and was refreshed in place --
+    see update_urls()), "skipped_no_image", or "unchanged".
     """
     if event_type.lower() == "destroy":
         was_present = performer_id in index
@@ -154,7 +181,10 @@ async def sync_one_performer(
         image_bytes = resp.content
 
     fingerprint = _image_fingerprint(image_bytes)
+    current_urls = performer.get("urls") or []
     if index.get_image_hash(performer_id) == fingerprint:
+        if index.update_urls(performer_id, current_urls):
+            return "urls_updated"
         return "unchanged"
 
     from embeddings import load_image, gpu_compute_lock
@@ -192,5 +222,6 @@ async def sync_one_performer(
         image_hash=fingerprint,
         image_url=_relative_image_url(image_path),
         embedding=embedding.embedding,
+        urls=current_urls,
     )
     return "updated" if was_present else "added"

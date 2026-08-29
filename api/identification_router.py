@@ -164,7 +164,7 @@ class PerformerMatchResponse(BaseModel):
     source: Optional[str] = Field(None, description="Set only for catalogue (non-stash-box) matches, e.g. 'seekfans'")
     catalogue_url: Optional[str] = Field(None, description="Catalogue source's own profile page, set only for catalogue matches")
     profile_url: Optional[str] = Field(None, description="Link to the actual external content site (e.g. onlyfans.com), when the catalogue source has one")
-    top_timestamps_sec: list[float] = Field(default_factory=list, description="Up to 4 timestamps (seconds) of this match's strongest frames, for scene-player jump buttons. Only populated by scene identification's live ffmpeg-extraction path (matching_mode='cluster'); empty otherwise.")
+    top_timestamps_sec: list[float] = Field(default_factory=list, description="Up to 4 timestamps (seconds) of this match's strongest frames, for scene-player jump buttons. Only populated by scene identification's live ffmpeg-extraction path (matching_mode='cluster' or 'hybrid', via hybrid's own internal cluster component); empty for 'frequency' mode or the cached-signal fast path (no per-frame timestamps available there -- see _identify_scene_from_cache).")
 
 
 class FaceResult(BaseModel):
@@ -749,14 +749,19 @@ def _cluster_and_match(
     dispatch/dedup logic three times.
 
     frame_timestamps (frame_index -> timestamp_sec) is only available from
-    the live ffmpeg-extraction path (identify_scene's main body) and is only
-    threaded into the plain "cluster" branch's aggregate_matches() call
-    below -- see aggregate_matches's own docstring for why."""
+    the live ffmpeg-extraction path (identify_scene's main body) -- threaded
+    into both the plain "cluster" branch's aggregate_matches() call below
+    and into hybrid_matching() (which resolves timestamps via its own
+    internal cluster component -- see its docstring); "frequency" mode has
+    no per-frame-cluster concept to resolve timestamps from, so it's not
+    threaded there. See aggregate_matches's own docstring for why this is
+    live-extraction-only in the first place."""
     if request.matching_mode == "hybrid":
         return hybrid_matching(
             all_results, _recognizer,
             cluster_threshold=request.cluster_threshold,
             top_k=request.top_k * 2, max_distance=request.max_distance,
+            frame_timestamps=frame_timestamps,
         )
     elif request.matching_mode == "frequency":
         return clustered_frequency_matching(
@@ -823,8 +828,14 @@ async def _process_sprite_frames(
 ) -> Optional[tuple[list[tuple[int, RecognitionResult]], list[dict]]]:
     """Fetch the scene's sprite/VTT sheet, crop each tile, and run the same
     detect -> batch-embed -> match pipeline used for ffmpeg frames and the
-    screenshot. Tagged with frame_index=-2 (mirroring the -1 sentinel used
-    for screenshot faces).
+    screenshot. Each detected face gets its own unique negative frame_index
+    (-2, -3, -4, ... -- distinct per face, mirroring the -1 sentinel used
+    for screenshot faces but never shared the way a single -2 constant used
+    to be) specifically so its real tile timestamp survives into
+    frame_timestamps and can resolve a jump-to-frame button, the same as a
+    video frame's own frame_index does -- a shared sentinel meant every
+    sprite match collapsed onto one dict key, permanently losing all but
+    one candidate's timestamp.
 
     Returns (results, cache_rows) -- cache_rows are what the caller should
     persist via save_face_signal_cache(..., is_sprite=True) plus
@@ -893,11 +904,12 @@ async def _process_sprite_frames(
 
     extra_results: list[tuple[int, RecognitionResult]] = []
     cache_rows: list[dict] = []
-    for (timestamp, face, tile_image), embedding in zip(detected, embeddings):
+    for i, ((timestamp, face, tile_image), embedding) in enumerate(zip(detected, embeddings)):
         matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=tile_image)
-        extra_results.append((-2, RecognitionResult(face=face, matches=matches, embedding=embedding)))
+        sprite_frame_index = -2 - i
+        extra_results.append((sprite_frame_index, RecognitionResult(face=face, matches=matches, embedding=embedding)))
         cache_rows.append({
-            "frame_index": -2,
+            "frame_index": sprite_frame_index,
             "bbox": face.bbox,
             "confidence": face.confidence,
             "yaw": face.yaw,
@@ -913,6 +925,7 @@ async def _identify_scene_from_cache(
     cache_meta: dict,
     t_start: float,
     extra_results: Optional[list[tuple[int, RecognitionResult]]] = None,
+    sprite_timestamps: Optional[dict[int, float]] = None,
 ) -> "SceneIdentifyResponse":
     """Reconstruct matching inputs from cached face signals and rerun only
     the DB-dependent steps (matching, clustering).
@@ -929,6 +942,11 @@ async def _identify_scene_from_cache(
     caller (_prepare_scene_identify) since whether to trust a cached sprite
     result or fetch fresh depends on scene_sprite_cache_status, a check
     that's irrelevant here -- concatenated in before clustering runs.
+    `sprite_timestamps` (optional) is the caller's own frame_index ->
+    timestamp_sec map for those same sprite results, merged below with the
+    video-frame timestamps this function reconstructs from its own cached
+    rows -- both are needed since this is the ONLY function that can see
+    both halves of a mixed video+sprite match set.
     """
     scene_id_int = int(request.scene_id)
 
@@ -952,12 +970,25 @@ async def _identify_scene_from_cache(
     if extra_results:
         all_results.extend(extra_results)
 
+    # Video-frame rows carry their own timestamp_sec too (see
+    # _identify_scene_compute's face_cache_rows) -- reconstructed here the
+    # same way sprite_timestamps was built by the caller, then merged so a
+    # cache-fast-path re-identify (the common case once a scene has been
+    # fingerprinted once) still resolves real jump-to-frame timestamps
+    # instead of silently losing them just because detection wasn't redone.
+    frame_timestamps = {
+        row["frame_index"]: row["timestamp_sec"]
+        for row in cached_faces if row.get("timestamp_sec") is not None
+    }
+    if sprite_timestamps:
+        frame_timestamps.update(sprite_timestamps)
+
     scene_all_matches = [m for _, r in all_results for m in r.matches]
     await _fetch_missing_images(scene_all_matches)
 
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    persons = _cluster_and_match(all_results, request)
+    persons = _cluster_and_match(all_results, request, frame_timestamps=frame_timestamps)
 
     top_names = [p.best_match.name for p in persons[:3] if p.best_match]
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] === DONE (cache) === Top matches: {', '.join(top_names)}")
@@ -1164,6 +1195,7 @@ async def _identify_scene_compute(
     scene_id_int: int,
     sprite_extra_results: list[tuple[int, RecognitionResult]],
     t_start: float,
+    sprite_timestamps: Optional[dict[int, float]] = None,
 ) -> "SceneIdentifyResponse":
     """Detect+embed+match+fingerprint half of scene identification, given
     an already-extracted bundle (see _extract_scene_frames). Pulled out of
@@ -1176,6 +1208,9 @@ async def _identify_scene_compute(
     duration_sec = bundle.duration_sec
     screenshot_url = bundle.screenshot_url
     file_info = bundle.file_info
+    frame_timestamps = {f.frame_index: f.timestamp_sec for f in extraction_result.frames}
+    if sprite_timestamps:
+        frame_timestamps.update(sprite_timestamps)
 
     # Phase 1: Detect all faces from all frames -- spread across
     # _recognizer's detection pool (recognizer.py's DETECTION_POOL_SIZE
@@ -1240,6 +1275,12 @@ async def _identify_scene_compute(
             "confidence": face.confidence,
             "yaw": face.yaw,
             "embedding": np.asarray(embedding.embedding, dtype=np.float32).tobytes(),
+            # Lets a later cache-fast-path re-identify (_identify_scene_from_cache,
+            # which skips ffmpeg extraction entirely) still resolve real
+            # "jump to frame" timestamps instead of losing them -- see
+            # _reconstruct_from_cached_faces and this column's existing use
+            # for sprite tiles (replace_face_embeddings's own docstring).
+            "timestamp_sec": frame_timestamps.get(frame_idx),
         })
 
     t_face_loop_total = time.time() - t_face_loop
@@ -1320,7 +1361,6 @@ async def _identify_scene_compute(
     t_match_end = 0.0
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    frame_timestamps = {f.frame_index: f.timestamp_sec for f in extraction_result.frames}
     persons = _cluster_and_match(all_results, request, frame_timestamps=frame_timestamps)
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching ({request.matching_mode}): {len(persons)} persons in {time.time()-t_match:.1f}s")
 
@@ -1396,6 +1436,7 @@ class PreparedSceneIdentify:
     match_config: MatchingConfig
     scene_id_int: int
     sprite_extra_results: list[tuple[int, RecognitionResult]]
+    sprite_timestamps: dict[int, float]
     t_start: float
 
 
@@ -1449,11 +1490,25 @@ async def _prepare_scene_identify(
     # those embeddings and only redoes matching, never re-fetching/
     # re-detecting the sprite sheet itself.
     sprite_extra_results: list[tuple[int, RecognitionResult]] = []
+    # frame_index -> timestamp_sec for sprite-tile faces, resolved
+    # regardless of whether this call hit the sprite cache or freshly
+    # processed the sheet -- both cached_sprite_faces and sprite_cache_rows
+    # are lists of the same row shape (see replace_face_embeddings), each
+    # carrying its own real timestamp_sec now that sprite faces no longer
+    # share one frame_index sentinel. Threaded into every downstream
+    # matching call below (skip_frame_extraction / cache fast-path / full
+    # pipeline) so sprite-sourced matches can resolve real jump-to-frame
+    # timestamps too, not just video-frame ones.
+    sprite_timestamps: dict[int, float] = {}
     if request.use_sprite:
         _set_stage(request.scene_id, "analyzing_sprite")
         if is_sprite_cache_checked(scene_id_int):
             cached_sprite_faces = load_face_signal_cache(scene_id_int, is_sprite=True)
             sprite_extra_results = _reconstruct_from_cached_faces(cached_sprite_faces, match_config)
+            sprite_timestamps = {
+                row["frame_index"]: row["timestamp_sec"]
+                for row in cached_sprite_faces if row.get("timestamp_sec") is not None
+            }
         else:
             sprite_result = await _process_sprite_frames(
                 base_url, request.scene_id, api_key,
@@ -1465,6 +1520,10 @@ async def _prepare_scene_identify(
                 sprite_extra_results, sprite_cache_rows = sprite_result
                 if sprite_cache_rows:
                     save_face_signal_cache(scene_id_int, sprite_cache_rows, is_sprite=True)
+                sprite_timestamps = {
+                    row["frame_index"]: row["timestamp_sec"]
+                    for row in sprite_cache_rows if row.get("timestamp_sec") is not None
+                }
                 mark_sprite_cache_checked(scene_id_int)
             # sprite_result is None (sheet not available yet) -- leave
             # sprite_extra_results empty for this call without marking as
@@ -1477,7 +1536,7 @@ async def _prepare_scene_identify(
         scene_all_matches = [m for _, r in sprite_extra_results for m in r.matches]
         await _fetch_missing_images(scene_all_matches)
         _set_stage(request.scene_id, "matching_performers")
-        persons = _cluster_and_match(sprite_extra_results, request)
+        persons = _cluster_and_match(sprite_extra_results, request, frame_timestamps=sprite_timestamps)
         _set_stage(request.scene_id, "done")
         return SceneIdentifyResponse(
             scene_id=request.scene_id,
@@ -1506,7 +1565,8 @@ async def _prepare_scene_identify(
             print(f"[identify_scene] === START scene_id={request.scene_id} (cache hit) ===")
             try:
                 return await _identify_scene_from_cache(
-                    request, cache_meta, t_start, extra_results=sprite_extra_results,
+                    request, cache_meta, t_start,
+                    extra_results=sprite_extra_results, sprite_timestamps=sprite_timestamps,
                 )
             except Exception as e:
                 logger.warning(f"[identify_scene] Cache fast-path failed for scene {request.scene_id}, falling back to full pipeline: {e}")
@@ -1516,6 +1576,7 @@ async def _prepare_scene_identify(
         match_config=match_config,
         scene_id_int=scene_id_int,
         sprite_extra_results=sprite_extra_results,
+        sprite_timestamps=sprite_timestamps,
         t_start=t_start,
     )
 
@@ -1540,6 +1601,7 @@ async def _identify_scene_impl(request: SceneIdentifyRequest) -> "SceneIdentifyR
     return await _identify_scene_compute(
         request, bundle, prepared.num_frames, prepared.match_config,
         prepared.scene_id_int, prepared.sprite_extra_results, prepared.t_start,
+        sprite_timestamps=prepared.sprite_timestamps,
     )
 
 

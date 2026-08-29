@@ -292,6 +292,16 @@ async def lifespan(app: FastAPI):
     settings_mgr = init_settings(get_rec_db(), hw_profile.tier)
     init_settings_router()
 
+    # One-time background backfill of video-frame jump-to-frame timestamps
+    # for scenes cached before this was tracked -- see
+    # backfill_frame_timestamps.py's own docstring (the sprite-tile half of
+    # the same fix is schema migration v18 above, already applied by the
+    # time we get here; this half needs a live Stash call per scene so it
+    # can't be a synchronous migration). Non-blocking, gated by a
+    # user_settings flag so it only ever runs once per install.
+    from backfill_frame_timestamps import run_video_timestamp_backfill_once
+    asyncio.create_task(run_video_timestamp_backfill_once(get_rec_db(), STASH_URL, STASH_API_KEY))
+
     # Warm the face-recognition resource in the background now that
     # settings exist (idle_unload_minutes needs to be readable for
     # _idle_checker below, but the load itself doesn't depend on it).
@@ -390,7 +400,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.21.3",
+    version="0.22.0",
     lifespan=lifespan,
 )
 

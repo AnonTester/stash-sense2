@@ -1,5 +1,56 @@
 ## 2026-08-29
 
+### 0.22.0 (sidecar) / 0.19.0 (plugin)
+- Fix: accepting a Face Recommendations match (or an Upstream Scene
+  Changes performer add, or the live Identify modal's "Add to Stash +
+  Scene") could silently link the wrong performer whenever a name/alias
+  matched an unrelated existing local performer -- confirmed live: a
+  recommendation correctly identifying "Olga" instead got linked to
+  "Adelle Booty" because her alias list happened to contain "Olga",
+  corrupting Adelle's own stash_ids in the process. Matching on name or
+  alias alone is no longer ever treated as sufficient evidence to
+  auto-link or auto-create -- only an existing stash_id link or a
+  matching profile URL counts; anything else now blocks and prompts for
+  confirmation via a new card picker (cover image, link to the local
+  performer, link to the external source) in place of the old plain-text
+  search dropdown. A bulk accept (multiple Face Recommendations
+  selections, or one scene's Upstream Scene Changes performer adds)
+  blocks entirely until every ambiguity in it is resolved, so an accepted
+  recommendation never silently vanishes from the queue while hiding an
+  unresolved case.
+- Add: linking to an existing performer (or creating a new one) from the
+  new confirmation flow now writes the stash_id/profile URL onto that
+  performer, so the same link resolves automatically for other scenes
+  going forward.
+- Add: creating a new performer from the confirmation flow now also
+  handles catalogue-sourced candidates (seekfans, pornbox -- no real
+  StashBox ID) -- cover image, profile URL, and alias from the source's
+  handle, correctly without stash_ids, which don't apply to these
+  sources.
+- Add: a local performer's own stored URLs are now cross-checked against
+  catalogue-sourced (seekfans/pornbox) match candidates during
+  identification, so an already-added local performer surfaces instead
+  of a separate duplicate catalogue-source entry when their profile URL
+  matches -- this cross-check previously only worked via a linked
+  StashDB id.
+- Add: opening a Face Recommendations scene detail now does a live
+  stash_id lookup for any real-StashDB candidate not already showing a
+  local link (e.g. a local performer with no usable cover photo, so they
+  never had an embedding to match against in the first place) -- adds
+  the "View local performer" link retroactively instead of only showing
+  the external source.
+- Fix: Face Recommendations' scene-player "jump to frame" buttons went
+  silently empty once matching switched to matching_mode="hybrid" (which
+  never threaded per-frame timestamps through) and, separately, every
+  sprite-tile face on a scene shared one frame index, collapsing all but
+  one sprite match's timestamp per scene down to nothing. Both fixed;
+  already-cached data is repaired automatically rather than needing a
+  re-fingerprint -- sprite timestamps via a schema migration (pure local
+  SQL, applies on next startup) and video-frame timestamps via a one-time
+  background reconstruction (from already-cached extraction parameters
+  plus one cheap duration lookup per scene) -- confirmed live against the
+  full existing dataset, no re-detection needed.
+
 ### 0.21.3 (sidecar only)
 - Add: sprite-tile face embeddings are now cached (scene_face_embeddings,
   is_sprite=1, plus a new scene_sprite_cache_status table) instead of being

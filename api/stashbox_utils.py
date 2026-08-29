@@ -13,6 +13,26 @@ from stashbox_client import StashBoxClient
 from stashbox_connection_manager import get_connection_manager
 
 
+def normalize_url_for_compare(url: Optional[str]) -> str:
+    """Lowercase, strip scheme, strip a leading www. host label, strip a
+    trailing slash -- for tolerant profile-URL identity matching (e.g.
+    "https://www.onlyfans.com/x" and "onlyfans.com/x/" compare equal).
+    Shared by recommendations_router.py's own identity-resolution checks
+    (which originated this exact logic) and matching.py's local/catalogue
+    candidate cross-referencing -- same normalization rules, one place to
+    keep them in sync."""
+    if not url:
+        return ""
+    value = str(url).strip().lower().rstrip("/")
+    if value.startswith("https://"):
+        value = value[len("https://"):]
+    elif value.startswith("http://"):
+        value = value[len("http://"):]
+    if value.startswith("www."):
+        value = value[len("www."):]
+    return value
+
+
 def _get_stashbox_client(endpoint_domain: str) -> Optional[StashBoxClient]:
     """Get a StashBox client for the given endpoint domain or URL.
 

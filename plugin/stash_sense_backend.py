@@ -1194,6 +1194,8 @@ def handle_recommendations(mode, args, sidecar_url):
             "stashbox_data": args.get("stashbox_data", {}),
             "endpoint": args.get("endpoint", ""),
             "stashbox_id": args.get("stashbox_id", ""),
+            "resolved_performer_id": args.get("resolved_performer_id"),
+            "force_create": args.get("force_create", False),
         })
 
     elif mode == "rec_create_tag":
@@ -1312,7 +1314,7 @@ def handle_recommendations(mode, args, sidecar_url):
         return sidecar_post(
             sidecar_url,
             "/recommendations/actions/accept-scene-change",
-            {"rec_id": args.get("rec_id")},
+            {"rec_id": args.get("rec_id"), "resolutions": args.get("resolutions", {})},
             timeout=300,
         )
 

@@ -505,6 +505,105 @@ class TestMergeLocalCandidates:
         assert by_id["local:9"].combined_distance == pytest.approx(0.50)
 
 
+class TestMergeLocalCandidatesUrlCrossCheck:
+    """A catalogue-sourced main candidate (seekfans/pornbox) has no
+    stash_id to link against, but a local performer's own stored `urls`
+    matching that candidate's profile_url/catalogue_url is just as strong
+    a same-person signal -- see merge_local_candidates()'s second pass."""
+
+    def _main_match(self, universal_id, distance, name="Main"):
+        return CandidateMatch(
+            face_index=1, universal_id=universal_id, name=name, combined_distance=distance,
+        )
+
+    def _local_match(self, local_id, distance, name="Local"):
+        return CandidateMatch(
+            face_index=1, universal_id=f"local:{local_id}", name=name, combined_distance=distance,
+        )
+
+    def test_local_url_match_merges_catalogue_candidate_local_wins(self):
+        main = [self._main_match("seekfans:4821", distance=0.45)]
+        local = [self._local_match("7", distance=0.30)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://onlyfans.com/x"]}}
+        performers = {"seekfans:4821": {"profile_url": "https://www.onlyfans.com/x/"}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 1
+        assert merged[0].universal_id == "local:7"
+        assert merged[0].combined_distance == pytest.approx(0.30)
+
+    def test_local_url_match_merges_catalogue_candidate_main_wins(self):
+        main = [self._main_match("seekfans:4821", distance=0.20)]
+        local = [self._local_match("7", distance=0.40)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://onlyfans.com/x"]}}
+        performers = {"seekfans:4821": {"profile_url": "https://onlyfans.com/x"}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 1
+        assert merged[0].universal_id == "seekfans:4821"
+        assert merged[0].combined_distance == pytest.approx(0.20)
+
+    def test_matches_via_catalogue_url_when_no_profile_url(self):
+        main = [self._main_match("pornbox:99", distance=0.45)]
+        local = [self._local_match("7", distance=0.30)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://pornbox.com/model/99"]}}
+        performers = {"pornbox:99": {"profile_url": None, "catalogue_url": "https://pornbox.com/model/99"}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 1
+        assert merged[0].universal_id == "local:7"
+
+    def test_no_url_overlap_keeps_both(self):
+        main = [self._main_match("seekfans:4821", distance=0.45)]
+        local = [self._local_match("7", distance=0.30)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://onlyfans.com/other"]}}
+        performers = {"seekfans:4821": {"profile_url": "https://onlyfans.com/x"}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 2
+        assert {m.universal_id for m in merged} == {"seekfans:4821", "local:7"}
+
+    def test_real_stashbox_candidate_not_url_compared(self):
+        # Real stashbox candidates have no profile_url/catalogue_url in
+        # `performers` at all (see export_json.py) -- even if a local
+        # performer happens to have a matching url on file, this pass must
+        # not touch a "stashbox"-classified universal_id.
+        main = [self._main_match("stashdb.org:uuid-1", distance=0.45)]
+        local = [self._local_match("7", distance=0.30)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://onlyfans.com/x"]}}
+        performers = {"stashdb.org:uuid-1": {"profile_url": "https://onlyfans.com/x"}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 2
+
+    def test_omitting_performers_keeps_prior_behavior(self):
+        # Existing callers that don't pass `performers` at all (matches
+        # today's signature) must be unaffected by this second pass.
+        main = [self._main_match("seekfans:4821", distance=0.45)]
+        local = [self._local_match("7", distance=0.30)]
+        mapping = {"7": {"name": "Local", "stashdb_id": None, "urls": ["https://onlyfans.com/x"]}}
+
+        merged = merge_local_candidates(main, local, mapping)
+
+        assert len(merged) == 2
+
+    def test_stash_id_match_takes_precedence_over_url_pass(self):
+        main = [self._main_match("stashdb.org:uuid-1", distance=0.40)]
+        local = [self._local_match("7", distance=0.25)]
+        mapping = {"7": {"name": "Local", "stashdb_id": "uuid-1", "urls": ["https://onlyfans.com/x"]}}
+        performers = {"stashdb.org:uuid-1": {}}
+
+        merged = merge_local_candidates(main, local, mapping, performers)
+
+        assert len(merged) == 1
+        assert merged[0].universal_id == "local:7"
+
+
 class TestMatchFace:
     def test_main_index_only(self):
         index = _mock_index(keys=[0, 1], distances=[0.2, 0.5])

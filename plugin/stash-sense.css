@@ -674,33 +674,85 @@
 }
 
 .ss-search-results {
-  list-style: none;
-  padding: 0;
   margin: 6px 0 0 0;
-  max-height: 200px;
+  max-height: 400px;
   overflow-y: auto;
 }
 
-.ss-search-result-item {
-  padding: 6px 8px;
-  cursor: pointer;
-  border-radius: 4px;
+.ss-search-loading,
+.ss-search-empty {
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--bs-secondary-color, #888);
+}
+
+/* Performer candidate cards (SS.renderPerformerCandidateCards) -- real
+   cover photos and verifiable external links so a same-name/alias
+   collision is visually obvious instead of two identical-looking text
+   rows (see stash-sense-core.js's own comment on why this replaced a
+   plain search-and-select dropdown). */
+.ss-candidate-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.ss-candidate-card {
+  background: var(--bs-tertiary-bg, #2a2a2a);
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 6px;
+  overflow: hidden;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+}
+
+.ss-candidate-card-image {
+  width: 100%;
+  aspect-ratio: 2 / 3;
+  background: #000;
+}
+
+.ss-candidate-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ss-candidate-card-body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ss-candidate-card-name {
+  font-weight: 600;
   font-size: 13px;
 }
 
-.ss-search-result-item:hover {
-  background: var(--bs-tertiary-bg, #2a2a2a);
+.ss-candidate-card-aliases {
+  font-size: 11px;
+  color: var(--bs-secondary-color, #888);
+  overflow-wrap: break-word;
 }
 
-.ss-search-result-img {
-  width: 30px;
-  height: 40px;
-  border-radius: 2px;
-  object-fit: cover;
-  flex-shrink: 0;
+.ss-candidate-card-links {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.ss-candidate-card-select {
+  margin-top: 4px;
+  width: 100%;
+}
+
+.ss-candidate-create-new {
+  margin-top: 10px;
+  width: 100%;
 }
 
 .ss-search-loading,

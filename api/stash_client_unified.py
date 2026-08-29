@@ -135,6 +135,7 @@ class StashClientUnified:
               image_count
               gallery_count
               image_path
+              urls
               stash_ids {
                 endpoint
                 stash_id
@@ -160,6 +161,7 @@ class StashClientUnified:
             image_count
             gallery_count
             image_path
+            urls
             stash_ids {
               endpoint
               stash_id
@@ -661,6 +663,8 @@ class StashClientUnified:
               name
               disambiguation
               alias_list
+              image_path
+              urls
               stash_ids {
                 endpoint
                 stash_id

@@ -16,6 +16,8 @@ import numpy as np
 
 from usearch.index import Index
 
+from stashbox_utils import classify_universal_id, normalize_url_for_compare
+
 logger = logging.getLogger(__name__)
 
 
@@ -320,6 +322,7 @@ def merge_local_candidates(
     main_matches: list[CandidateMatch],
     local_candidates: list[CandidateMatch],
     local_performers_mapping: dict[str, dict],
+    performers: Optional[dict[str, dict]] = None,
 ) -> list[CandidateMatch]:
     """Merges local-index candidates into the main-index results,
     deduplicating a performer present in *both* databases instead of
@@ -342,9 +345,27 @@ def merge_local_candidates(
     is returned unchanged: never dropped, never penalized, and never
     summed/boosted into a double-counted score -- of the two duplicate
     entries, only the single better-scoring one survives.
+
+    A second pass (only when `performers` -- the universal_id -> info
+    mapping build_matches() reads -- is supplied) catches what stash_id
+    linkage can't: a local performer's own stored `urls` matching a
+    *catalogue*-sourced main candidate's `profile_url`/`catalogue_url`
+    (e.g. a seekfans match whose OnlyFans link is already on file for an
+    already-added local performer -- reported live: the seekfans face
+    embedding surfaced instead of the local entry even though the local
+    performer's own urls already had the same OnlyFans link).
+    Real-stashbox main candidates aren't compared this way -- their own
+    urls aren't in this dataset at all (see export_json.py, which only
+    exports profile_url/catalogue_url for catalogue-shaped ids), and
+    fetching them live per candidate on every match query would be too
+    expensive for a hot path; that case still relies on the stash_id
+    linkage above (kept in sync automatically today by the local
+    performer sync hook, when enabled). Optional purely so an existing
+    caller that doesn't pass `performers` keeps today's behavior.
     """
     main_by_universal_id = {c.universal_id: c for c in main_matches}
     merged: list[CandidateMatch] = list(main_matches)
+    matched_local_ids: set[str] = set()
 
     for local_candidate in local_candidates:
         local_id = local_candidate.universal_id.split(":", 1)[1]  # "local:<pid>" -> "<pid>"
@@ -353,11 +374,44 @@ def merge_local_candidates(
 
         main_entry = main_by_universal_id.get(linked_universal_id) if linked_universal_id else None
         if main_entry is not None:
+            matched_local_ids.add(local_id)
             if local_candidate.combined_distance < main_entry.combined_distance:
                 merged[merged.index(main_entry)] = local_candidate
             # else: main_entry already scored better -- keep it, drop the local duplicate silently
         else:
             merged.append(local_candidate)
+
+    if performers:
+        for local_candidate in local_candidates:
+            local_id = local_candidate.universal_id.split(":", 1)[1]
+            if local_id in matched_local_ids:
+                continue  # already resolved via stash_id above
+            local_urls = {
+                normalize_url_for_compare(u)
+                for u in (local_performers_mapping.get(local_id) or {}).get("urls") or []
+                if u
+            }
+            if not local_urls:
+                continue
+            for candidate in main_matches:
+                if classify_universal_id(candidate.universal_id) != "catalogue":
+                    continue
+                if not any(m is candidate for m in merged):
+                    continue  # already resolved by an earlier local candidate this pass
+                info = performers.get(candidate.universal_id) or {}
+                candidate_urls = {
+                    normalize_url_for_compare(u)
+                    for u in (info.get("profile_url"), info.get("catalogue_url"))
+                    if u
+                }
+                if not (local_urls & candidate_urls):
+                    continue
+                # Same real person surfaced under both identities -- keep
+                # whichever scored better, same convention as the
+                # stash_id-based merge above.
+                loser = candidate if local_candidate.combined_distance < candidate.combined_distance else local_candidate
+                merged = [m for m in merged if m is not loser]
+                break
 
     return merged
 
@@ -418,7 +472,7 @@ def match_face(
         try:
             local_query_result = query_index(embedding, local_index, config)
             local_candidates = fuse_local_results(local_query_result, local_performers_mapping, config)
-            merged = merge_local_candidates(result.matches, local_candidates, local_performers_mapping)
+            merged = merge_local_candidates(result.matches, local_candidates, local_performers_mapping, performers)
             merged.sort(key=lambda c: c.combined_distance)
             result.matches = [c for c in merged if c.combined_distance <= config.max_distance][:config.max_results]
         except Exception as e:

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -731,6 +731,45 @@ class RecommendationsDB:
                 );
 
                 UPDATE schema_version SET version = 17;
+            """)
+
+        if from_version < 18:
+            # Every sprite-tile face on a scene used to share one literal
+            # frame_index=-2 sentinel (see identification_router.py's
+            # _process_sprite_frames, fixed to assign each face its own
+            # unique negative index going forward) -- each row's own
+            # timestamp_sec was always stored correctly, but the shared key
+            # meant only one timestamp per scene was ever resolvable
+            # through the frame_index -> timestamp lookup the matching
+            # pipeline builds, silently losing "jump to frame" data for
+            # every sprite match but the last one written. Reassigns each
+            # existing scene's sprite rows a distinct frame_index (by
+            # insertion order via rowid -- the value only needs to be
+            # unique, nothing reads it as a real position) so already-
+            # cached scenes benefit immediately, with no re-detection.
+            #
+            # Video-frame rows have the same underlying gap (timestamp_sec
+            # was never written for them at all pre-fix) but can't be
+            # fixed here -- reconstructing them needs a live network call
+            # to Stash per scene for its real duration, which a synchronous
+            # schema migration can't do. See backfill_frame_timestamps.py's
+            # run_video_timestamp_backfill_once(), launched once as a
+            # background task at app startup instead (main.py) -- same
+            # underlying math (uniform-interval sampling from num_frames/
+            # start_offset_pct/end_offset_pct, already in scene_signal_cache).
+            conn.executescript("""
+                UPDATE scene_face_embeddings
+                SET frame_index = (
+                    SELECT -2 - (
+                        (SELECT COUNT(*) FROM scene_face_embeddings AS earlier
+                         WHERE earlier.stash_scene_id = scene_face_embeddings.stash_scene_id
+                           AND earlier.is_sprite = 1
+                           AND earlier.id < scene_face_embeddings.id)
+                    )
+                )
+                WHERE is_sprite = 1;
+
+                UPDATE schema_version SET version = 18;
             """)
 
     @contextmanager

@@ -240,3 +240,94 @@ class TestSchemaV14Migration:
             {"frame_index": 0, "bbox": {}, "confidence": 0.9, "yaw": None, "embedding": b"z" * 8},
         ])
         assert db.get_face_embeddings(1)[0]["embedding"] == b"z" * 8
+
+
+class TestSchemaV18Migration:
+    """Every sprite-tile face used to share one frame_index=-2 sentinel per
+    scene (see identification_router.py's _process_sprite_frames) --
+    schema v18 reassigns each existing scene's sprite rows a distinct
+    frame_index automatically on the next startup after updating, so
+    already-cached scenes benefit without a manual backfill run or any
+    re-detection. Video-frame timestamp_sec (the other half of the same
+    underlying bug) isn't fixed here -- see backfill_frame_timestamps.py's
+    own tests, run separately as a background startup task since it needs
+    a live Stash network call a synchronous migration can't make."""
+
+    def test_reassigns_shared_sprite_frame_index_on_migration(self, tmp_path):
+        db_path = tmp_path / "v17.db"
+        # Build via a real RecommendationsDB (current full schema), then
+        # roll schema_version back to 17 and manually insert sprite rows
+        # sharing frame_index=-2 -- simulating a real pre-fix install (a
+        # fresh v18+ install would never produce duplicates itself).
+        RecommendationsDB(str(db_path))
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE schema_version SET version = 17")
+            conn.executemany(
+                "INSERT INTO scene_face_embeddings "
+                "(stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding, is_sprite, timestamp_sec) "
+                "VALUES (?, -2, '{}', 0.9, NULL, ?, 1, ?)",
+                [(1, b"a", 5.0), (1, b"b", 15.0), (1, b"c", 25.0)],
+            )
+            conn.commit()
+
+        RecommendationsDB(str(db_path))  # re-instantiate -- triggers the migration
+
+        with sqlite3.connect(str(db_path)) as conn:
+            version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
+            assert version == SCHEMA_VERSION
+
+            rows = conn.execute(
+                "SELECT frame_index, timestamp_sec FROM scene_face_embeddings "
+                "WHERE is_sprite = 1 ORDER BY id"
+            ).fetchall()
+            indices = [r[0] for r in rows]
+            assert len(set(indices)) == 3, "sprite rows must no longer share one frame_index"
+            assert all(i <= -2 for i in indices)
+            # Each row's own already-correct timestamp must survive untouched.
+            assert {r[1] for r in rows} == {5.0, 15.0, 25.0}
+
+    def test_scenes_handled_independently(self, tmp_path):
+        db_path = tmp_path / "v17.db"
+        RecommendationsDB(str(db_path))
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE schema_version SET version = 17")
+            conn.executemany(
+                "INSERT INTO scene_face_embeddings "
+                "(stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding, is_sprite, timestamp_sec) "
+                "VALUES (?, -2, '{}', 0.9, NULL, ?, 1, ?)",
+                [(1, b"a", 5.0), (1, b"b", 15.0), (2, b"c", 99.0)],
+            )
+            conn.commit()
+
+        RecommendationsDB(str(db_path))
+
+        with sqlite3.connect(str(db_path)) as conn:
+            scene1 = {r[0] for r in conn.execute(
+                "SELECT frame_index FROM scene_face_embeddings WHERE stash_scene_id = 1 AND is_sprite = 1"
+            )}
+            scene2 = [r[0] for r in conn.execute(
+                "SELECT frame_index FROM scene_face_embeddings WHERE stash_scene_id = 2 AND is_sprite = 1"
+            )]
+            assert len(scene1) == 2  # scene 1's two rows got distinct indices
+            assert scene2 == [-2]     # scene 2's single row is untouched/still valid
+
+    def test_video_rows_untouched_by_this_migration(self, tmp_path):
+        db_path = tmp_path / "v17.db"
+        RecommendationsDB(str(db_path))
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("UPDATE schema_version SET version = 17")
+            conn.execute(
+                "INSERT INTO scene_face_embeddings "
+                "(stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding, is_sprite, timestamp_sec) "
+                "VALUES (1, 0, '{}', 0.9, NULL, ?, 0, NULL)",
+                (b"a",),
+            )
+            conn.commit()
+
+        RecommendationsDB(str(db_path))
+
+        with sqlite3.connect(str(db_path)) as conn:
+            row = conn.execute(
+                "SELECT frame_index, timestamp_sec FROM scene_face_embeddings WHERE is_sprite = 0"
+            ).fetchone()
+            assert row == (0, None)

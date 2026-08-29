@@ -1291,6 +1291,7 @@ async def get_recommendation(rec_id: int):
         rec = _build_scene_face_match_group_for_recommendation(db, rec)
         if not rec.details.get("candidates"):
             raise HTTPException(status_code=404, detail="Recommendation not found")
+        await _enrich_scene_face_match_candidates_with_local_links(stash, rec.details["candidates"])
 
     return RecommendationResponse(
         id=rec.id,
@@ -2216,7 +2217,7 @@ async def sync_one_local_performer(request: LocalPerformerSyncOneRequest):
     )
     index.save()
 
-    if status in ("added", "updated", "removed"):
+    if status in ("added", "updated", "urls_updated", "removed"):
         try:
             from resource_manager import get_resource_manager
             get_resource_manager().unload("face_recognition")
@@ -3001,6 +3002,12 @@ class CreatePerformerRequest(BaseModel):
     stashbox_data: dict
     endpoint: str
     stashbox_id: str
+    # User's explicit resolution of a previously-reported ambiguous match
+    # (see PerformerIdentityAmbiguous) -- when set, skip the name/alias
+    # identity check entirely: either link to this specific existing
+    # performer, or (resolved_performer_id unset) force-create a new one.
+    resolved_performer_id: Optional[str] = None
+    force_create: bool = False
 
 
 class CreateTagRequest(BaseModel):
@@ -3054,20 +3061,316 @@ class UpdateSceneRequest(BaseModel):
     studio_id: str | None = None
 
 
-async def _create_performer_from_stashbox(stash, stashbox_data: dict, endpoint: str, stashbox_id: str) -> dict:
-    """Create (or link) a local performer from StashBox data with stash_id link."""
+class PerformerIdentityAmbiguous(Exception):
+    """Raised instead of ever silently linking or creating when a StashBox
+    candidate's name/alias matches one or more local performers with no
+    hard evidence (matching stash_id, or matching profile URL) either way.
+
+    Confirmed live: matching on name/alias alone silently linked a scene's
+    "Olga" (a real, not-yet-local StashBox performer) to an unrelated
+    existing performer whose alias list happened to contain "Olga" -- and
+    corrupted that performer's own stash_ids with Olga's real StashBox id
+    in the process (a single local performer ended up linked to two
+    different real StashBox profiles). See _check_performer_identity's
+    docstring for the full resolution contract."""
+
+    def __init__(self, candidates: list[dict]):
+        self.candidates = candidates
+        super().__init__(f"{len(candidates)} ambiguous local performer candidate(s)")
+
+
+def _normalize_url_for_compare(url: Optional[str]) -> str:
+    """Lowercase, strip scheme, strip a leading www. host label, strip a
+    trailing slash -- for tolerant profile-URL identity matching (e.g.
+    "https://www.onlyfans.com/x" and "onlyfans.com/x/" compare equal).
+    No existing utility in this repo does this: _normalize_endpoint_for_compare
+    below is stash-box-GraphQL-endpoint-specific (strips /graphql, doesn't
+    strip www.); nothing else compares arbitrary profile URLs at all."""
+    if not url:
+        return ""
+    value = str(url).strip().lower().rstrip("/")
+    if value.startswith("https://"):
+        value = value[len("https://"):]
+    elif value.startswith("http://"):
+        value = value[len("http://"):]
+    if value.startswith("www."):
+        value = value[len("www."):]
+    return value
+
+
+async def _fetch_stashbox_performer_urls(endpoint: str, stashbox_id: str) -> list[str]:
+    """Fetch a StashBox performer's own profile URLs directly from that
+    endpoint, for the hard-evidence URL check in _check_performer_identity.
+
+    Genuine (non-catalogue) StashBox-sourced match candidates never carry a
+    profile_url anywhere in the identify pipeline (PerformerMatch only
+    populates catalogue_url/profile_url for category=="catalogue" matches --
+    see recognizer.py). This is a deliberately narrow, on-demand fetch: only
+    called once a name/alias candidate has already been found locally and
+    needs disambiguating, never on every match/identify call. Best-effort:
+    any failure here (no configured connection, network error, etc.) just
+    means this hard-evidence signal is unavailable -- falls through to
+    "ambiguous", never treated as an error."""
+    try:
+        from stashbox_connection_manager import get_connection_manager
+        client = get_connection_manager().get_client(endpoint)
+        if not client:
+            return []
+        performer = await client.get_performer(stashbox_id)
+    except Exception:
+        return []
+    if not performer:
+        return []
+    return [u.get("url") for u in (performer.get("urls") or []) if u.get("url")]
+
+
+async def _check_performer_identity(
+    stash, name: str, endpoint: str, stashbox_id: str, profile_url: Optional[str] = None,
+    is_catalogue: bool = False,
+) -> dict:
+    """Resolve whether `name`/`stashbox_id` corresponds to an existing local
+    performer -- WITHOUT ever trusting a name/alias match alone as grounds
+    to link or skip creating. See PerformerIdentityAmbiguous's docstring for
+    why: single-word/common aliases collide between genuinely different
+    real performers often enough that this already happened live.
+
+    `is_catalogue=True` (a non-stash-box source like seekfans/pornbox --
+    see classify_universal_id's "catalogue" category) skips the stash_id
+    hard-match check and the on-demand stashbox URL fetch entirely: `endpoint`
+    for these is just the source name (e.g. "seekfans"), not a real
+    stash-box GraphQL endpoint, so there's no stash_ids linkage concept and
+    no metadata API to query -- `profile_url`/`catalogue_url` (passed
+    directly by the caller, already on hand from the match itself) are the
+    only signal available.
+
+    Returns exactly one of:
+      {"status": "hard_match", "performer_id", "performer_name", "stash_ids", "urls"} --
+        either already linked to this exact (endpoint, stashbox_id) (in
+        which case `stash_ids` already contains it), or a local performer's
+        own `urls` normalized-match the candidate's profile URL (given
+        directly via `profile_url` for catalogue-sourced candidates, or
+        fetched on demand from the stashbox endpoint itself for genuine
+        StashBox-sourced ones -- see _fetch_stashbox_performer_urls).
+        `stash_ids`/`urls` are the performer's *current* lists either way,
+        so _finalize_hard_match can add this endpoint/stashbox_id and/or
+        the candidate's profile URL without a second fetch or risking a
+        duplicate entry. Safe to use/link without asking.
+      {"status": "no_match"} -- no local performer matches by name or alias
+        at all. Safe to create fresh; nothing to disambiguate.
+      {"status": "ambiguous", "candidates": [...]} -- name/alias match(es)
+        exist but no hard evidence either way. Callers must never auto-apply
+        this -- surface `candidates` for the user to explicitly pick one or
+        choose to create anyway (see PerformerIdentityAmbiguous).
+    """
+    if not is_catalogue:
+        linked = await _find_linked_entity_by_stash_id(stash, "performer", endpoint, stashbox_id)
+        if linked:
+            return {
+                "status": "hard_match", "performer_id": linked["id"], "performer_name": linked.get("name"),
+                "stash_ids": linked.get("stash_ids") or [], "urls": linked.get("urls") or [],
+            }
+
+    performer_name = (name or "").strip()
+    if not performer_name:
+        return {"status": "no_match"}
+
+    local_matches = await stash.search_performers(performer_name, limit=25)
+
+    # Some backends may not include alias hits in search results. Fall back to
+    # a full performer scan for exact name/alias match before deciding there's
+    # no ambiguity.
+    if not any(_performer_matches_name_or_alias(match, performer_name) for match in local_matches):
+        try:
+            all_performers = await stash.get_all_performers()
+            local_matches = [*local_matches, *all_performers]
+        except Exception:
+            pass
+
+    seen_ids: set = set()
+    candidates: list[dict] = []
+    for match in local_matches:
+        if not _performer_matches_name_or_alias(match, performer_name):
+            continue
+        cid = match.get("id")
+        if cid in seen_ids:
+            continue
+        seen_ids.add(cid)
+        candidates.append(match)
+
+    if not candidates:
+        return {"status": "no_match"}
+
+    if profile_url:
+        incoming_urls = [profile_url]
+    elif is_catalogue:
+        incoming_urls = []  # no metadata API to fetch more from for these
+    else:
+        incoming_urls = await _fetch_stashbox_performer_urls(endpoint, stashbox_id)
+    incoming_norm = {_normalize_url_for_compare(u) for u in incoming_urls if u}
+    if incoming_norm:
+        for match in candidates:
+            candidate_norm = {_normalize_url_for_compare(u) for u in (match.get("urls") or []) if u}
+            if incoming_norm & candidate_norm:
+                return {
+                    "status": "hard_match", "performer_id": match["id"], "performer_name": match.get("name"),
+                    "stash_ids": match.get("stash_ids") or [], "urls": match.get("urls") or [],
+                }
+
+    return {
+        "status": "ambiguous",
+        "candidates": [
+            {
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "image_path": c.get("image_path"),
+                "alias_list": c.get("alias_list") or c.get("aliases") or [],
+                "stash_ids": c.get("stash_ids") or [],
+                "urls": c.get("urls") or [],
+            }
+            for c in candidates
+        ],
+    }
+
+
+async def _finalize_hard_match(
+    stash, identity: dict, endpoint: str, stashbox_id: str, profile_url: Optional[str] = None,
+    is_catalogue: bool = False,
+) -> dict:
+    """Given a _check_performer_identity "hard_match" result (or a user's
+    explicit "link to this performer" choice after an ambiguous match --
+    see the three accept/create endpoints), ensure this endpoint/stashbox_id
+    is actually linked on the performer (it already is for the "already
+    linked" sub-case, but not yet for the URL-match or user-chosen
+    sub-cases -- idempotent either way) AND ensure the performer's own
+    `urls` include this candidate's profile URL, so a *future* match
+    against the same identity (a different scene, say) can resolve via the
+    URL hard-evidence check without asking again.
+
+    `profile_url` is passed directly when already known (catalogue-sourced
+    candidates); for a genuine StashBox-sourced one, fetched on demand from
+    the endpoint itself, the same way _check_performer_identity's own URL
+    check does -- `identity` won't carry it unless the caller's own
+    stash.get_performer() lookup happened to include `urls`.
+
+    `is_catalogue=True` skips the stash_ids write entirely -- a catalogue
+    source (seekfans/pornbox/etc) has no real stash-box linkage concept,
+    `endpoint` is just the source name, and stash-box's own dedicated
+    catalogue-create endpoint (stashbox_router.py) never writes stash_ids
+    either; only the urls merge below applies for these.
+
+    Returns the resolved {"id", "name"}."""
+    performer_id = identity["performer_id"]
+
+    if not is_catalogue:
+        current_stash_ids = list(identity.get("stash_ids") or [])
+        if not _stash_id_link_exists(current_stash_ids, endpoint, stashbox_id):
+            current_stash_ids.append({"endpoint": endpoint, "stash_id": stashbox_id})
+            await stash.update_performer(performer_id, stash_ids=current_stash_ids)
+            logger.warning(
+                "Linked existing performer '%s' (ID: %s) to StashBox %s on %s (hard evidence)",
+                identity.get("performer_name"), performer_id, stashbox_id, endpoint,
+            )
+
+    if profile_url:
+        candidate_urls = [profile_url]
+    elif is_catalogue:
+        candidate_urls = []
+    else:
+        candidate_urls = await _fetch_stashbox_performer_urls(endpoint, stashbox_id)
+    if candidate_urls:
+        current_urls = list(identity.get("urls") or [])
+        current_norm = {_normalize_url_for_compare(u) for u in current_urls if u}
+        new_urls = [u for u in candidate_urls if u and _normalize_url_for_compare(u) not in current_norm]
+        if new_urls:
+            await stash.update_performer(performer_id, urls=current_urls + new_urls)
+            logger.warning(
+                "Added %d url(s) to performer '%s' (ID: %s) from StashBox %s on %s",
+                len(new_urls), identity.get("performer_name"), performer_id, stashbox_id, endpoint,
+            )
+
+    return {"id": performer_id, "name": identity.get("performer_name")}
+
+
+async def _create_performer_from_stashbox(
+    stash, stashbox_data: dict, endpoint: str, stashbox_id: str, force_create: bool = False,
+) -> dict:
+    """Create (or link) a local performer from StashBox *or catalogue*
+    (seekfans/pornbox/etc -- see classify_universal_id's "catalogue"
+    category) data.
+
+    `stashbox_data["source"]` being set is what marks this as a catalogue
+    candidate: `endpoint`/`stashbox_id` for these are the source name and
+    its own internal performer id, not a real stash-box connection, so
+    there's no stash_ids linkage or metadata-refetch API to use -- see
+    _check_performer_identity/_finalize_hard_match/_do_create_performer's
+    own `is_catalogue` handling. `stashbox_data["image_url"]`,
+    `["catalogue_url"]`, `["profile_url"]` carry everything needed instead,
+    the same fields stashbox_router.py's dedicated
+    create_performer_from_catalogue endpoint (used by the live Identify
+    modal for these) already relies on.
+
+    Raises PerformerIdentityAmbiguous instead of ever guessing when
+    _check_performer_identity can't find hard evidence either way -- see
+    that function's docstring. force_create=True skips that check entirely
+    (an explicit "create a new one anyway" choice the user already made
+    after seeing the ambiguous candidates -- see /actions/create-performer)."""
     performer_name = (stashbox_data.get("name") or "").strip()
     if not performer_name:
         raise HTTPException(status_code=422, detail="Performer name is required")
 
-    existing = await _link_existing_performer_by_name_or_alias(
-        stash,
-        performer_name,
-        endpoint,
-        stashbox_id,
+    is_catalogue = bool(stashbox_data.get("source"))
+    profile_url = stashbox_data.get("profile_url") or stashbox_data.get("catalogue_url")
+
+    if force_create:
+        return await _do_create_performer(stash, stashbox_data, performer_name, endpoint, stashbox_id, is_catalogue)
+
+    identity = await _check_performer_identity(
+        stash, performer_name, endpoint, stashbox_id, profile_url=profile_url, is_catalogue=is_catalogue,
     )
-    if existing:
-        return existing
+    if identity["status"] == "ambiguous":
+        raise PerformerIdentityAmbiguous(identity["candidates"])
+    if identity["status"] == "hard_match":
+        return await _finalize_hard_match(
+            stash, identity, endpoint, stashbox_id, profile_url=profile_url, is_catalogue=is_catalogue,
+        )
+
+    return await _do_create_performer(stash, stashbox_data, performer_name, endpoint, stashbox_id, is_catalogue)
+
+
+async def _do_create_performer(
+    stash, stashbox_data: dict, performer_name: str, endpoint: str, stashbox_id: str,
+    is_catalogue: bool = False,
+) -> dict:
+    """The actual performer-create mutation, plus the narrow duplicate-name
+    race fallback -- factored out so force_create can skip straight past
+    _check_performer_identity while still sharing this part.
+
+    is_catalogue=True mirrors stashbox_router.py's own
+    create_performer_from_catalogue: no stash_ids (no real linkage to
+    write), image/urls taken directly from stashbox_data instead of a
+    post-create enrichment fetch (there's no metadata API to fetch from
+    for these), and an alias derived from the profile URL's handle, same
+    as that endpoint already does."""
+    if is_catalogue:
+        fields = {"name": performer_name}
+        source = stashbox_data.get("source")
+        if source:
+            fields["disambiguation"] = f"({source.capitalize()})"
+        if stashbox_data.get("country"):
+            fields["country"] = stashbox_data["country"]
+        profile_url = stashbox_data.get("profile_url")
+        catalogue_url = stashbox_data.get("catalogue_url")
+        if profile_url:
+            handle = profile_url.rstrip("/").rsplit("/", 1)[-1]
+            if handle:
+                fields["alias_list"] = [handle]
+        if stashbox_data.get("image_url"):
+            fields["image"] = stashbox_data["image_url"]
+        created = await stash.create_performer(**fields)
+        urls = [u for u in (profile_url, catalogue_url) if u]
+        if urls:
+            await stash.update_performer(created["id"], urls=urls)
+        return created
 
     fields = {"name": performer_name}
     if stashbox_data.get("aliases"):
@@ -3080,14 +3383,20 @@ async def _create_performer_from_stashbox(stash, stashbox_data: dict, endpoint: 
     except RuntimeError as exc:
         if "already exists" not in str(exc).lower():
             raise
-        existing = await _link_existing_performer_by_name_or_alias(
-            stash,
-            performer_name,
-            endpoint,
-            stashbox_id,
+        # Someone/something else created a same-named performer between our
+        # check and this call -- re-check rather than assume it's safe to
+        # link: a duplicate-name race is exactly a name collision, which per
+        # _check_performer_identity's contract still needs hard evidence
+        # (or a user's explicit say-so) before treating it as the same
+        # performer.
+        profile_url = stashbox_data.get("profile_url") or stashbox_data.get("catalogue_url")
+        identity = await _check_performer_identity(
+            stash, performer_name, endpoint, stashbox_id, profile_url=profile_url,
         )
-        if existing:
-            return existing
+        if identity["status"] == "ambiguous":
+            raise PerformerIdentityAmbiguous(identity["candidates"]) from exc
+        if identity["status"] == "hard_match":
+            return await _finalize_hard_match(stash, identity, endpoint, stashbox_id, profile_url=profile_url)
         raise
     await _enrich_performer_after_create(stash, created["id"], stashbox_id, endpoint)
     return created
@@ -3136,44 +3445,6 @@ def _performer_matches_name_or_alias(performer: dict, expected_name: str) -> boo
     return name_norm in alias_set
 
 
-async def _link_existing_performer_by_name_or_alias(
-    stash,
-    performer_name: str,
-    endpoint: str,
-    stashbox_id: str,
-) -> Optional[dict]:
-    """Find and link an existing local performer matching by name/alias."""
-    local_matches = await stash.search_performers(performer_name, limit=25)
-
-    # Some backends may not include alias hits in search results. Fall back to
-    # a full performer scan for exact name/alias match before creating duplicates.
-    if not any(_performer_matches_name_or_alias(match, performer_name) for match in local_matches):
-        try:
-            all_performers = await stash.get_all_performers()
-            local_matches = [*local_matches, *all_performers]
-        except Exception:
-            # If fallback query fails, continue with search results only.
-            pass
-
-    for match in local_matches:
-        if not _performer_matches_name_or_alias(match, performer_name):
-            continue
-        current_stash_ids = list(match.get("stash_ids") or [])
-        if not _stash_id_link_exists(current_stash_ids, endpoint, stashbox_id):
-            current_stash_ids.append({"endpoint": endpoint, "stash_id": stashbox_id})
-            await stash.update_performer(match["id"], stash_ids=current_stash_ids)
-            logger.warning(
-                "Linked existing performer '%s' (ID: %s) to StashBox %s on %s",
-                match.get("name"),
-                match.get("id"),
-                stashbox_id,
-                endpoint,
-            )
-        return {"id": match["id"], "name": match.get("name")}
-
-    return None
-
-
 async def _find_linked_entity_by_stash_id(
     stash,
     entity_type: str,
@@ -3204,6 +3475,7 @@ async def _find_linked_entity_by_stash_id(
                   name
                   disambiguation
                   alias_list
+                  urls
                   stash_ids { endpoint stash_id }
                 }
               }
@@ -3220,6 +3492,7 @@ async def _find_linked_entity_by_stash_id(
             "name": row.get("name"),
             "disambiguation": row.get("disambiguation"),
             "aliases": row.get("alias_list") or [],
+            "urls": row.get("urls") or [],
             "stash_ids": row.get("stash_ids") or [],
         }
 
@@ -3278,6 +3551,57 @@ async def _find_linked_entity_by_stash_id(
         }
 
     raise HTTPException(status_code=400, detail=f"Unknown entity type: {entity_type}")
+
+
+async def _enrich_scene_face_match_candidates_with_local_links(stash, candidates: list[dict]) -> None:
+    """Fills in `local_performer_id` (in place) for scene_face_match
+    candidates that weren't already resolved via the local-performer-index
+    vector search at analysis time -- that path (matching.py's
+    merge_local_candidates) only ever considers a local performer who has a
+    usable custom cover photo, since it works by face-similarity against
+    that photo's own embedding. A real StashDB/TPDB performer who's already
+    added locally but has no (or an unset) cover photo would otherwise
+    surface with only a "View on stashdb.org" link and no hint they already
+    exist locally -- reported live: Renee Rose (local performer id 1504)
+    showed up this way on a scene_face_match recommendation.
+
+    A live stash_id lookup (one findPerformers query per distinct
+    endpoint+stashdb_id needing it, via _find_linked_entity_by_stash_id)
+    catches this instead -- cheap because it only ever runs for the
+    handful of candidates in the single recommendation currently being
+    viewed (GET /recommendations/{rec_id}), never for the whole pending
+    list. Catalogue-sourced candidates (`source` set) are skipped: their
+    `stashdb_id` there is the source's own internal catalogue id, not a
+    real StashBox UUID, so it isn't something Stash's own stash_ids field
+    could ever match against. Best-effort: any failure (no configured
+    connection, network error, etc.) just leaves that candidate's existing
+    stashdb-only link untouched, same as before this enrichment existed."""
+    try:
+        from stashbox_connection_manager import get_connection_manager
+        mgr = get_connection_manager()
+    except Exception:
+        return
+
+    resolved_cache: dict[tuple[str, str], Optional[dict]] = {}
+    for candidate in candidates:
+        if candidate.get("local_performer_id") or candidate.get("source"):
+            continue
+        endpoint_domain = candidate.get("endpoint")
+        stashdb_id = candidate.get("stashdb_id")
+        if not endpoint_domain or not stashdb_id:
+            continue
+        endpoint_url = mgr.get_endpoint_url(endpoint_domain) or endpoint_domain
+        cache_key = (endpoint_url, str(stashdb_id))
+        if cache_key not in resolved_cache:
+            try:
+                resolved_cache[cache_key] = await _find_linked_entity_by_stash_id(
+                    stash, "performer", endpoint_url, stashdb_id,
+                )
+            except Exception:
+                resolved_cache[cache_key] = None
+        linked = resolved_cache[cache_key]
+        if linked and linked.get("id"):
+            candidate["local_performer_id"] = linked["id"]
 
 
 def _tag_matches_name_or_alias(tag: dict, expected_name: str) -> bool:
@@ -3463,11 +3787,33 @@ async def _apply_scene_update(
 
 @router.post("/actions/create-performer")
 async def create_performer_action(request: CreatePerformerRequest):
-    """Create a new local performer from StashBox data."""
+    """Create a new local performer from StashBox data, or apply the user's
+    explicit resolution of a previously-reported ambiguous name/alias match
+    (link to `resolved_performer_id`, or force-create despite the
+    ambiguity) -- see PerformerIdentityAmbiguous."""
     stash = get_stash_client()
-    result = await _create_performer_from_stashbox(
-        stash, request.stashbox_data, request.endpoint, request.stashbox_id
-    )
+    if request.resolved_performer_id:
+        performer = await stash.get_performer(request.resolved_performer_id)
+        identity = {
+            "performer_id": request.resolved_performer_id,
+            "performer_name": (performer or {}).get("name"),
+            "stash_ids": (performer or {}).get("stash_ids") or [],
+            "urls": (performer or {}).get("urls") or [],
+        }
+        profile_url = request.stashbox_data.get("profile_url") or request.stashbox_data.get("catalogue_url")
+        result = await _finalize_hard_match(
+            stash, identity, request.endpoint, request.stashbox_id, profile_url=profile_url,
+            is_catalogue=bool(request.stashbox_data.get("source")),
+        )
+        return {"success": True, "performer": result}
+
+    try:
+        result = await _create_performer_from_stashbox(
+            stash, request.stashbox_data, request.endpoint, request.stashbox_id,
+            force_create=request.force_create,
+        )
+    except PerformerIdentityAmbiguous as exc:
+        return {"success": False, "ambiguous": True, "candidates": exc.candidates}
     return {"success": True, "performer": result}
 
 
@@ -3872,6 +4218,11 @@ async def _accept_all_fingerprint_matches(
 
 class SceneFaceMatchSelection(BaseModel):
     recommendation_id: int
+    # User's explicit resolution of a previously-reported ambiguous match
+    # for this one recommendation (see PerformerIdentityAmbiguous) -- when
+    # set, skip the name/alias identity check for this selection entirely.
+    resolved_performer_id: Optional[str] = None
+    force_create: bool = False
 
 
 class AcceptSceneFaceMatchesRequest(BaseModel):
@@ -3879,11 +4230,13 @@ class AcceptSceneFaceMatchesRequest(BaseModel):
     selections: list[SceneFaceMatchSelection]
 
 
-async def _resolve_scene_face_match_performer_id(stash, rec: Recommendation) -> str:
+async def _resolve_scene_face_match_performer_id(stash, rec: Recommendation, selection: SceneFaceMatchSelection) -> str:
     """Resolve one accepted scene_face_match candidate to a local Stash
-    performer id: use the already-linked local performer directly, or
-    find-or-create from the candidate's stashbox/catalogue identity (reusing
-    the same helper the upstream-performer-review flow uses)."""
+    performer id: use the already-linked local performer directly, apply
+    the user's explicit resolution if this selection already carries one,
+    or find-or-create from the candidate's stashbox/catalogue identity
+    (reusing the same helper the upstream-performer-review flow uses --
+    may raise PerformerIdentityAmbiguous, left to the caller)."""
     details = rec.details or {}
     local_performer_id = details.get("local_performer_id")
     if local_performer_id:
@@ -3906,19 +4259,58 @@ async def _resolve_scene_face_match_performer_id(stash, rec: Recommendation) -> 
     # resolution). Falls back to the bare domain if this Stash instance
     # has no configured connection for it (still usable as a stash_ids
     # value, just not matchable against a real configured endpoint later).
+    # For a catalogue-sourced match (details["source"] set -- e.g.
+    # seekfans/pornbox, see classify_universal_id), this is just the
+    # source's own name, never a real stash-box connection, and never
+    # gets written to stash_ids at all -- see is_catalogue handling below.
     from stashbox_connection_manager import get_connection_manager
     endpoint_url = get_connection_manager().get_endpoint_url(endpoint_domain) or endpoint_domain
 
-    performer = await _create_performer_from_stashbox(stash, {"name": name}, endpoint_url, stashdb_id)
+    is_catalogue = bool(details.get("source"))
+    profile_url = details.get("profile_url") or details.get("catalogue_url")
+
+    if selection.resolved_performer_id:
+        performer = await stash.get_performer(selection.resolved_performer_id)
+        identity = {
+            "performer_id": selection.resolved_performer_id,
+            "performer_name": (performer or {}).get("name"),
+            "stash_ids": (performer or {}).get("stash_ids") or [],
+            "urls": (performer or {}).get("urls") or [],
+        }
+        result = await _finalize_hard_match(
+            stash, identity, endpoint_url, stashdb_id, profile_url=profile_url, is_catalogue=is_catalogue,
+        )
+        return str(result["id"])
+
+    stashbox_data = {
+        "name": name,
+        "source": details.get("source"),
+        "image_url": details.get("image_url"),
+        "catalogue_url": details.get("catalogue_url"),
+        "profile_url": details.get("profile_url"),
+    }
+    performer = await _create_performer_from_stashbox(
+        stash, stashbox_data, endpoint_url, stashdb_id, force_create=selection.force_create,
+    )
     return str(performer["id"])
 
 
-@router.post("/actions/accept-scene-face-matches", response_model=SuccessResponse)
+@router.post("/actions/accept-scene-face-matches")
 async def accept_scene_face_matches(request: AcceptSceneFaceMatchesRequest):
     """Accept one or more identified performers for a scene: adds them to
     the scene, resolves the selected recommendations, and dismisses the
     rest of that scene's still-pending candidates (the scene is now
-    "handled" and should leave the pending queue)."""
+    "handled" and should leave the pending queue).
+
+    If resolving *any* selection turns out ambiguous (see
+    PerformerIdentityAmbiguous) and that selection didn't already carry an
+    explicit resolution, the whole batch is blocked -- nothing is applied,
+    not even the unambiguous selections -- and every ambiguous selection is
+    returned for the caller to resolve (e.g. via a card picker) and
+    resubmit. Blocking the whole batch, not just skipping the ambiguous
+    ones, is deliberate: an accepted recommendation disappears from the
+    pending queue, so silently accepting everything else would hide the
+    unresolved one from view instead of surfacing it."""
     if not request.selections:
         raise HTTPException(status_code=422, detail="No selections provided")
 
@@ -3932,13 +4324,26 @@ async def accept_scene_face_matches(request: AcceptSceneFaceMatchesRequest):
 
     resolved_ids: list[str] = []
     accepted_rec_ids: list[int] = []
+    ambiguous: list[dict] = []
     for selection in request.selections:
         rec = db.get_recommendation(selection.recommendation_id)
         if not rec or rec.status != "pending":
             continue
-        performer_id = await _resolve_scene_face_match_performer_id(stash, rec)
+        try:
+            performer_id = await _resolve_scene_face_match_performer_id(stash, rec, selection)
+        except PerformerIdentityAmbiguous as exc:
+            details = rec.details or {}
+            ambiguous.append({
+                "recommendation_id": rec.id,
+                "name": details.get("name"),
+                "candidates": exc.candidates,
+            })
+            continue
         resolved_ids.append(performer_id)
         accepted_rec_ids.append(rec.id)
+
+    if ambiguous:
+        return {"success": False, "ambiguous": ambiguous}
 
     if not accepted_rec_ids:
         raise HTTPException(status_code=422, detail="No valid pending selections to accept")
@@ -4492,13 +4897,26 @@ async def accept_scene_tag_only_change(request: AcceptSceneTagOnlyChangeRequest)
         )
 
 
-async def _apply_full_scene_recommendation(stash, db, rec) -> dict:
+async def _apply_full_scene_recommendation(stash, db, rec, resolutions: Optional[dict] = None) -> dict:
     """Accept one pending upstream scene recommendation applying ALL change types.
 
     Applies simple field changes (upstream value as default), creates/links
     performers, tags, and studio as needed (with full enrichment), applies
     relational additions, and removes entities that were specifically removed
     upstream. Any local performers/tags not in the removed list are preserved.
+
+    `resolutions` (optional, keyed by stashbox performer id): the user's
+    explicit resolution of a previously-reported ambiguous performer match
+    (see PerformerIdentityAmbiguous) -- {"action": "link", "performer_id":
+    ...} or {"action": "create"}. Added performers are resolved *first*,
+    before anything else in this recommendation is touched: if any remain
+    ambiguous (no resolution supplied), this returns
+    {"ambiguous": [...]} immediately -- no field/tag/studio/scene mutation
+    happens at all for this recommendation, and the recommendation stays
+    pending. Blocking the whole recommendation, not just skipping the
+    ambiguous performer, is deliberate -- see accept_scene_change's
+    docstring. Tag/studio creation keep their existing (unguarded)
+    name-match behavior -- out of scope here, see this module's plan notes.
     """
     current = db.get_recommendation(rec.id)
     if not current or current.status != "pending":
@@ -4513,6 +4931,71 @@ async def _apply_full_scene_recommendation(stash, db, rec) -> dict:
         raise RuntimeError(f"Recommendation {rec.id} missing scene_id/endpoint")
 
     logger.debug("Applying full scene change rec_id=%s scene_id=%s endpoint=%s", rec.id, scene_id, endpoint)
+
+    resolutions = resolutions or {}
+
+    # 0. Performers, resolved *first* and in full before anything else is
+    # touched -- see docstring. Building next_performer_ids happens here
+    # too (rather than after tags, as the numbering below used to have it)
+    # specifically so an ambiguity is detected before any tag/studio/field
+    # mutation for this recommendation has happened.
+    current_performer_ids = set(str(p) for p in (details.get("current_performer_ids") or []))
+    next_performer_ids = set(current_performer_ids)
+    ensured_performers = 0
+
+    performer_changes = details.get("performer_changes") or {}
+    for removed in (performer_changes.get("removed") or []):
+        removed_stashbox_id = str(removed.get("id") or "").strip()
+        if not removed_stashbox_id:
+            continue
+        linked = await _find_linked_entity_by_stash_id(stash, "performer", endpoint, removed_stashbox_id)
+        if linked and linked.get("id"):
+            next_performer_ids.discard(str(linked["id"]))
+
+    ambiguous: list[dict] = []
+    for added in (performer_changes.get("added") or []):
+        local_match_id = str(((added.get("local_match") or {}).get("id") or "")).strip()
+        if not local_match_id:
+            stashbox_id = str(added.get("id") or "").strip()
+            if not stashbox_id:
+                continue
+            linked = await _find_linked_entity_by_stash_id(stash, "performer", endpoint, stashbox_id)
+            if linked and linked.get("id"):
+                local_match_id = str(linked["id"])
+            else:
+                resolution = resolutions.get(stashbox_id)
+                perf_payload = {
+                    "name": added.get("name", ""),
+                    "aliases": added.get("aliases") or [],
+                    "gender": added.get("gender"),
+                }
+                try:
+                    if resolution and resolution.get("action") == "link":
+                        performer = await stash.get_performer(resolution["performer_id"])
+                        identity = {
+                            "performer_id": resolution["performer_id"],
+                            "performer_name": (performer or {}).get("name"),
+                            "stash_ids": (performer or {}).get("stash_ids") or [],
+                            "urls": (performer or {}).get("urls") or [],
+                        }
+                        created = await _finalize_hard_match(stash, identity, endpoint, stashbox_id)
+                    else:
+                        force_create = bool(resolution and resolution.get("action") == "create")
+                        created = await _create_performer_from_stashbox(
+                            stash, perf_payload, endpoint, stashbox_id, force_create=force_create,
+                        )
+                except PerformerIdentityAmbiguous as exc:
+                    ambiguous.append({
+                        "stashbox_id": stashbox_id, "name": added.get("name"), "candidates": exc.candidates,
+                    })
+                    continue
+                local_match_id = str(created.get("id"))
+                ensured_performers += 1
+        if local_match_id:
+            next_performer_ids.add(local_match_id)
+
+    if ambiguous:
+        return {"ambiguous": ambiguous, "rec_id": current.id, "scene_id": scene_id}
 
     def _nullish_to_empty(v) -> str:
         if v is None:
@@ -4571,42 +5054,7 @@ async def _apply_full_scene_recommendation(stash, db, rec) -> dict:
         if local_tag_id:
             next_tag_ids.add(local_tag_id)
 
-    # 3. Performers — build next_performer_ids from current set + add − remove
-    current_performer_ids = set(str(p) for p in (details.get("current_performer_ids") or []))
-    next_performer_ids = set(current_performer_ids)
-    ensured_performers = 0
-
-    performer_changes = details.get("performer_changes") or {}
-    for removed in (performer_changes.get("removed") or []):
-        removed_stashbox_id = str(removed.get("id") or "").strip()
-        if not removed_stashbox_id:
-            continue
-        linked = await _find_linked_entity_by_stash_id(stash, "performer", endpoint, removed_stashbox_id)
-        if linked and linked.get("id"):
-            next_performer_ids.discard(str(linked["id"]))
-
-    for added in (performer_changes.get("added") or []):
-        local_match_id = str(((added.get("local_match") or {}).get("id") or "")).strip()
-        if not local_match_id:
-            stashbox_id = str(added.get("id") or "").strip()
-            if not stashbox_id:
-                continue
-            linked = await _find_linked_entity_by_stash_id(stash, "performer", endpoint, stashbox_id)
-            if linked and linked.get("id"):
-                local_match_id = str(linked["id"])
-            else:
-                perf_payload = {
-                    "name": added.get("name", ""),
-                    "aliases": added.get("aliases") or [],
-                    "gender": added.get("gender"),
-                }
-                created = await _create_performer_from_stashbox(stash, perf_payload, endpoint, stashbox_id)
-                local_match_id = str(created.get("id"))
-                ensured_performers += 1
-        if local_match_id:
-            next_performer_ids.add(local_match_id)
-
-    # 4. Studio — look up or create upstream studio
+    # 3. Studio — look up or create upstream studio
     studio_id: Optional[str] = None
     studio_change = details.get("studio_change")
     if studio_change:
@@ -4658,6 +5106,11 @@ async def _apply_full_scene_recommendation(stash, db, rec) -> dict:
 
 class AcceptSceneChangeRequest(BaseModel):
     rec_id: int
+    # User's explicit resolution of previously-reported ambiguous added
+    # performers for this recommendation (see PerformerIdentityAmbiguous),
+    # keyed by stashbox performer id: {"action": "link", "performer_id":
+    # ...} or {"action": "create"}.
+    resolutions: dict[str, dict] = Field(default_factory=dict)
 
 
 @router.post("/actions/accept-scene-change")
@@ -4667,6 +5120,11 @@ async def accept_scene_change(request: AcceptSceneChangeRequest):
     Creates/links performers, tags, and studio as needed (with full enrichment
     from the stashbox endpoint). Applies removals only for entities specifically
     removed upstream; local-only additions are preserved.
+
+    If any added performer is ambiguous (see _apply_full_scene_recommendation's
+    docstring) and `resolutions` doesn't already resolve it, nothing is
+    applied and {"success": False, "ambiguous": [...]} is returned instead --
+    resubmit with `resolutions` filled in once the caller has resolved them.
     """
     stash = get_stash_client()
     db = get_rec_db()
@@ -4676,7 +5134,9 @@ async def accept_scene_change(request: AcceptSceneChangeRequest):
     scene_id = str((rec.details or {}).get("scene_id") or "?")
     logger.debug("Action: accept-scene-change rec_id=%s scene_id=%s", request.rec_id, scene_id)
     try:
-        result = await _apply_full_scene_recommendation(stash, db, rec)
+        result = await _apply_full_scene_recommendation(stash, db, rec, resolutions=request.resolutions)
+        if "ambiguous" in result:
+            return {"success": False, **result}
         return {"success": True, **result}
     except RuntimeError as e:
         msg = str(e)

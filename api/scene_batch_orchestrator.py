@@ -170,6 +170,7 @@ async def identify_scenes_batched(
                 response = await _identify_scene_compute(
                     spec.request, bundles[spec.scene_id], p.num_frames,
                     p.match_config, p.scene_id_int, p.sprite_extra_results, p.t_start,
+                    sprite_timestamps=p.sprite_timestamps,
                 )
                 yield spec.scene_id, response
             except Exception as e:

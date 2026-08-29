@@ -153,8 +153,15 @@ async def _fetch_one(
             return
 
         fingerprint = _image_fingerprint(image_bytes)
+        current_urls = performer.get("urls") or []
         if index.get_image_hash(performer_id) == fingerprint:
-            await asyncio.to_thread(event_queue.put, ("unchanged", performer_id, position, None))
+            # Cover unchanged, but `urls` may not be -- e.g. right after the
+            # identity-resolution flow in recommendations_router.py writes a
+            # new profile URL onto an existing performer, which doesn't
+            # touch the cover. Payload carries the current urls so the
+            # consumer loop (which owns `index`) can refresh them in place
+            # without a re-embed. See local_performer_index.update_urls().
+            await asyncio.to_thread(event_queue.put, ("unchanged", performer_id, position, current_urls))
             return
 
         stashdb_id = next(
@@ -162,7 +169,10 @@ async def _fetch_one(
              if sid.get("endpoint") == STASHDB_ENDPOINT),
             None,
         )
-        meta = {"name": performer["name"], "stashdb_id": stashdb_id, "image_url": _relative_image_url(image_path)}
+        meta = {
+            "name": performer["name"], "stashdb_id": stashdb_id,
+            "image_url": _relative_image_url(image_path), "urls": performer.get("urls") or [],
+        }
         await asyncio.to_thread(
             event_queue.put, ("needs_embed", performer_id, position, (image_bytes, fingerprint, meta)),
         )
@@ -346,7 +356,8 @@ class LocalPerformerSyncJob(BaseJob):
                 continue
 
             if kind == "unchanged":
-                pass
+                if index.update_urls(performer_id, payload or []):
+                    updated += 1
             elif kind == "fetch_error":
                 errored += 1
             elif kind == "no_image":
@@ -375,6 +386,7 @@ class LocalPerformerSyncJob(BaseJob):
                 index.upsert(
                     performer_id=performer_id, name=meta["name"], stashdb_id=meta["stashdb_id"],
                     image_hash=fingerprint, image_url=meta["image_url"], embedding=embedding,
+                    urls=meta["urls"],
                 )
                 if was_present:
                     updated += 1

@@ -402,6 +402,97 @@ class TestGetRecommendation:
         assert db.get_recommendation(stale_id) is None
 
 
+class TestSceneFaceMatchLocalLinkEnrichment:
+    """GET /recommendations/{rec_id} for scene_face_match: a live stash_id
+    lookup fills in local_performer_id for a candidate the local-index
+    vector search missed (e.g. the local performer has no custom cover
+    photo, so recognizer.py's face-similarity match never considered
+    them, even though they're already linked to this exact stashbox id)."""
+
+    def _seed_scene_face_match(self, db, scene_id, details_overrides):
+        details = {
+            "scene_id": scene_id,
+            "scene_title": "Test Scene",
+            "person_id": 0,
+            "name": "Renee Rose",
+            "endpoint": "stashdb.org",
+            "stashdb_id": "abc-123",
+            "confidence": 0.8,
+            "is_best_match": True,
+        }
+        details.update(details_overrides)
+        return db.create_recommendation(
+            type="scene_face_match",
+            target_type="scene",
+            target_id=f"{scene_id}|0",
+            details=details,
+            confidence=0.8,
+        )
+
+    def test_fills_in_local_performer_id_via_live_stash_id_lookup(self, client, db):
+        rec_id = self._seed_scene_face_match(db, "555", {})
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(return_value={"id": "555"})
+        rec_mod.stash_client._execute = AsyncMock(return_value={
+            "findPerformers": {"performers": [{
+                "id": "1504", "name": "Renee Rose", "disambiguation": None,
+                "alias_list": [], "urls": [], "stash_ids": [],
+            }]}
+        })
+        mock_mgr = Mock()
+        mock_mgr.get_endpoint_url.return_value = "https://stashdb.org/graphql"
+
+        with patch("stashbox_connection_manager.get_connection_manager", return_value=mock_mgr):
+            resp = client.get(f"/recommendations/{rec_id}")
+
+        assert resp.status_code == 200
+        candidates = resp.json()["details"]["candidates"]
+        assert candidates[0]["local_performer_id"] == "1504"
+
+    def test_skips_catalogue_sourced_candidates(self, client, db):
+        rec_id = self._seed_scene_face_match(db, "556", {
+            "endpoint": "seekfans", "stashdb_id": "4821", "source": "seekfans",
+        })
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(return_value={"id": "556"})
+        execute_mock = AsyncMock()
+        rec_mod.stash_client._execute = execute_mock
+
+        resp = client.get(f"/recommendations/{rec_id}")
+
+        assert resp.status_code == 200
+        candidates = resp.json()["details"]["candidates"]
+        assert candidates[0]["local_performer_id"] is None
+        execute_mock.assert_not_called()
+
+    def test_skips_when_already_linked_locally(self, client, db):
+        rec_id = self._seed_scene_face_match(db, "557", {"local_performer_id": "999"})
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(return_value={"id": "557"})
+        execute_mock = AsyncMock()
+        rec_mod.stash_client._execute = execute_mock
+
+        resp = client.get(f"/recommendations/{rec_id}")
+
+        assert resp.status_code == 200
+        candidates = resp.json()["details"]["candidates"]
+        assert candidates[0]["local_performer_id"] == "999"
+        execute_mock.assert_not_called()
+
+    def test_no_match_leaves_local_performer_id_unset(self, client, db):
+        rec_id = self._seed_scene_face_match(db, "558", {})
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(return_value={"id": "558"})
+        rec_mod.stash_client._execute = AsyncMock(return_value={
+            "findPerformers": {"performers": []}
+        })
+        mock_mgr = Mock()
+        mock_mgr.get_endpoint_url.return_value = "https://stashdb.org/graphql"
+
+        with patch("stashbox_connection_manager.get_connection_manager", return_value=mock_mgr):
+            resp = client.get(f"/recommendations/{rec_id}")
+
+        assert resp.status_code == 200
+        candidates = resp.json()["details"]["candidates"]
+        assert candidates[0]["local_performer_id"] is None
+
+
 # ==================== POST /recommendations/{rec_id}/resolve ====================
 
 

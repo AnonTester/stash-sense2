@@ -242,8 +242,12 @@
       return apiCall('rec_link_entity', { entity_type: entityType, entity_id: entityId, endpoint, stashbox_id: stashboxId });
     },
 
-    async createPerformer(stashboxData, endpoint, stashboxId) {
-      return apiCall('rec_create_performer', { stashbox_data: stashboxData, endpoint, stashbox_id: stashboxId });
+    async createPerformer(stashboxData, endpoint, stashboxId, opts = {}) {
+      return apiCall('rec_create_performer', {
+        stashbox_data: stashboxData, endpoint, stashbox_id: stashboxId,
+        resolved_performer_id: opts.resolvedPerformerId,
+        force_create: opts.forceCreate || false,
+      });
     },
 
     async createTag(stashboxData, endpoint, stashboxId) {
@@ -322,10 +326,20 @@
       });
     },
 
-    async acceptSceneFaceMatches(sceneId, recommendationIds) {
+    async acceptSceneFaceMatches(sceneId, recommendationIds, resolutionsByRecId = {}) {
+      // resolutionsByRecId: { [recommendationId]: {resolvedPerformerId?, forceCreate?} } --
+      // the user's explicit choice for a previously-ambiguous selection
+      // (see PerformerIdentityAmbiguous), keyed by recommendation_id.
       return apiCall('rec_accept_scene_face_matches', {
         scene_id: sceneId,
-        selections: recommendationIds.map(id => ({ recommendation_id: id })),
+        selections: recommendationIds.map(id => {
+          const r = resolutionsByRecId[id];
+          return {
+            recommendation_id: id,
+            resolved_performer_id: r ? r.resolvedPerformerId : undefined,
+            force_create: r ? !!r.forceCreate : false,
+          };
+        }),
       });
     },
 
@@ -349,8 +363,11 @@
       return apiCall('rec_accept_scene_tag_only_change', { rec_id: recId });
     },
 
-    async acceptSceneChange(recId) {
-      return apiCall('rec_accept_scene_change', { rec_id: recId });
+    async acceptSceneChange(recId, resolutions = {}) {
+      // resolutions: { [stashboxPerformerId]: {action: "link"|"create", performer_id?} } --
+      // the user's explicit choice for a previously-ambiguous added
+      // performer (see PerformerIdentityAmbiguous).
+      return apiCall('rec_accept_scene_change', { rec_id: recId, resolutions });
     },
 
     async sceneTagOnlyStats() {
@@ -1075,6 +1092,12 @@
             let currentItemStart = 0;
             let progressTicker = null;
             const failureDetails = [];
+            // Ambiguous performer matches (see PerformerIdentityAmbiguous)
+            // are neither a success nor a failure -- they don't stop the
+            // loop over other, independent scenes, but they're collected
+            // here to resolve together in one review pass after the loop,
+            // rather than popping a modal mid-automated-run.
+            const needsReview = [];
 
             const setProgressText = () => {
               const elapsedSec = Math.max(0, Math.floor((Date.now() - currentItemStart) / 1000));
@@ -1091,7 +1114,9 @@
                   RecommendationsAPI.acceptSceneChange(rec.id),
                   new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${Math.ceil(stallTimeoutMs / 1000)}s`)), stallTimeoutMs)),
                 ]);
-                if (response?.action === 'deleted_stale_scene') {
+                if (response?.success === false && response?.ambiguous) {
+                  needsReview.push({ recId: rec.id, ambiguous: response.ambiguous });
+                } else if (response?.action === 'deleted_stale_scene') {
                   cleaned += 1;
                 } else {
                   accepted += 1;
@@ -1110,6 +1135,53 @@
                 avgMsPerItem = avgMsPerItem === 0 ? duration : Math.round((avgMsPerItem * (processed - 1) + duration) / processed);
                 stallTimeoutMs = Math.max(STALL_TIMEOUT_MIN_MS, avgMsPerItem * 8);
                 setProgressText();
+              }
+            }
+
+            if (needsReview.length > 0) {
+              // One combined modal, one card-picker section per ambiguous
+              // performer across every scene that hit one -- keyed by
+              // "recId:stashboxId" so two different scenes' ambiguities
+              // never collide with each other.
+              const flatItems = needsReview.flatMap((r) =>
+                r.ambiguous.map((a) => ({ ...a, _recId: r.recId })));
+              const resolutionMap = await showAmbiguousPerformerModal(
+                flatItems, (item) => `${item._recId}:${item.stashbox_id}`,
+              );
+              if (resolutionMap) {
+                for (const { recId, ambiguous } of needsReview) {
+                  const resolutions = {};
+                  for (const a of ambiguous) {
+                    const choice = resolutionMap.get(`${recId}:${a.stashbox_id}`);
+                    if (choice) {
+                      resolutions[a.stashbox_id] = choice.resolvedPerformerId
+                        ? { action: 'link', performer_id: choice.resolvedPerformerId }
+                        : { action: 'create' };
+                    }
+                  }
+                  try {
+                    const response = await RecommendationsAPI.acceptSceneChange(recId, resolutions);
+                    if (response?.action === 'deleted_stale_scene') {
+                      cleaned += 1;
+                    } else {
+                      accepted += 1;
+                      ensuredPerformers += (response?.ensured_performers_count || 0);
+                      ensuredTags += (response?.ensured_tags_count || 0);
+                    }
+                  } catch (e) {
+                    failed += 1;
+                    const msg = String(e.message || e || 'unknown error');
+                    failureDetails.push(`rec ${recId}: ${msg}`);
+                    console.warn('[Stash Sense] Accept scene change (post-review) failed:', { rec_id: recId, error: msg });
+                  }
+                }
+              } else {
+                // User cancelled -- these stay pending, same as a skip.
+                // Counted as "failed" for the summary text below since
+                // they didn't end up accepted either, even though nothing
+                // actually errored.
+                failed += needsReview.length;
+                failureDetails.push(`${needsReview.length} scene(s) left pending: ambiguous performer match not resolved`);
               }
             }
 
@@ -2938,6 +3010,104 @@
     }
 
     document.addEventListener('keydown', escHandler);
+  }
+
+  // Shows one card-picker (SS.renderPerformerCandidateCards) per ambiguous
+  // performer match (see the sidecar's PerformerIdentityAmbiguous) and
+  // waits for the user to resolve every one of them before continuing --
+  // used by both Face Recommendations' "Accept Selected" and Upstream
+  // Scene Changes' accept, whenever the backend reports an ambiguous
+  // name/alias match instead of silently guessing.
+  //
+  // ambiguousItems: [{name, candidates, ...}] -- any extra fields (e.g.
+  // recommendation_id / stashbox_id) are ignored here and up to the
+  // caller's own `keyOf`.
+  // keyOf(item): a stable key per item, used only to build the returned Map.
+  //
+  // Resolves to a Map<key, {resolvedPerformerId} | {forceCreate: true}>,
+  // or null if the user cancels (nothing should be applied in that case).
+  function showAmbiguousPerformerModal(ambiguousItems, keyOf) {
+    return new Promise((resolve) => {
+      const resolutions = new Map();
+
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
+      const modal = document.createElement('div');
+      modal.style.cssText = 'background:#2a2a2a;border:1px solid #444;border-radius:10px;padding:1.5rem;max-width:700px;width:90%;max-height:85vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);';
+
+      const intro = document.createElement('p');
+      intro.style.cssText = 'font-size:0.95rem;line-height:1.5;margin:0 0 1rem 0;color:#fff;';
+      intro.textContent = `${ambiguousItems.length} performer name${ambiguousItems.length === 1 ? '' : 's'} matched an existing performer's name or alias, but nothing confirms it's actually the same person. Pick the right one below, or create a new performer, for each.`;
+      modal.appendChild(intro);
+
+      const itemsWrap = document.createElement('div');
+      itemsWrap.style.cssText = 'display:flex;flex-direction:column;gap:1.25rem;';
+      modal.appendChild(itemsWrap);
+
+      const confirmBtn = document.createElement('button');
+      confirmBtn.className = 'ss-btn ss-btn-primary';
+      confirmBtn.style.cssText = 'padding:8px 18px;border-radius:6px;font-size:0.9rem;';
+      confirmBtn.textContent = 'Confirm and Continue';
+      confirmBtn.disabled = true;
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'ss-btn ss-btn-secondary';
+      cancelBtn.style.cssText = 'padding:8px 18px;border-radius:6px;font-size:0.9rem;';
+      cancelBtn.textContent = 'Cancel';
+
+      const actions = document.createElement('div');
+      actions.style.cssText = 'display:flex;gap:0.75rem;justify-content:flex-end;margin-top:1.25rem;';
+      actions.appendChild(cancelBtn);
+      actions.appendChild(confirmBtn);
+      modal.appendChild(actions);
+      overlay.appendChild(modal);
+      document.body.appendChild(overlay);
+
+      function checkComplete() {
+        confirmBtn.disabled = resolutions.size < ambiguousItems.length;
+      }
+
+      ambiguousItems.forEach((item) => {
+        const key = keyOf(item);
+        const itemDiv = document.createElement('div');
+        const heading = document.createElement('h4');
+        heading.style.cssText = 'margin:0 0 6px 0;font-size:1rem;';
+        heading.textContent = item.name || 'Unknown';
+        const statusDiv = document.createElement('div');
+        statusDiv.style.cssText = 'font-size:0.85rem;color:var(--bs-secondary-color, #888);margin-top:6px;min-height:1.2em;';
+        const cardsDiv = document.createElement('div');
+        itemDiv.appendChild(heading);
+        itemDiv.appendChild(cardsDiv);
+        itemDiv.appendChild(statusDiv);
+        itemsWrap.appendChild(itemDiv);
+
+        SS.renderPerformerCandidateCards(cardsDiv, item.candidates, {
+          onSelectExisting: (performerId) => {
+            resolutions.set(key, { resolvedPerformerId: performerId });
+            const picked = item.candidates.find((c) => String(c.id) === String(performerId));
+            statusDiv.textContent = `Will link to: ${picked ? picked.name : performerId}`;
+            checkComplete();
+          },
+          onCreateNew: () => {
+            resolutions.set(key, { forceCreate: true });
+            statusDiv.textContent = 'Will create as a new performer.';
+            checkComplete();
+          },
+        });
+      });
+
+      function cleanup(result) {
+        document.removeEventListener('keydown', escHandler);
+        overlay.remove();
+        resolve(result);
+      }
+      cancelBtn.addEventListener('click', () => cleanup(null));
+      confirmBtn.addEventListener('click', () => cleanup(resolutions));
+      overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(null); });
+      const escHandler = (e) => { if (e.key === 'Escape') cleanup(null); };
+      document.addEventListener('keydown', escHandler);
+    });
   }
 
   // ==================== Help System ====================
@@ -4885,14 +5055,29 @@
                 if (perf.gender) {
                   performerPayload.gender = perf.gender;
                 }
-                const result = await RecommendationsAPI.createPerformer(
-                  performerPayload,
-                  endpoint,
-                  perf.id
-                );
+                let result = await RecommendationsAPI.createPerformer(performerPayload, endpoint, perf.id);
+                let wasLinked = false;
+                if (result.success === false && result.ambiguous) {
+                  createBtn.textContent = 'Create';
+                  createBtn.disabled = false;
+                  const resolutionMap = await showAmbiguousPerformerModal(
+                    [{ name: perf.name, candidates: result.candidates }], () => 'only',
+                  );
+                  if (!resolutionMap) return; // cancelled -- leave the Create button as-is
+                  const choice = resolutionMap.get('only');
+                  wasLinked = !!choice.resolvedPerformerId;
+                  createBtn.disabled = true;
+                  createBtn.textContent = 'Creating...';
+                  result = await RecommendationsAPI.createPerformer(performerPayload, endpoint, perf.id, {
+                    resolvedPerformerId: choice.resolvedPerformerId,
+                    forceCreate: !!choice.forceCreate,
+                  });
+                }
                 entityCache.set(cacheKey, result.performer.id);
                 cb.checked = true;
-                createBtn.textContent = `Created (ID: ${result.performer.id})`;
+                createBtn.textContent = wasLinked
+                  ? `Linked: ${result.performer.name || result.performer.id}`
+                  : `Created (ID: ${result.performer.id})`;
                 createBtn.classList.add('ss-btn-success');
                 // Remove the search dropdown
                 const dd = row.querySelector('.ss-entity-search-dropdown');
@@ -5976,7 +6161,20 @@
       acceptBtn.disabled = true;
       acceptBtn.textContent = 'Accepting...';
       try {
-        await RecommendationsAPI.acceptSceneFaceMatches(sceneId, selectedIds);
+        let result = await RecommendationsAPI.acceptSceneFaceMatches(sceneId, selectedIds);
+        if (result.success === false && result.ambiguous) {
+          acceptBtn.textContent = 'Accept Selected';
+          acceptBtn.disabled = false;
+          const resolutionMap = await showAmbiguousPerformerModal(
+            result.ambiguous, (item) => item.recommendation_id,
+          );
+          if (!resolutionMap) return; // user cancelled -- nothing was applied
+          const resolutionsByRecId = {};
+          for (const [recId, choice] of resolutionMap) resolutionsByRecId[recId] = choice;
+          acceptBtn.disabled = true;
+          acceptBtn.textContent = 'Accepting...';
+          result = await RecommendationsAPI.acceptSceneFaceMatches(sceneId, selectedIds, resolutionsByRecId);
+        }
         showSuccessAndReturn(acceptBtn, 'Accepted!');
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;

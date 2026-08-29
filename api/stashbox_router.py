@@ -61,12 +61,18 @@ class SearchPerformersRequest(BaseModel):
     query: str
 
 
+class StashIdResult(BaseModel):
+    endpoint: str
+    stash_id: str
+
+
 class SearchPerformerResult(BaseModel):
     id: str
     name: str
     disambiguation: Optional[str] = None
     alias_list: list[str] = []
     image_path: Optional[str] = None
+    stash_ids: list[StashIdResult] = []
 
 
 class CreatePerformerRequest(BaseModel):
@@ -226,6 +232,7 @@ async def search_stash_performers(request: SearchPerformersRequest):
         findPerformers(filter: $filter) {
             performers {
                 id name disambiguation alias_list image_path
+                stash_ids { endpoint stash_id }
             }
         }
     }

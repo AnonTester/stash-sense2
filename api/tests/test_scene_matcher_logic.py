@@ -1,6 +1,7 @@
 """Tests for scene_matcher.py pure functions - cosine distance and cluster merging."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 # Mock recognizer before importing scene_matcher
@@ -9,7 +10,7 @@ sys.modules['recognizer'] = Mock()
 import numpy as np
 import pytest
 
-from scene_matcher import _cosine_distance, merge_clusters_by_match
+from scene_matcher import _cosine_distance, merge_clusters_by_match, hybrid_matching
 
 
 class TestCosineDistance:
@@ -141,3 +142,82 @@ class TestMergeClusters:
         merged = merge_clusters_by_match(clusters)
 
         assert len(merged) == 1
+
+
+def _resp(m, **overrides):
+    """Minimal stand-in for identification_router._match_to_response.
+    Returns a real PerformerMatchResponse (not a dict/SimpleNamespace):
+    hybrid_matching's cluster component reads attributes straight off
+    aggregate_matches's returned list (never routed through pydantic
+    coercion), while frequency_based_matching's PersonResult(best_match=...)
+    needs an actual PerformerMatchResponse instance -- only a real instance
+    satisfies both."""
+    from identification_router import PerformerMatchResponse
+    return PerformerMatchResponse(
+        stashdb_id=m.stashdb_id, name=m.name,
+        confidence=overrides.get("confidence", 0.0),
+        distance=overrides.get("distance", 0.0),
+        top_timestamps_sec=overrides.get("top_timestamps_sec", []),
+    )
+
+
+def _conf(distance):
+    return max(0.0, 1.0 - distance)
+
+
+def _embedded_result(matches, vector):
+    """Like _make_result, but with a real embedding vector so
+    cluster_faces_by_person's cosine-distance clustering has something
+    real to compare (a bare Mock() would fail the np.mean/dot math)."""
+    return SimpleNamespace(matches=matches, embedding=SimpleNamespace(embedding=np.array(vector)))
+
+
+class TestHybridMatchingFrameTimestamps:
+    """hybrid_matching's cluster component can resolve real
+    top_timestamps_sec (via aggregate_matches, given frame_timestamps) --
+    regression coverage for the "jump to frame" buttons silently going
+    empty once Face Recommendations/Face Identification switched to
+    matching_mode="hybrid" without ever threading frame_timestamps through
+    this function at all."""
+
+    def test_cluster_only_match_gets_real_timestamps(self):
+        # A single performer, two frames close together in embedding
+        # space (so they cluster into one person). Whether
+        # frequency_based_matching also finds them (found_by="both" vs
+        # "cluster") doesn't matter here -- the fix preserves the cluster
+        # component's timestamps in both cases (see combined_scores'
+        # "top_timestamps_sec" key), so this only asserts the observable
+        # result, not which internal branch produced it.
+        match_a = _make_match("uuid-1", 0.10)
+        match_a.name = "Renee Rose"
+        match_b = _make_match("uuid-1", 0.20)
+        match_b.name = "Renee Rose"
+        result_a = _embedded_result([match_a], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([match_b], [0.99, 0.01, 0.0])
+        all_results = [(0, result_a), (1, result_b)]
+        frame_timestamps = {0: 12.5, 1: 18.0}
+
+        persons = hybrid_matching(
+            all_results, recognizer=None,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            frame_timestamps=frame_timestamps,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.stashdb_id == "uuid-1"
+        assert persons[0].best_match.top_timestamps_sec == [12.5, 18.0]
+
+    def test_omitting_frame_timestamps_keeps_prior_behavior(self):
+        match_a = _make_match("uuid-1", 0.10)
+        match_a.name = "Renee Rose"
+        result_a = _embedded_result([match_a], [1.0, 0.0, 0.0])
+
+        persons = hybrid_matching(
+            [(0, result_a)], recognizer=None,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.top_timestamps_sec == []
