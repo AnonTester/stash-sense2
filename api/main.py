@@ -179,6 +179,40 @@ def reload_database(data_dir: Path) -> bool:
         return False
 
 
+def refresh_local_performer_index() -> bool:
+    """Reload just the local performer index on the already-loaded
+    recognizer, in place -- called after a local performer sync (the
+    auto-sync-on-performer-change hook, or the full local_performer_sync
+    job) updates the on-disk local index files.
+
+    Deliberately does NOT go through reload_database()'s
+    unload()+require() -- that tears down and reloads the entire
+    face_recognition resource group (buffalo_l models, the main
+    multi-hundred-thousand-face DB index, *and* the local index), all to
+    pick up a change that only ever touches the small local index.
+    Confirmed live: with the auto-sync hook on, every single performer
+    edit was paying a full model reload on the next identify request --
+    see FaceRecognizer.reload_local_performer_index()'s own docstring.
+
+    No-op (returns False) if face recognition isn't currently loaded --
+    correct, not a missed update: the next real require() builds a fresh
+    recognizer straight from the current on-disk state anyway, local index
+    included.
+    """
+    try:
+        mgr = get_resource_manager()
+    except RuntimeError:
+        logger.warning("ResourceManager not initialized, cannot refresh local performer index")
+        return False
+
+    data = mgr.get_data(FACE_RECOGNITION_RESOURCE)
+    if data is None:
+        return False
+
+    data["recognizer"].reload_local_performer_index()
+    return True
+
+
 async def _idle_checker(resource_mgr: ResourceManager, interval: float = 60.0) -> None:
     """Background task that periodically checks for idle resource groups.
 
@@ -400,7 +434,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.24.0",
+    version="0.25.0",
     lifespan=lifespan,
 )
 

@@ -107,10 +107,12 @@ class TestLocalPerformerSyncJob:
             2: {"name": "Bob", "image_path": "http://stash/performer/2/image"},
         })
         monkeypatch.setattr("jobs.local_performer_sync_job.get_stash_client", lambda: stash)
-        monkeypatch.setattr(
-            "jobs.local_performer_sync_job.get_resource_manager",
-            lambda: MagicMock(), raising=False,
-        )
+        # Refreshes the local index on the already-loaded recognizer in
+        # place rather than unloading the whole face_recognition resource
+        # group (see main.refresh_local_performer_index's own docstring) --
+        # patched here since main.py isn't otherwise involved in this test.
+        mock_refresh = MagicMock(return_value=True)
+        monkeypatch.setattr("main.refresh_local_performer_index", mock_refresh, raising=False)
 
         with _patch_generator(), _patch_load_image(), _patch_http():
             job = LocalPerformerSyncJob()
@@ -121,6 +123,7 @@ class TestLocalPerformerSyncJob:
         index = LocalPerformerIndex(index_path, mapping_path)
         assert len(index) == 2
         assert 1 in index and 2 in index
+        mock_refresh.assert_called_once()
         ctx.set_result_summary.assert_called_once()
         summary = ctx.set_result_summary.call_args[0][0]
         assert "2 added" in summary

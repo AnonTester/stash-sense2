@@ -178,6 +178,28 @@ class ResourceManager:
             if group is not None and group.loaded:
                 group.last_access = time.monotonic()
 
+    def get_data(self, name: str) -> Optional[Any]:
+        """Return a loaded resource group's data without triggering a load.
+
+        Unlike require(), never loads the group and never touches
+        last_access. For callers that only want to act on an
+        already-loaded resource (e.g. refreshing one piece of it in place)
+        and should simply skip that work if nothing is loaded yet -- the
+        next real require() will build everything fresh from disk anyway.
+
+        Args:
+            name: Name of the resource group.
+
+        Returns:
+            The group's data if currently loaded, else None (including if
+            the group name isn't registered at all).
+        """
+        with self._lock:
+            group = self._groups.get(name)
+            if group is None or not group.loaded:
+                return None
+            return group.data
+
     def is_loaded(self, name: str) -> bool:
         """Check if a resource group is currently loaded.
 

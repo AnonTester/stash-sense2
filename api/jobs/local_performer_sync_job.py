@@ -432,13 +432,13 @@ class LocalPerformerSyncJob(BaseJob):
             skipped_no_image, errored, len(index),
         )
 
-        # Force the live recognizer to pick up the updated index on its next
-        # use, same mechanism the database updater uses for main-DB hot-swaps.
-        try:
-            from resource_manager import get_resource_manager
-            get_resource_manager().unload("face_recognition")
-        except (RuntimeError, KeyError):
-            pass  # not initialized / not currently loaded -- nothing to unload
+        # Refresh just the local index on the already-loaded recognizer, in
+        # place -- does NOT unload the whole face_recognition resource
+        # group (buffalo_l models + main DB index), which a local-index-only
+        # sync never touches. See main.py's refresh_local_performer_index()
+        # docstring.
+        from main import refresh_local_performer_index
+        refresh_local_performer_index()
 
         if stopped_early and next_expected < total:
             return json.dumps({"position": next_expected})

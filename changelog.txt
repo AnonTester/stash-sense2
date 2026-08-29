@@ -1,5 +1,31 @@
 ## 2026-08-30
 
+### 0.25.0 (sidecar) / 0.20.1 (plugin)
+- Fix: a local performer sync (the near-real-time auto-sync-on-performer-
+  change hook, or the full/manual Local Performer Sync job) was forcing a
+  full unload+reload of the entire face_recognition resource group --
+  buffalo_l models and the main multi-hundred-thousand-face DB index
+  included -- just to pick up a change that only ever touches the small
+  local performer index. This happened unconditionally on every synced
+  performer, completely independent of the Idle Unload Timeout setting,
+  which is why a model reload kept showing up frequently even with that
+  setting at 0 ("never unload"). New `FaceRecognizer.reload_local_performer_index()`
+  refreshes just the local index in place on the already-loaded
+  recognizer instead.
+- Fix: the live single-frame identify view ("Identify current frame" /
+  "Select to identify") could show "Add to Scene" for a performer already
+  tagged on the scene -- this path never checked the scene's current
+  performers at all (unlike the full-scene Identify view, fixed
+  yesterday). Confirmed live: scene 5525, a performer already added,
+  still showing "Add to Scene" instead of "Already tagged on scene".
+- Fix: the live identify views (image, and single-frame/scene-frame
+  identify) showed a "No match found in database" card for every
+  detected face with no database match, even when other faces in the
+  same result *did* match something -- pure noise in a busy image/frame.
+  Only faces with an actual match now get a card; if nothing detected
+  matched anything at all, a single "No matches found in database" note
+  is shown instead.
+
 ### 0.24.0 (sidecar) / 0.20.0 (plugin)
 - Feature: Face Recommendations gained a "Show Dismissed" toggle on a
   scene's detail view, listing that scene's previously-dismissed candidate

@@ -2301,11 +2301,12 @@ async def sync_one_local_performer(request: LocalPerformerSyncOneRequest):
     index.save()
 
     if status in ("added", "updated", "urls_updated", "removed"):
-        try:
-            from resource_manager import get_resource_manager
-            get_resource_manager().unload("face_recognition")
-        except (RuntimeError, KeyError):
-            pass  # not initialized / not currently loaded -- nothing to unload
+        # Refreshes just the local index in place -- does NOT unload the
+        # whole face_recognition resource group (buffalo_l models + main
+        # DB index), which this single-performer change never touches.
+        # See main.py's refresh_local_performer_index() docstring.
+        from main import refresh_local_performer_index
+        refresh_local_performer_index()
 
     return {"performer_id": request.performer_id, "status": status}
 

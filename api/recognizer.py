@@ -125,6 +125,20 @@ class FaceRecognizer:
         # Stash instance's own performer cover images by the
         # local_performer_sync job, absent until that's run at least once.
         self.local_performer_index = None
+        self._load_local_performer_index()
+
+        # Initialize SQLite database reader for multi-signal data
+        self.db_reader = None
+        if db_config.sqlite_db_path and db_config.sqlite_db_path.exists():
+            print(f"Loading SQLite database from {db_config.sqlite_db_path}...")
+            self.db_reader = PerformerDatabaseReader(str(db_config.sqlite_db_path))
+
+    def _load_local_performer_index(self) -> None:
+        """(Re)loads self.local_performer_index from disk, or leaves/resets
+        it to None if the index files don't exist (e.g. local performer
+        sync has never run). Shared by __init__ and reload_local_performer_index()
+        so the two never drift apart."""
+        db_config = self.db_config
         if db_config.local_faces_json_path and db_config.local_faces_json_path.exists():
             from local_performer_index import LocalPerformerIndex
             print(f"Loading local performer index from {db_config.local_faces_json_path}...")
@@ -133,12 +147,23 @@ class FaceRecognizer:
                 db_config.local_faces_json_path,
             )
             print(f"Local performer index loaded: {len(self.local_performer_index)} performers")
+        else:
+            self.local_performer_index = None
 
-        # Initialize SQLite database reader for multi-signal data
-        self.db_reader = None
-        if db_config.sqlite_db_path and db_config.sqlite_db_path.exists():
-            print(f"Loading SQLite database from {db_config.sqlite_db_path}...")
-            self.db_reader = PerformerDatabaseReader(str(db_config.sqlite_db_path))
+    def reload_local_performer_index(self) -> None:
+        """Reloads just the local performer index from disk, in place --
+        far cheaper than tearing down and reconstructing this whole
+        FaceRecognizer (which also reloads the buffalo_l models and the
+        multi-hundred-thousand-face main DB index, neither of which a
+        local-index-only change touches at all).
+
+        Called after a local performer sync (the auto-sync-on-performer-
+        change hook, or the full local_performer_sync job) updates the
+        on-disk local index files, instead of the previous approach of
+        unloading the entire face_recognition resource group and paying a
+        full reload on the next request -- see main.py's
+        refresh_local_performer_index()."""
+        self._load_local_performer_index()
 
     def _get_performer_info(self, universal_id: str) -> dict:
         """Get performer info from universal ID."""

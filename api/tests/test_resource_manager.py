@@ -515,6 +515,47 @@ class TestIsLoaded:
         assert not mgr.is_loaded("face_data")
 
 
+class TestGetData:
+    """Test the get_data() method -- for callers that want to act on an
+    already-loaded resource (e.g. refreshing one piece of it in place)
+    without triggering a load, unlike require()."""
+
+    def test_none_for_unknown_group(self, mgr):
+        assert mgr.get_data("nonexistent") is None
+
+    def test_none_before_require(self, mgr):
+        mgr.register("face_data", _make_loader(), _make_unloader())
+        assert mgr.get_data("face_data") is None
+
+    def test_does_not_trigger_a_load(self, mgr):
+        loader = _make_loader()
+        mgr.register("face_data", loader, _make_unloader())
+        mgr.get_data("face_data")
+        loader.assert_not_called()
+
+    def test_returns_data_after_require(self, mgr):
+        mgr.register("face_data", _make_loader("my_data"), _make_unloader())
+        mgr.require("face_data")
+        assert mgr.get_data("face_data") == "my_data"
+
+    def test_does_not_reset_last_access(self, mgr):
+        """Unlike require()/touch(), get_data() must not extend the idle
+        window -- a caller peeking at loaded data isn't "using" it the way
+        a real request is."""
+        mgr.register("face_data", _make_loader(), _make_unloader())
+        mgr.require("face_data")
+        access_before = mgr._groups["face_data"].last_access
+        time.sleep(0.01)
+        mgr.get_data("face_data")
+        assert mgr._groups["face_data"].last_access == access_before
+
+    def test_none_after_unload(self, mgr):
+        mgr.register("face_data", _make_loader(), _make_unloader())
+        mgr.require("face_data")
+        mgr.unload("face_data")
+        assert mgr.get_data("face_data") is None
+
+
 # ============================================================================
 # unload() tests (single group)
 # ============================================================================
