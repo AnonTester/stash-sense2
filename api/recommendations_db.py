@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -50,9 +50,24 @@ SCENE_SIGNAL_CACHE_SCHEMA = """
         bbox_json TEXT NOT NULL,
         confidence REAL NOT NULL,
         yaw REAL,
-        embedding BLOB NOT NULL
+        embedding BLOB NOT NULL,
+        is_sprite INTEGER NOT NULL DEFAULT 0,
+        timestamp_sec REAL
     );
     CREATE INDEX IF NOT EXISTS idx_scene_face_emb_scene ON scene_face_embeddings(stash_scene_id);
+
+    -- Presence of a row = this scene's sprite sheet has been successfully
+    -- fetched and run through detection at least once (regardless of how
+    -- many faces were found) -- the marker that lets sprite results be
+    -- cached in scene_face_embeddings (is_sprite=1) the same way video-
+    -- frame results already are. Separate from scene_signal_cache (which
+    -- implies real ffmpeg extraction happened) because sprite processing
+    -- can legitimately run before that (skip_frame_extraction's sprite-
+    -- only identify) -- a scene can have this row without one there.
+    CREATE TABLE IF NOT EXISTS scene_sprite_cache_status (
+        stash_scene_id INTEGER PRIMARY KEY,
+        checked_at TEXT DEFAULT (datetime('now'))
+    );
 
     CREATE TABLE IF NOT EXISTS scene_tattoo_embeddings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -696,6 +711,26 @@ class RecommendationsDB:
                 ALTER TABLE scene_fingerprints ADD COLUMN used_sprite INTEGER NOT NULL DEFAULT 0;
 
                 UPDATE schema_version SET version = 16;
+            """)
+
+        if from_version < 17:
+            # Sprite-tile embeddings used to be recomputed on every single
+            # identify call (detect+embed is real, if smaller-than-video,
+            # cost per call) and thrown away -- now cached the same way
+            # video-frame embeddings already are, so that cost is paid once
+            # per scene, ever. scene_sprite_cache_status distinguishes
+            # "never checked yet" (retry live) from "checked, genuinely zero
+            # sprite faces" (trust the cache) -- see its own comment above.
+            conn.executescript("""
+                ALTER TABLE scene_face_embeddings ADD COLUMN is_sprite INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE scene_face_embeddings ADD COLUMN timestamp_sec REAL;
+
+                CREATE TABLE IF NOT EXISTS scene_sprite_cache_status (
+                    stash_scene_id INTEGER PRIMARY KEY,
+                    checked_at TEXT DEFAULT (datetime('now'))
+                );
+
+                UPDATE schema_version SET version = 17;
             """)
 
     @contextmanager
@@ -1848,6 +1883,7 @@ class RecommendationsDB:
                 deleted += cursor.rowcount
                 conn.execute(f"DELETE FROM scene_signal_cache WHERE stash_scene_id IN ({placeholders})", chunk)
                 conn.execute(f"DELETE FROM scene_face_embeddings WHERE stash_scene_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM scene_sprite_cache_status WHERE stash_scene_id IN ({placeholders})", chunk)
                 conn.execute(f"DELETE FROM scene_tattoo_embeddings WHERE stash_scene_id IN ({placeholders})", chunk)
         return deleted
 
@@ -1901,33 +1937,68 @@ class RecommendationsDB:
                 ),
             )
 
-    def get_face_embeddings(self, stash_scene_id: int) -> list[dict]:
+    def get_face_embeddings(self, stash_scene_id: int, is_sprite: Optional[bool] = None) -> list[dict]:
+        """is_sprite=None returns both video-frame and sprite-tile rows;
+        True/False filters to just one source."""
+        query = "SELECT * FROM scene_face_embeddings WHERE stash_scene_id = ?"
+        params: list = [stash_scene_id]
+        if is_sprite is not None:
+            query += " AND is_sprite = ?"
+            params.append(1 if is_sprite else 0)
         with self._connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM scene_face_embeddings WHERE stash_scene_id = ?",
-                (stash_scene_id,),
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
-    def replace_face_embeddings(self, stash_scene_id: int, faces: list[dict]) -> None:
-        """Clear and bulk-insert cached face detections for a scene.
+    def replace_face_embeddings(self, stash_scene_id: int, faces: list[dict], is_sprite: bool = False) -> None:
+        """Clear and bulk-insert cached face detections for a scene, scoped
+        to one source at a time -- video-frame and sprite-tile results are
+        computed/cached independently (see identification_router.py), so a
+        write for one source must never delete the other's rows.
 
         Each dict: frame_index, bbox (dict), confidence, yaw, embedding
-        (bytes, buffalo_l's single embedding vector).
+        (bytes, buffalo_l's single embedding vector), timestamp_sec
+        (sprite tiles only -- the same "which frame did this come from"
+        role frame_index plays for video, since sprite tiles don't have a
+        meaningful ordinal index of their own).
         """
         with self._connection() as conn:
-            conn.execute("DELETE FROM scene_face_embeddings WHERE stash_scene_id = ?", (stash_scene_id,))
+            conn.execute(
+                "DELETE FROM scene_face_embeddings WHERE stash_scene_id = ? AND is_sprite = ?",
+                (stash_scene_id, 1 if is_sprite else 0),
+            )
             conn.executemany(
                 """
                 INSERT INTO scene_face_embeddings (
-                    stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    stash_scene_id, frame_index, bbox_json, confidence, yaw, embedding, is_sprite, timestamp_sec
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (stash_scene_id, f["frame_index"], json.dumps(f["bbox"]), f["confidence"],
-                     f.get("yaw"), f["embedding"])
+                     f.get("yaw"), f["embedding"], 1 if is_sprite else 0, f.get("timestamp_sec"))
                     for f in faces
                 ],
+            )
+
+    def is_sprite_cache_checked(self, stash_scene_id: int) -> bool:
+        """True once this scene's sprite sheet has been successfully
+        fetched and run through detection at least once (even if zero
+        faces were found) -- see scene_sprite_cache_status's own comment."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM scene_sprite_cache_status WHERE stash_scene_id = ?",
+                (stash_scene_id,),
+            ).fetchone()
+            return row is not None
+
+    def mark_sprite_cache_checked(self, stash_scene_id: int) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO scene_sprite_cache_status (stash_scene_id, checked_at)
+                VALUES (?, datetime('now'))
+                ON CONFLICT(stash_scene_id) DO UPDATE SET checked_at = excluded.checked_at
+                """,
+                (stash_scene_id,),
             )
 
     def get_fingerprints_needing_refresh(self, current_db_version: str) -> list[dict]:

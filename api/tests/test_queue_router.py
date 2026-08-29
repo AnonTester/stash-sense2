@@ -46,6 +46,19 @@ class TestQueueRouter:
         job = client.get(f"/queue/{job_id}").json()
         assert job["cursor"] == "__full__"
 
+    def test_submit_scene_face_match_defaults_to_full_cursor(self, client):
+        # scene_face_match reads stored Face Identification data rather than
+        # computing its own -- that data can go stale for reasons unrelated
+        # to scene.updated_at (a Face Identification re-run, a local
+        # performer added/renamed/merged/removed), so a manual/user-
+        # triggered run must always fully re-check every candidate rather
+        # than only the incrementally-flagged ones.
+        resp = client.post("/queue", json={"type": "scene_face_match", "triggered_by": "user"})
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+        job = client.get(f"/queue/{job_id}").json()
+        assert job["cursor"] == "__full__"
+
     def test_submit_upstream_scene_defaults_to_full_cursor(self, client):
         resp = client.post("/queue", json={"type": "upstream_scene_changes", "triggered_by": "user"})
         assert resp.status_code == 200

@@ -36,7 +36,14 @@ class SubmitJobRequest(BaseModel):
     cursor: Optional[str] = None
 
 
-FORCE_FULL_SCAN_USER_JOB_TYPES = {"scene_fingerprint_match", "upstream_scene_changes"}
+FORCE_FULL_SCAN_USER_JOB_TYPES = {"scene_fingerprint_match", "upstream_scene_changes", "scene_face_match"}
+# scene_face_match reads stored Face Identification data rather than
+# computing its own -- that underlying data can go stale for reasons that
+# have nothing to do with the scene itself changing in Stash (a re-run of
+# Face Identification, a local performer added/renamed/merged/removed),
+# so a manual/user-triggered run should always re-check every performerless
+# scene against current data rather than only the ones incrementally
+# flagged by scene.updated_at, which tracks neither of those.
 
 class SubmitJobResponse(BaseModel):
     job_id: int

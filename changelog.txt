@@ -1,5 +1,27 @@
 ## 2026-08-29
 
+### 0.21.3 (sidecar only)
+- Add: sprite-tile face embeddings are now cached (scene_face_embeddings,
+  is_sprite=1, plus a new scene_sprite_cache_status table) instead of being
+  detected fresh and thrown away on every use_sprite=True identify call --
+  the same treatment video-frame embeddings already had. Detection cost for
+  a scene's sprite sheet is now paid once, ever; confirmed live, a repeat
+  identify call on the same scene showed zero sprite re-detection in the
+  logs, same result. Schema v17.
+- Fix: Refresh Outdated always requests sprite coverage now (previously
+  only preserved a scene's *existing* sprite coverage on refresh, never
+  added it) -- reasonable now that the cost above is one-time, not
+  per-bulk-run.
+- Fix: Face Recommendations' full-scan mode (the Operations/Settings
+  button) now does a real rematch against current performer data for every
+  candidate scene instead of re-reading whatever was stored from a
+  previous, possibly-stale identify pass -- cheap thanks to the sprite/
+  video-frame caching above, since only matching gets redone, not
+  detection. Incremental (scheduled) runs keep the original cheap
+  stored-data-read behavior. Local performer database changes still don't
+  trigger this automatically by themselves -- run the task (scheduled or
+  by hand) to pick them up, same as before.
+
 ### 0.21.2 (sidecar only)
 - Fix: the local performer sync job's progress/ETA display got stuck
   behind the slowest still-in-flight performer instead of reflecting real

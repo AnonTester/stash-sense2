@@ -4,19 +4,27 @@ Extends BaseAnalyzer (not BaseUpstreamAnalyzer) -- like
 scene_fingerprint_match.py, this finds new candidates for scenes rather than
 diffing already-linked entities.
 
-Reads Face Identification's stored per-scene match data
-(scene_fingerprints/scene_fingerprint_matches, see identification_router.py's
-save_scene_fingerprint) instead of re-running detect+embed+match itself --
-that data is already there for any scene Face Identification has covered, so
-recreating it here would just be redundant work against the same underlying
-pipeline. The one thing that data might be missing is sprite-tile detection
-(Face Identification's bulk runs default to no sprites, for cost -- see
-fingerprint_generator.py); since a sprite-only face is exactly the kind of
-thing that turns a performerless scene into a recommendation, this analyzer
-does a small on-demand single-scene top-up (fresh identify, use_sprite=True)
-for exactly the scenes that still need one, which also upgrades that scene's
-stored data for next time (via the same save_scene_fingerprint path) --
-after the first pass over a given scene, subsequent runs are a pure DB read.
+Two different costs depending on incremental vs. full (see run()'s own
+scan-scope logic for how each gets triggered):
+
+- Incremental (scheduled): a pure DB read against Face Identification's
+  stored per-scene match data (scene_fingerprints/scene_fingerprint_matches,
+  see identification_router.py's save_scene_fingerprint) for any scene that
+  already has sprite coverage -- cheapest possible, matching the low-cost
+  expectation for a routine automatic run. A scene without sprite coverage
+  yet gets a one-off top-up identify (use_sprite=True) so it isn't left
+  permanently behind on that.
+- Full (manual button, or a forced rebuild): every candidate scene gets a
+  fresh rematch via identify_scenes_batched (use_cache=True, use_sprite=True)
+  regardless of what's already stored. This is no longer expensive the way
+  a full detect+embed+match pass would be -- video-frame *and* sprite-tile
+  embeddings are both cached now (scene_face_embeddings, see
+  identification_router.py), so a rematch only redoes the actual
+  DB-dependent matching step, always against whatever the local performer
+  index and main database currently contain. This is *not* triggered
+  automatically by local performer DB changes -- those are cheap to
+  rematch against precisely because nothing here needs to know they
+  happened; running this task (scheduled or by hand) is what picks them up.
 """
 
 import logging
@@ -132,7 +140,9 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         )
 
         if not scenes_to_scan:
-            if latest_updated:
+            # Don't advance past scenes skipped for missing duration --
+            # see the fuller explanation below, same reasoning applies here.
+            if latest_updated and not skipped_no_duration:
                 self.rec_db.set_watermark(watermark_key, last_stash_updated_at=latest_updated)
             self.update_progress(0, 0)
             return AnalysisResult(items_processed=0, recommendations_created=0)
@@ -145,11 +155,18 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
         scene_titles = {str(scene["id"]): scene.get("title") or f"Scene {scene['id']}" for scene in scenes_to_scan}
 
-        # Partition: scenes whose stored data already has sprite coverage
-        # are a pure DB read (fast); everything else needs a small on-demand
-        # top-up identify (fresh sprite pass, cached video-frame detection).
+        # incremental: a scene with sprite coverage already stored is a pure
+        # DB read (fast, no identify call at all) -- everything else (full
+        # scans always; incremental scans only for scenes still missing
+        # sprite coverage) goes through identify_scenes_batched. This is a
+        # real rematch, not a re-read: use_cache=True skips ffmpeg/detection
+        # entirely (both video-frame and sprite-tile embeddings are cached
+        # -- see identification_router.py), so it only redoes matching, but
+        # it does so fresh, against whatever the local performer index and
+        # main database currently contain -- which is the whole point of a
+        # full scan (see module docstring).
         stored_scenes: list[tuple[str, dict]] = []  # (scene_id, fingerprint row)
-        topup_specs = []
+        rematch_specs = []
         for scene in scenes_to_scan:
             scene_id = str(scene["id"])
             fp = self.rec_db.get_scene_fingerprint(int(scene_id))
@@ -158,11 +175,11 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                 processed += 1
                 self.update_progress(processed, created)
                 continue
-            if fp.get("used_sprite"):
+            if incremental and fp.get("used_sprite"):
                 stored_scenes.append((scene_id, fp))
                 continue
             file_info = (scene.get("files") or [{}])[0]
-            topup_specs.append(SceneBatchSpec(
+            rematch_specs.append(SceneBatchSpec(
                 scene_id=scene_id,
                 width=file_info.get("width"),
                 height=file_info.get("height"),
@@ -216,12 +233,12 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         # Re-checking before every scene reloads if evicted and resets the
         # idle timer so it doesn't happen again for the rest of a long scan.
         async for scene_id, result in identify_scenes_batched(
-            topup_specs, is_stop_requested=self.is_stop_requested, before_scene=require_db_available,
+            rematch_specs, is_stop_requested=self.is_stop_requested, before_scene=require_db_available,
         ):
             scene_title = scene_titles[scene_id]
 
             if isinstance(result, Exception):
-                logger.warning("[scene_face_match] Sprite top-up failed for scene %s: %s", scene_id, result)
+                logger.warning("[scene_face_match] Rematch failed for scene %s: %s", scene_id, result)
                 errors.append(f"scene {scene_id}: {result}")
                 processed += 1
                 self.update_progress(processed, created)
@@ -259,16 +276,30 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
         logger.warning(
             "[scene_face_match] Complete: %d matches found from %d/%d scenes scanned "
-            "(%d from stored data, %d sprite top-ups, %d skipped -- no Face Identification data)",
+            "(%d from stored data, %d rematched, %d skipped -- no Face Identification data)",
             created, processed, len(scenes_to_scan),
-            len(stored_scenes), len(topup_specs), skipped_no_data,
+            len(stored_scenes), len(rematch_specs), skipped_no_data,
         )
 
-        # Only advance the watermark past a fully-completed sweep -- mirrors
-        # scene_fingerprint_match, so an interrupted run resumes the same
-        # incremental window next time rather than silently skipping scenes
-        # it never actually reached.
-        if latest_updated and not self.is_stop_requested():
+        # Only advance the watermark past a fully-completed sweep with
+        # nothing left unresolved -- mirrors scene_fingerprint_match's
+        # stop-requested guard, extended to cover every other reason a
+        # candidate scene can come away without a real answer. Confirmed
+        # live: candidates skipped for "no completed Face Identification
+        # data yet" still advanced the watermark past their own updated_at
+        # (this scan's own `updated_after` filter is GREATER_THAN), so they
+        # would *never* have been reconsidered again by a future
+        # incremental run even once Face Identification later covered them
+        # -- only an unrelated later edit to that exact scene in Stash
+        # would have brought it back into view. Leaving the watermark where
+        # it was instead means the same (cheap -- create_recommendation's
+        # UNIQUE constraint already no-ops on scenes it already covered)
+        # candidate set gets re-scanned next time, self-correcting once
+        # whatever blocked it resolves.
+        if (
+            latest_updated and not self.is_stop_requested()
+            and not skipped_no_duration and not skipped_no_data and not errors
+        ):
             self.rec_db.set_watermark(watermark_key, last_stash_updated_at=latest_updated)
 
         return AnalysisResult(

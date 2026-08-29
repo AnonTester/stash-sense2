@@ -135,13 +135,16 @@ def _batched_results(pairs):
     return _gen
 
 
-class TestUseSpritePreservation:
-    """A bulk run defaults to use_sprite=False (real added cost), but must
-    preserve sprite coverage a scene already has (e.g. from Face
-    Recommendations' own on-demand top-up) rather than silently
-    downgrading it on a routine refresh."""
+class TestUseSpriteAlwaysRequested:
+    """Sprite-tile embeddings are now cached the same way video-frame
+    embeddings already are (scene_face_embeddings, is_sprite=1 -- see
+    identification_router.py's scene_sprite_cache_status), so requesting
+    them costs real detection time only the first time for a given scene,
+    then nothing on every call after. A bulk run always requests it now --
+    missing scenes, scenes refreshed for being outdated, and scenes that
+    already had sprite coverage all get (or keep) it."""
 
-    async def test_missing_scene_defaults_use_sprite_false(self):
+    async def test_missing_scene_requests_use_sprite(self):
         gen, stash, rec_db = _generator()
         _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
         stash.get_scenes_for_fingerprinting = AsyncMock(
@@ -157,9 +160,9 @@ class TestUseSpritePreservation:
         with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
             [p async for p in gen.generate_all(batch_size=100)]
 
-        assert captured_specs[0].request.use_sprite is False
+        assert captured_specs[0].request.use_sprite is True
 
-    async def test_refresh_preserves_existing_sprite_coverage(self):
+    async def test_refresh_of_scene_with_existing_sprite_coverage_requests_use_sprite(self):
         gen, stash, rec_db = _generator()
         _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
         stash.get_scenes_for_fingerprinting = AsyncMock(
@@ -179,7 +182,7 @@ class TestUseSpritePreservation:
 
         assert captured_specs[0].request.use_sprite is True
 
-    async def test_refresh_without_prior_sprite_coverage_stays_false(self):
+    async def test_refresh_of_scene_without_prior_sprite_coverage_requests_use_sprite(self):
         gen, stash, rec_db = _generator()
         _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
         stash.get_scenes_for_fingerprinting = AsyncMock(
@@ -197,7 +200,7 @@ class TestUseSpritePreservation:
         with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
             [p async for p in gen.generate_all(batch_size=100, refresh_outdated=True)]
 
-        assert captured_specs[0].request.use_sprite is False
+        assert captured_specs[0].request.use_sprite is True
 
 
 class TestGenerateAllBatchedLoop:

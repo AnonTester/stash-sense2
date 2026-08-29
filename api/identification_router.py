@@ -47,6 +47,8 @@ from recommendations_router import (
     save_scene_signal_cache,
     save_face_signal_cache,
     load_face_signal_cache,
+    is_sprite_cache_checked,
+    mark_sprite_cache_checked,
 )
 from database_updater import UpdateStatus
 
@@ -796,30 +798,47 @@ def _cluster_and_match(
     return persons
 
 
+def _reconstruct_from_cached_faces(
+    cached_faces: list[dict], match_config: "MatchingConfig",
+) -> list[tuple[int, RecognitionResult]]:
+    """Rebuild (frame_index, RecognitionResult) tuples from cached
+    scene_face_embeddings rows -- shared by the video-frame cache-hit path
+    (_identify_scene_from_cache) and the sprite-tile cache-hit path (see
+    _prepare_scene_identify), since both reconstruct the identical shape
+    from the same table, just filtered to a different is_sprite value."""
+    results: list[tuple[int, RecognitionResult]] = []
+    for row in cached_faces:
+        bbox = json.loads(row["bbox_json"])
+        face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
+        embedding = FaceEmbedding(embedding=np.frombuffer(row["embedding"], dtype=np.float32))
+        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
+        results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
+    return results
+
+
 async def _process_sprite_frames(
     base_url: str, scene_id: str, api_key: str,
     min_face_size: int, min_face_confidence: float, match_config: "MatchingConfig",
     t_start: float,
-) -> list[tuple[int, RecognitionResult]]:
+) -> Optional[tuple[list[tuple[int, RecognitionResult]], list[dict]]]:
     """Fetch the scene's sprite/VTT sheet, crop each tile, and run the same
     detect -> batch-embed -> match pipeline used for ffmpeg frames and the
     screenshot. Tagged with frame_index=-2 (mirroring the -1 sentinel used
-    for screenshot faces), though -- unlike v1's implementation of this
-    feature -- nothing here persists into recommendations_db.py's
-    scene_face_embeddings cache: that table's write path is already
-    disabled for the buffalo_l migration (see _identify_scene_from_cache's
-    docstring), so sprite results are recomputed on every call rather than
-    cached, consistent with video-frame results' current (also uncached)
-    behavior in v2.
+    for screenshot faces).
 
-    Detection runs per-tile, not once on the whole composite sheet: the
-    detector resizes its input to a fixed internal resolution, so stitching
-    many small tiles into one large image would shrink each already-small
-    face (a sprite tile is ~160x90px) well below what's reliably
-    detectable.
+    Returns (results, cache_rows) -- cache_rows are what the caller should
+    persist via save_face_signal_cache(..., is_sprite=True) plus
+    mark_sprite_cache_checked(), so this detection cost (real, if smaller
+    than a full video pass) is paid once per scene rather than on every
+    identify call, the same way video-frame results already are cached.
 
-    Returns an empty list if the sheet couldn't be fetched (e.g. Stash
-    hasn't generated one for this scene yet) or no usable faces were found.
+    Returns None (not a cache-worthy result) if the sprite sheet itself
+    couldn't be fetched (e.g. Stash hasn't generated one for this scene
+    yet) -- that's a transient "not ready", not "checked, no faces", and
+    must not be marked as checked or a scene whose sprite gets generated
+    later would be stuck looking sprite-less forever. An empty ([], [])
+    IS cache-worthy: the sheet fetched fine and detection genuinely found
+    nothing.
     """
     try:
         # Stash's REST route for sprite/vtt files is keyed by the file
@@ -839,17 +858,17 @@ async def _process_sprite_frames(
 
         if not sprite_url or not vtt_url:
             print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite: scene has no sprite/vtt paths yet")
-            return []
+            return None
 
         sprite_frames = await fetch_sprite_from_stash(
             sprite_url, vtt_url, api_key, max_frames=face_config.SPRITE_MAX_FRAMES,
         )
     except Exception as e:
         print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite fetch failed (scene may have no sprite generated yet): {e}")
-        return []
+        return None
 
     if not sprite_frames:
-        return []
+        return None
 
     detected: list[tuple[float, "DetectedFace", "np.ndarray"]] = []
     async with _gpu_compute_lock():
@@ -865,7 +884,7 @@ async def _process_sprite_frames(
 
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Sprite: {len(sprite_frames)} tiles, {len(detected)} usable faces")
     if not detected:
-        return []
+        return [], []
 
     # get_embeddings_batch is pure Python (reads embeddings buffalo_l
     # already computed during detect_faces_parallel above), no separate GPU
@@ -873,11 +892,20 @@ async def _process_sprite_frames(
     embeddings = _recognizer.generator.get_embeddings_batch([face for _, face, _ in detected])
 
     extra_results: list[tuple[int, RecognitionResult]] = []
-    for (_, face, tile_image), embedding in zip(detected, embeddings):
+    cache_rows: list[dict] = []
+    for (timestamp, face, tile_image), embedding in zip(detected, embeddings):
         matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=tile_image)
         extra_results.append((-2, RecognitionResult(face=face, matches=matches, embedding=embedding)))
+        cache_rows.append({
+            "frame_index": -2,
+            "bbox": face.bbox,
+            "confidence": face.confidence,
+            "yaw": face.yaw,
+            "embedding": np.asarray(embedding.embedding, dtype=np.float32).tobytes(),
+            "timestamp_sec": timestamp,
+        })
 
-    return extra_results
+    return extra_results, cache_rows
 
 
 async def _identify_scene_from_cache(
@@ -895,10 +923,12 @@ async def _identify_scene_from_cache(
     deliberately doesn't check db_version, so a stale-version scene still
     hits this path and only redoes matching, not detection.
 
-    `extra_results` (optional) are results computed by the caller outside
-    the cache -- currently just freshly-fetched sprite results, since
-    sprite detection isn't cached at all in v2 (see _process_sprite_frames)
-    -- concatenated in before clustering runs.
+    `extra_results` (optional) are results the caller resolved outside this
+    function's own cache read -- sprite results, which live in the same
+    scene_face_embeddings table (is_sprite=1) but are read/decided by the
+    caller (_prepare_scene_identify) since whether to trust a cached sprite
+    result or fetch fresh depends on scene_sprite_cache_status, a check
+    that's irrelevant here -- concatenated in before clustering runs.
     """
     scene_id_int = int(request.scene_id)
 
@@ -909,22 +939,16 @@ async def _identify_scene_from_cache(
     )
 
     _set_stage(request.scene_id, "cache_check")
-    cached_faces = load_face_signal_cache(scene_id_int)
+    # is_sprite=False: sprite rows are this function's caller's concern
+    # (via extra_results) -- see docstring above.
+    cached_faces = load_face_signal_cache(scene_id_int, is_sprite=False)
     # Empty is a legitimate cached result here (this scene genuinely has no
     # detectable faces), not a cache miss -- the caller already confirmed
     # cache_meta exists and is param-compatible before calling this
     # function, and scene_signal_cache/scene_face_embeddings are always
     # written together (see _identify_scene_compute), so a scene can't have
     # one without the other.
-    all_results: list[tuple[int, RecognitionResult]] = []
-    for row in cached_faces:
-        bbox = json.loads(row["bbox_json"])
-        face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
-        embedding = FaceEmbedding(
-            embedding=np.frombuffer(row["embedding"], dtype=np.float32),
-        )
-        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
-        all_results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
+    all_results = _reconstruct_from_cached_faces(cached_faces, match_config)
     if extra_results:
         all_results.extend(extra_results)
 
@@ -1418,20 +1442,33 @@ async def _prepare_scene_identify(
 
     # Sprite results are resolved once, up front, so they're available
     # regardless of which video-frame path runs after this (cache fast-path /
-    # full pipeline / skipped entirely via skip_frame_extraction). Unlike
-    # v1's implementation of this feature, nothing here is cached (see
-    # _process_sprite_frames's docstring) -- every use_sprite=True call
-    # redoes sprite fetch+detect+embed, consistent with video-frame
-    # results' current (also uncached) behavior in v2.
+    # full pipeline / skipped entirely via skip_frame_extraction). Cached
+    # the same way video-frame results already are (scene_face_embeddings,
+    # is_sprite=1) -- once a scene's sprite sheet has been checked
+    # (scene_sprite_cache_status), every later use_sprite=True call reuses
+    # those embeddings and only redoes matching, never re-fetching/
+    # re-detecting the sprite sheet itself.
     sprite_extra_results: list[tuple[int, RecognitionResult]] = []
     if request.use_sprite:
         _set_stage(request.scene_id, "analyzing_sprite")
-        sprite_extra_results = await _process_sprite_frames(
-            base_url, request.scene_id, api_key,
-            min_face_size=request.min_face_size,
-            min_face_confidence=request.min_face_confidence,
-            match_config=match_config, t_start=t_start,
-        )
+        if is_sprite_cache_checked(scene_id_int):
+            cached_sprite_faces = load_face_signal_cache(scene_id_int, is_sprite=True)
+            sprite_extra_results = _reconstruct_from_cached_faces(cached_sprite_faces, match_config)
+        else:
+            sprite_result = await _process_sprite_frames(
+                base_url, request.scene_id, api_key,
+                min_face_size=request.min_face_size,
+                min_face_confidence=request.min_face_confidence,
+                match_config=match_config, t_start=t_start,
+            )
+            if sprite_result is not None:
+                sprite_extra_results, sprite_cache_rows = sprite_result
+                if sprite_cache_rows:
+                    save_face_signal_cache(scene_id_int, sprite_cache_rows, is_sprite=True)
+                mark_sprite_cache_checked(scene_id_int)
+            # sprite_result is None (sheet not available yet) -- leave
+            # sprite_extra_results empty for this call without marking as
+            # checked, so a future call retries once the sheet exists.
 
     if request.skip_frame_extraction:
         # User declined to fingerprint an unfingerprinted scene -- identify

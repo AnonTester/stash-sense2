@@ -107,7 +107,7 @@ Two components talking to one Stash instance:
 
 **Two databases:**
 - `performers.db` — Read-only, distributed via GitHub Releases on `AnonTester/stash-sense-data`. Face metadata, stash-box IDs, usearch ANN indices (buffalo_l: one 512-dim embedding per face). Built and published by a **separate, private** repo — `stash-sense-data-gen` — which crawls stash-box endpoints, embeds new/changed faces, and cuts a dated release (full + delta zips) roughly biweekly via cron. This repo's `database_updater.py` is what checks that release repo for updates; it has no involvement in producing them. See `stash-sense-data-gen`'s own `CLAUDE.md` for that pipeline's deployment/scheduling/publishing details — don't duplicate that documentation here.
-- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, scene fingerprints (full per-person candidate match list, not just a best-match summary — see `scene_fingerprint_matches`). Schema version 16 (`recommendations_db.py`). Survives face DB updates.
+- `stash_sense.db` — Read-write, user-local. Recommendations, watermarks, upstream snapshots, scene fingerprints (full per-person candidate match list, not just a best-match summary — see `scene_fingerprint_matches`), and the scene face-embedding cache (see "Face identification caching" below). Schema version 17 (`recommendations_db.py`). Survives face DB updates.
 
 **Startup sequence (`main.py`):** Hardware detection → model manager init → ResourceManager registration → recommendations DB init → settings system → StashBox connection manager → queue manager start. Face recognition eager-loads in the background right after settings init (a non-blocking `asyncio.create_task`, not gated on any request) — `/health`'s `face_recognition_loading` flag covers the loading-in-progress window; a request arriving mid-load just waits on that same in-flight load. Only the *unload* side stays lazy, governed by `idle_unload_minutes`.
 
@@ -116,8 +116,40 @@ Two components talking to one Stash instance:
 ### Face Recognition (eager-loaded at startup, lazy-unloaded)
 3-phase batch pipeline in `recognizer.py`, using InsightFace's `buffalo_l` bundle throughout (SCRFD-10GF detection + ResNet50@WebFace600K recognition — a single model producing one embedding per face, not the legacy dual FaceNet512+ArcFace pipeline): extract frames (ffmpeg, up to 8 concurrent) → detect faces (pooled across a small set of warm generators) → batch embed + match against the usearch index (`matching.py`). `resource_manager.py` manages the eager load / idle-timeout unload.
 
+### Face identification caching — three layers, and what each Operations task actually does
+
+Written up in full after repeated confusion mid-session about what gets recomputed vs. reused across the identification-related Operations tasks — verified against the real code path-by-path, not inferred. **The expensive part is ffmpeg extraction + face detection + embedding. That part is cached forever per scene the first time it succeeds, and never needs to happen again for that scene.** Matching detected faces against the performer database, by contrast, is a cheap usearch vector query and gets redone fresh on every identify call that isn't served straight from stored match results.
+
+**Layer 1 — video-frame detection+embedding cache** (`scene_signal_cache` + `scene_face_embeddings` where `is_sprite=0`): written once per scene by the first successful full ffmpeg pass, keyed by extraction params (`num_frames`, `min_face_size`, etc. — `is_scene_cache_compatible()`). A later identify call with matching params and `use_cache=True` (the default) skips ffmpeg + detection + embedding entirely and reconstructs `RecognitionResult`s straight from the stored embeddings (`_identify_scene_from_cache()` in `identification_router.py`) — deliberately does **not** check `db_version`, so a main-database version bump never forces detection to be redone, only matching.
+
+**Layer 2 — sprite-tile detection+embedding cache** (`scene_face_embeddings` where `is_sprite=1`, presence-checked via `scene_sprite_cache_status`): same idea. Sprite tiles (Stash's own scrubber-bar preview sheet) are a real, if smaller, detection cost that used to be paid on *every* `use_sprite=True` call and thrown away; now cached the same way as layer 1. `scene_sprite_cache_status` distinguishes "never successfully checked yet" (retry live) from "checked, genuinely zero faces" (trust the empty cache) — row presence there, not `scene_face_embeddings` row count, since the latter is ambiguous between those two cases on its own.
+
+**Layer 3 — match-results cache** (`scene_fingerprints` + `scene_fingerprint_matches`): the *DB-dependent* output — which performers matched, at what confidence — computed from layers 1/2's embeddings against whichever performer data (main `performers.db` + local performer index) was loaded at match time. This is the layer that goes stale as performer data changes, and it's cheap to recompute (no GPU detection involved) precisely *because* layers 1/2 already paid the expensive part. `save_scene_fingerprint()` writes it as a side effect of every identify call, whether served from cache or freshly computed.
+
+**Local performer database changes do not automatically invalidate anything, anywhere.** This is a deliberate decision (confirmed with the user, not a gap to "fix" later): rematching (layer 3) is already cheap, but nothing should silently redo work in response to routine local-index churn (a performer added/renamed/merged/removed). The way to pick up local DB changes is to run the relevant task — Refresh Outdated, Face Recommendations' full scan, or the per-scene Re-identify button — scheduled or by hand, as and when desired. Only a *main*-database version bump (a new `performers.db` release) makes Refresh Outdated treat a scene as outdated; local-index changes never do.
+
+**Per-task breakdown** (`job_models.py`'s `JOB_REGISTRY`, dispatched via `jobs/*.py` / `analyzers/*.py`):
+
+- **Local Performer Sync** (`local_performer_sync`, `jobs/local_performer_sync_job.py`) — builds/updates the *local* performer usearch index from this Stash instance's own performer cover images. Entirely separate from the three layers above (it identifies *performers*, not scenes) — see "Local Performer Database" below. Diffs each performer's current cover-image bytes against the index's last-synced hash; only changed ones pay for detect+embed. Does not touch, and is not touched by, anything scene-related.
+
+- **Fingerprint Missing** (`fingerprint_generation`, `refresh_outdated=False`) — covers scenes with **no existing fingerprint at all**. Real detect+embed+match, sprite included (`use_sprite=True` unconditionally now — layer 2 caching means that cost is paid once, ever, not on every bulk run). Writes all three layers for the first time.
+
+- **Refresh Outdated** (`fingerprint_refresh_outdated`, `refresh_outdated=True`) — re-matches scenes whose stored `db_version` differs from the currently loaded main database version (plus anything Fingerprint Missing would also catch). `use_cache=True` makes this cheap when layers 1/2 already exist: only layer 3 gets recomputed, against whatever the local performer index currently contains too (matching always uses live data — there's nothing db-version-specific about the match step itself). **Not** triggered by local performer DB changes, by design — see above.
+
+- **Face Recommendations** (`scene_face_match`, `analyzers/scene_face_match.py`) — finds scenes with **zero performers currently assigned** in Stash (not "could use a better match" — if a scene already has any performer tagged, it's out of this analyzer's scope entirely, full scan or not). Two different costs depending on how it's triggered:
+  - *Incremental* (scheduled runs): scenes already covered by layer 2 (sprite) get read straight from layer 3 (zero identify calls); scenes without it yet get a one-off top-up identify.
+  - *Full* (the Operations/Settings button — forced via `queue_router.py`'s `FORCE_FULL_SCAN_USER_JOB_TYPES`, the same treatment as Scene Stash-Box Tagger): clears stale pending recommendations first, then **every** candidate scene gets a fresh rematch via `identify_scenes_batched` (`use_cache=True, use_sprite=True`) regardless of what layer 3 already had stored — cheap thanks to layers 1/2, but a real rematch against current data every time, which is the whole point of pressing the button after performer data changed.
+
+  The incremental watermark only advances past a sweep where every candidate was fully resolved (no skips, no errors) — a scene skipped for lacking Face Identification data must stay a candidate for next time, not silently fall out of view forever.
+
+- **Duplicate Scene Detection** (`duplicate_scenes`, `analyzers/duplicate_scenes.py`) — pure read of layer 3 (`get_fingerprints_with_faces()`, best-match rows only). No identify calls of its own at all — its face-based duplicate signal is only as fresh as whichever of the above tasks last populated layer 3 for the scenes involved.
+
+- **Live Identify button** (`POST /identify/scene`) — the same pipeline as everything above, `use_cache=True` by default. First call for a scene pays layers 1/2's cost; every later call (from *any* trigger — another live click, a bulk job, anything) reuses them and only redoes layer 3.
+
+- **Re-identify** (same endpoint, explicit user action from the scene player) — not a special "expensive" path; it's an explicit request for a fresh layer-3 rematch of one scene against whatever the local and main databases currently contain, cheap for the same reason everything else here is.
+
 ### Recommendations Engine
-`BaseAnalyzer` (`analyzers/base.py`) + incremental watermarking pattern. Each analyzer type has a `logic_version` class attribute — bumping it auto-clears stale snapshots/watermarks for full re-analysis on next run. Analyzers (`recommendations_router.py`'s `ANALYZERS` dict): duplicate performers, duplicate scene files, duplicate scenes, upstream performer/tag/studio/scene changes, scene stash-box tagger (`scene_fingerprint_match` — links untagged scenes via stash-box's own scene-fingerprint matching), face recommendations (`scene_face_match` — reads the `fingerprint_generation`/`fingerprint_refresh_outdated` jobs' stored per-scene match data for performerless scenes, with an on-demand single-scene sprite top-up for scenes whose stored data predates sprite-tile coverage, instead of re-running detect+embed+match itself).
+`BaseAnalyzer` (`analyzers/base.py`) + incremental watermarking pattern. Each analyzer type has a `logic_version` class attribute — bumping it auto-clears stale snapshots/watermarks for full re-analysis on next run. Analyzers (`recommendations_router.py`'s `ANALYZERS` dict): duplicate performers, duplicate scene files, duplicate scenes, upstream performer/tag/studio/scene changes, scene stash-box tagger (`scene_fingerprint_match` — links untagged scenes via stash-box's own scene-fingerprint matching), face recommendations (`scene_face_match` — see "Face identification caching" above for exactly what it reads/recomputes and when).
 
 Jobs run via `QueueManager` (`queue_manager.py`) with `JOB_REGISTRY` in `job_models.py`. `BaseJob` (`base_job.py`) provides `JobContext` with stop signaling, cursor-based checkpointing, and yield-to-higher-priority support.
 
@@ -163,7 +195,7 @@ Translation: `recommendations_router.py:update_performer_fields()`
 
 - `api/main.py` — App entry point, lifespan, router wiring, eager-load setup
 - `api/recommendations_router.py` — All recommendation API endpoints
-- `api/recommendations_db.py` — SQLite layer (schema v16), migrations
+- `api/recommendations_db.py` — SQLite layer (schema v17), migrations
 - `api/queue_router.py` / `api/queue_manager.py` — Job queue API and execution engine
 - `api/job_models.py` — `JOB_REGISTRY` and all job type definitions
 - `api/base_job.py` — `BaseJob` ABC and `JobContext`
@@ -175,6 +207,9 @@ Translation: `recommendations_router.py:update_performer_fields()`
 - `api/stashbox_client.py` — StashBox GraphQL client
 - `api/local_performer_index.py` — Local performer usearch index (build/query/sync), see "Local Performer Database" above
 - `api/jobs/local_performer_sync_job.py` — Full diff-and-embed sync job for the local performer index
+- `api/identification_router.py` — `/identify/*` endpoints; the layer 1/2/3 caching logic described above lives here (`_identify_scene_from_cache`, `_process_sprite_frames`, `_prepare_scene_identify`)
+- `api/fingerprint_generator.py` — Fingerprint Missing / Refresh Outdated's bulk scan logic (`SceneFingerprintGenerator.generate_all`)
+- `api/analyzers/scene_face_match.py` — Face Recommendations analyzer, see "Face identification caching" above
 - `plugin/stash-sense-recommendations.js` — Recommendations dashboard UI
 - `plugin/stash-sense-settings.js` — Settings and model management UI
 - `plugin/stash-sense-operations.js` — Operation queue UI

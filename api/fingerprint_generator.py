@@ -287,9 +287,6 @@ class SceneFingerprintGenerator:
 
                 to_process: list[dict] = []
                 scene_titles: dict[int, str] = {}
-                # Per-scene use_sprite decision -- see _spec()'s docstring
-                # below for why this can't just be a single job-wide setting.
-                use_sprite_by_scene: dict[int, bool] = {}
                 for scene in scenes:
                     if self._stop_requested:
                         break
@@ -343,14 +340,6 @@ class SceneFingerprintGenerator:
                     else:
                         logger.debug("Scene %d (%s): no existing fingerprint", scene_id, scene_title)
 
-                    # Bulk runs default to no sprite processing (real added
-                    # cost per scene -- see _build_identify_request) EXCEPT
-                    # when refreshing a scene that already has sprite
-                    # coverage: Face Recommendations may have separately
-                    # paid that cost for this scene (its own on-demand
-                    # top-up, see scene_face_match.py), and a routine bulk
-                    # refresh must not silently discard it.
-                    use_sprite_by_scene[scene_id] = bool(existing and existing.get("used_sprite"))
                     to_process.append(scene)
 
                 if to_process and not self._stop_requested:
@@ -364,9 +353,18 @@ class SceneFingerprintGenerator:
                             scene_id=str(sid),
                             width=file_info.get("width"),
                             height=file_info.get("height"),
+                            # Sprite tiles cache their own embeddings the
+                            # same way video frames do (scene_face_embeddings,
+                            # is_sprite=1 -- see identification_router.py's
+                            # scene_sprite_cache_status), so requesting them
+                            # here only ever pays real detection cost once
+                            # per scene, ever: a scene that already has
+                            # sprite coverage just reuses that cache, and one
+                            # that doesn't gets it computed and cached now
+                            # instead of leaving that for a later on-demand
+                            # top-up in scene_face_match.py.
                             request=self._build_identify_request(
-                                sid, start_offset_pct, end_offset_pct,
-                                use_sprite=use_sprite_by_scene.get(sid, False),
+                                sid, start_offset_pct, end_offset_pct, use_sprite=True,
                             ),
                         )
 
@@ -522,12 +520,11 @@ class SceneFingerprintGenerator:
             # top_k standardized to match the live Identify button / Face
             # Recommendations -- this job's stored output is now the
             # canonical source both read from instead of re-running their
-            # own identify pass. use_sprite stays off by default here (real
-            # added per-scene cost, and this job runs over the whole
-            # library including scenes nobody needs a new recommendation
-            # for) -- callers pass use_sprite=True only to preserve
-            # existing sprite coverage on a refresh; see generate_all()'s
-            # use_sprite_by_scene.
+            # own identify pass. use_sprite defaults to off here (only
+            # generate_all()'s bulk scan currently passes True) since sprite
+            # detection is a real cost the first time it runs for a scene --
+            # cheap ever after, once cached (see identification_router.py's
+            # scene_sprite_cache_status).
             top_k=5,
             use_sprite=use_sprite,
         )

@@ -221,16 +221,28 @@ def save_scene_signal_cache(
     )
 
 
-def save_face_signal_cache(scene_id: int, faces: list[dict]) -> None:
+def save_face_signal_cache(scene_id: int, faces: list[dict], *, is_sprite: bool = False) -> None:
     if rec_db is None:
         return
-    rec_db.replace_face_embeddings(scene_id, faces)
+    rec_db.replace_face_embeddings(scene_id, faces, is_sprite=is_sprite)
 
 
-def load_face_signal_cache(scene_id: int) -> list[dict]:
+def load_face_signal_cache(scene_id: int, *, is_sprite: Optional[bool] = None) -> list[dict]:
     if rec_db is None:
         return []
-    return rec_db.get_face_embeddings(scene_id)
+    return rec_db.get_face_embeddings(scene_id, is_sprite=is_sprite)
+
+
+def is_sprite_cache_checked(scene_id: int) -> bool:
+    if rec_db is None:
+        return False
+    return rec_db.is_sprite_cache_checked(scene_id)
+
+
+def mark_sprite_cache_checked(scene_id: int) -> None:
+    if rec_db is None:
+        return
+    rec_db.mark_sprite_cache_checked(scene_id)
 
 
 def save_image_fingerprint(

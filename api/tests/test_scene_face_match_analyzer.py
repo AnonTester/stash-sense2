@@ -1,7 +1,14 @@
-"""Tests for SceneFaceMatchAnalyzer (Face Recommendations) -- reads Face
-Identification's stored per-scene match data instead of re-running
-detect+embed+match, with an on-demand sprite top-up for scenes whose stored
-data predates sprite coverage. See analyzers/scene_face_match.py's docstring.
+"""Tests for SceneFaceMatchAnalyzer (Face Recommendations).
+
+Incremental (scheduled) runs read Face Identification's stored per-scene
+match data for scenes that already have sprite coverage (cheap, no identify
+call), with an on-demand top-up for scenes that don't. Full (manual button)
+runs always rematch via identify_scenes_batched instead, regardless of
+existing sprite coverage -- cheap now that both video-frame and sprite-tile
+embeddings are cached, and the whole point of a full scan is to reflect
+whatever the local performer index/main database currently contain rather
+than trust a stale cached result. See analyzers/scene_face_match.py's
+docstring.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -50,7 +57,7 @@ def _patch_common(**overrides):
 
 
 class TestStoredDataPath:
-    async def test_scene_with_sprite_coverage_reads_stored_matches_no_identify_call(self):
+    async def test_incremental_scene_with_sprite_coverage_reads_stored_matches_no_identify_call(self):
         fp = {"id": 5, "fingerprint_status": "complete", "used_sprite": 1}
         analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
         rec_db.get_fingerprint_matches.return_value = [_match_row("stashdb.org:perf-1")]
@@ -60,7 +67,7 @@ class TestStoredDataPath:
             p.start()
         try:
             with patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
-                result = await analyzer.run(incremental=False)
+                result = await analyzer.run(incremental=True)
         finally:
             for p in patchers:
                 p.stop()
@@ -75,6 +82,43 @@ class TestStoredDataPath:
         created_kwargs = rec_db.create_recommendation.call_args.kwargs
         assert created_kwargs["target_id"] == "1|stashdb.org:perf-1"
         assert created_kwargs["details"]["is_best_match"] is True
+
+    async def test_full_scan_rematches_even_a_scene_with_existing_sprite_coverage(self):
+        """The one behavior change a full scan buys over incremental:
+        sprite coverage already being stored is no longer a reason to trust
+        it -- confirmed by a real identify call happening instead of the
+        stored-data read."""
+        fp = {"id": 5, "fingerprint_status": "complete", "used_sprite": 1}
+        analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
+
+        match = SimpleNamespace(
+            stashdb_id="xyz", name="Someone New", confidence=0.95, distance=0.05, country=None,
+            image_url=None, endpoint="stashdb.org", local_performer_id=None, source=None,
+            catalogue_url=None, profile_url=None, top_timestamps_sec=[],
+        )
+        person = SimpleNamespace(person_id=0, frame_count=20, best_match=match, all_matches=[match])
+        response = SimpleNamespace(persons=[person])
+
+        async def _fake_batched(specs, is_stop_requested=None, before_scene=None):
+            assert len(specs) == 1
+            assert specs[0].request.use_cache is True
+            assert specs[0].request.use_sprite is True
+            yield "1", response
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_fake_batched):
+                result = await analyzer.run(incremental=False)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        rec_db.get_fingerprint_matches.assert_not_called()
+        assert result.recommendations_created == 1
+        created_kwargs = rec_db.create_recommendation.call_args.kwargs
+        assert created_kwargs["target_id"] == "1|stashdb.org:xyz"
 
     async def test_scene_with_no_fingerprint_is_skipped(self):
         analyzer, stash, rec_db = _analyzer([_scene(1)], {1: None})
@@ -113,7 +157,7 @@ class TestStoredDataPath:
         assert result.items_processed == 1
 
 
-class TestSpriteTopUpPath:
+class TestRematchPath:
     async def test_scene_without_sprite_coverage_triggers_topup_and_creates_recommendation(self):
         fp = {"id": 7, "fingerprint_status": "complete", "used_sprite": 0}
         analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
@@ -166,3 +210,65 @@ class TestSpriteTopUpPath:
 
         assert result.recommendations_created == 0
         assert any("boom" in e for e in result.errors)
+
+
+class TestWatermarkAdvancement:
+    """Confirmed live: a scene skipped for lacking Face Identification data
+    still had its updated_at folded into the advanced watermark, so an
+    incremental run's own GREATER_THAN filter would never re-offer it as a
+    candidate again -- not even after Face Identification later covered it.
+    The watermark must only advance past a sweep where every candidate was
+    actually resolved."""
+
+    async def test_not_advanced_when_a_scene_has_no_fingerprint_yet(self):
+        analyzer, stash, rec_db = _analyzer([_scene(1)], {1: None})
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
+                await analyzer.run(incremental=False)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        rec_db.set_watermark.assert_not_called()
+
+    async def test_not_advanced_when_a_scene_errors_during_topup(self):
+        fp = {"id": 7, "fingerprint_status": "complete", "used_sprite": 0}
+        analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
+
+        async def _fake_batched(specs, is_stop_requested=None, before_scene=None):
+            yield "1", RuntimeError("boom")
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_fake_batched):
+                await analyzer.run(incremental=False)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        rec_db.set_watermark.assert_not_called()
+
+    async def test_advanced_when_every_candidate_is_fully_resolved(self):
+        fp = {"id": 5, "fingerprint_status": "complete", "used_sprite": 1}
+        analyzer, stash, rec_db = _analyzer([_scene(1, updated_at="2026-03-01T00:00:00Z")], {1: fp})
+        rec_db.get_fingerprint_matches.return_value = [_match_row("stashdb.org:perf-1")]
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
+                await analyzer.run(incremental=True)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        rec_db.set_watermark.assert_called_once_with(
+            "scene_face_match", last_stash_updated_at="2026-03-01T00:00:00Z",
+        )

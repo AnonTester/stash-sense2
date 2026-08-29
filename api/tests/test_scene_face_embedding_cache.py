@@ -1,9 +1,12 @@
 """Tests for scene_face_embeddings caching (buffalo_l single-embedding
-schema) and the v13->v14 migration that replaces the old legacy dual
-facenet_vector/arcface_vector table.
+schema, video-frame and sprite-tile sources sharing one table), the v13->v14
+migration that replaces the old legacy dual facenet_vector/arcface_vector
+table, and scene_sprite_cache_status (added in v17) which tracks whether a
+scene's sprite sheet has been checked at all.
 
-See identification_router.py's _identify_scene_from_cache / recommendations_db.py's
-schema-v14 migration for the code under test here.
+See identification_router.py's _identify_scene_from_cache/
+_process_sprite_frames/_prepare_scene_identify and recommendations_db.py's
+schema-v14/v17 migrations for the code under test here.
 """
 import sqlite3
 
@@ -51,6 +54,82 @@ class TestFaceEmbeddingCacheRoundTrip:
         assert len(db.get_face_embeddings(1)) == 1
         assert len(db.get_face_embeddings(2)) == 1
         assert db.get_face_embeddings(1)[0]["embedding"] == b"a" * 8
+
+
+class TestFaceEmbeddingsSourceIsolation:
+    """Video-frame and sprite-tile embeddings share this one table but must
+    never clobber each other -- they're computed and cached independently
+    (see identification_router.py's _process_sprite_frames /
+    _prepare_scene_identify)."""
+
+    def _face(self, frame_index=0, embedding=b"\x00" * 4, timestamp_sec=None):
+        return {
+            "frame_index": frame_index, "bbox": {"x": 1, "y": 2, "w": 10, "h": 10},
+            "confidence": 0.9, "yaw": 0.0, "embedding": embedding, "timestamp_sec": timestamp_sec,
+        }
+
+    def test_video_write_does_not_touch_existing_sprite_rows(self, db):
+        db.replace_face_embeddings(1, [self._face(frame_index=-2)], is_sprite=True)
+        db.replace_face_embeddings(1, [self._face(frame_index=5)], is_sprite=False)
+
+        assert len(db.get_face_embeddings(1, is_sprite=True)) == 1
+        assert len(db.get_face_embeddings(1, is_sprite=False)) == 1
+
+    def test_sprite_write_does_not_touch_existing_video_rows(self, db):
+        db.replace_face_embeddings(1, [self._face(frame_index=5)], is_sprite=False)
+        db.replace_face_embeddings(1, [self._face(frame_index=-2)], is_sprite=True)
+
+        assert len(db.get_face_embeddings(1, is_sprite=False)) == 1
+        assert len(db.get_face_embeddings(1, is_sprite=True)) == 1
+
+    def test_rewriting_one_source_replaces_only_that_sources_rows(self, db):
+        db.replace_face_embeddings(1, [self._face(0), self._face(1)], is_sprite=False)
+        db.replace_face_embeddings(1, [self._face(2)], is_sprite=False)
+
+        assert len(db.get_face_embeddings(1, is_sprite=False)) == 1
+
+    def test_no_filter_returns_both_sources(self, db):
+        db.replace_face_embeddings(1, [self._face(0)], is_sprite=False)
+        db.replace_face_embeddings(1, [self._face(-2)], is_sprite=True)
+
+        assert len(db.get_face_embeddings(1)) == 2
+
+    def test_stores_timestamp_sec_for_sprite_rows(self, db):
+        db.replace_face_embeddings(1, [self._face(-2, timestamp_sec=12.5)], is_sprite=True)
+
+        rows = db.get_face_embeddings(1, is_sprite=True)
+        assert rows[0]["timestamp_sec"] == 12.5
+        assert rows[0]["is_sprite"] == 1
+
+
+class TestSpriteCacheCheckedStatus:
+    """Distinguishes 'sprite sheet never successfully checked yet' (must
+    retry live) from 'checked, genuinely zero faces' (trust the cache) --
+    scene_face_embeddings having zero sprite rows is ambiguous between
+    those two on its own, hence this separate marker table."""
+
+    def test_unchecked_scene_reports_false(self, db):
+        assert db.is_sprite_cache_checked(1) is False
+
+    def test_marking_checked_makes_it_report_true(self, db):
+        db.mark_sprite_cache_checked(1)
+        assert db.is_sprite_cache_checked(1) is True
+
+    def test_marking_checked_twice_does_not_error(self, db):
+        db.mark_sprite_cache_checked(1)
+        db.mark_sprite_cache_checked(1)
+        assert db.is_sprite_cache_checked(1) is True
+
+    def test_checked_status_is_independent_of_actual_face_rows(self, db):
+        # A scene whose sprite sheet was checked but had zero usable faces:
+        # marked checked, but no rows in scene_face_embeddings at all.
+        db.mark_sprite_cache_checked(1)
+        assert db.is_sprite_cache_checked(1) is True
+        assert db.get_face_embeddings(1, is_sprite=True) == []
+
+    def test_checked_status_is_per_scene(self, db):
+        db.mark_sprite_cache_checked(1)
+        assert db.is_sprite_cache_checked(2) is False
 
 
 class TestSchemaV14Migration:
@@ -141,6 +220,13 @@ class TestSchemaV14Migration:
             assert "embedding" in cols
             assert "facenet_vector" not in cols
             assert "arcface_vector" not in cols
+            # v17: sprite-tile embeddings share this table (is_sprite) and
+            # need their own "which frame" identifier (timestamp_sec) --
+            # see recommendations_db.py's v17 migration.
+            assert "is_sprite" in cols
+            assert "timestamp_sec" in cols
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            assert "scene_sprite_cache_status" in tables
 
             # The stale pre-fix scene_signal_cache row (written while face
             # caching was disabled) must not survive -- otherwise it would
