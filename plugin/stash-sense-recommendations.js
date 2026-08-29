@@ -1560,7 +1560,50 @@
       // actually pending).
       container.querySelectorAll('.ss-accept-all-btn, .ss-dismiss-all-btn').forEach(btn => { btn.style.display = ''; });
 
+      // Pagination controls -- built once, rendered both above and below
+      // the card listing (top copy saves a scroll-to-top on long lists;
+      // bottom copy matches where people naturally look after reading
+      // through a page).
+      const totalPages = Math.ceil(total / PAGE_SIZE);
+      const buildPaginationEl = () => {
+        const pagination = document.createElement('div');
+        pagination.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0;';
+
+        const prevBtn = document.createElement('button');
+        prevBtn.className = 'ss-btn ss-btn-secondary';
+        prevBtn.textContent = '← Prev';
+        prevBtn.disabled = currentState.page === 0;
+        prevBtn.style.cssText = 'min-width:80px;';
+        prevBtn.addEventListener('click', () => {
+          currentState.page--;
+          renderCurrentView(container);
+        });
+
+        const pageText = document.createElement('span');
+        pageText.style.cssText = 'color:var(--ss-text-secondary, #aaa);font-size:14px;';
+        pageText.textContent = `Page ${currentState.page + 1} of ${totalPages}`;
+
+        const nextBtn = document.createElement('button');
+        nextBtn.className = 'ss-btn ss-btn-secondary';
+        nextBtn.textContent = 'Next →';
+        nextBtn.disabled = currentState.page >= totalPages - 1;
+        nextBtn.style.cssText = 'min-width:80px;';
+        nextBtn.addEventListener('click', () => {
+          currentState.page++;
+          renderCurrentView(container);
+        });
+
+        pagination.appendChild(prevBtn);
+        pagination.appendChild(pageText);
+        pagination.appendChild(nextBtn);
+        return pagination;
+      };
+
       listContent.innerHTML = '';
+
+      if (totalPages > 1) {
+        listContent.appendChild(buildPaginationEl());
+      }
 
       for (const rec of recommendations) {
         const card = renderRecommendationCard(rec);
@@ -1621,40 +1664,8 @@
         }
       }
 
-      // Pagination controls
-      const totalPages = Math.ceil(total / PAGE_SIZE);
       if (totalPages > 1) {
-        const pagination = document.createElement('div');
-        pagination.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0;';
-
-        const prevBtn = document.createElement('button');
-        prevBtn.className = 'ss-btn ss-btn-secondary';
-        prevBtn.textContent = '\u2190 Prev';
-        prevBtn.disabled = currentState.page === 0;
-        prevBtn.style.cssText = 'min-width:80px;';
-        prevBtn.addEventListener('click', () => {
-          currentState.page--;
-          renderCurrentView(container);
-        });
-
-        const pageText = document.createElement('span');
-        pageText.style.cssText = 'color:var(--ss-text-secondary, #aaa);font-size:14px;';
-        pageText.textContent = `Page ${currentState.page + 1} of ${totalPages}`;
-
-        const nextBtn = document.createElement('button');
-        nextBtn.className = 'ss-btn ss-btn-secondary';
-        nextBtn.textContent = 'Next \u2192';
-        nextBtn.disabled = currentState.page >= totalPages - 1;
-        nextBtn.style.cssText = 'min-width:80px;';
-        nextBtn.addEventListener('click', () => {
-          currentState.page++;
-          renderCurrentView(container);
-        });
-
-        pagination.appendChild(prevBtn);
-        pagination.appendChild(pageText);
-        pagination.appendChild(nextBtn);
-        listContent.appendChild(pagination);
+        listContent.appendChild(buildPaginationEl());
       }
 
     } catch (e) {
@@ -1967,7 +1978,7 @@
               <svg viewBox="0 0 24 24" width="32" height="32" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
             </div>
             <div class="ss-rec-card-info">
-              <div class="ss-rec-card-title">${escapeHtml(d.scene_title || 'Unknown Scene')}</div>
+              <div class="ss-rec-card-title">${escapeHtmlBreakable(d.scene_title || 'Unknown Scene')}</div>
               <div class="ss-rec-card-subtitle">
                 ${personCount} person${personCount !== 1 ? 's' : ''} detected &middot; ${candidateCount} candidate${candidateCount !== 1 ? 's' : ''}
               </div>
@@ -5809,6 +5820,7 @@
         }).join('')
       : (streamUrl ? `<source src="${escapeHtml(streamUrl)}" />` : '');
     const sceneTitle = scene?.title || d.scene_title || `Scene ${sceneId}`;
+    const posterUrl = relativeUrl(scene?.paths?.screenshot);
 
     // Same link-building convention the manual scene-identify result view
     // uses (stash-sense.js's _matchLinksHtml/_stashboxPerformerUrl/
@@ -5897,7 +5909,7 @@
         </div>
 
         ${videoSourcesHtml
-          ? `<video class="ss-sfm-video" controls preload="metadata">${videoSourcesHtml}</video>`
+          ? `<video class="ss-sfm-video" controls preload="metadata"${posterUrl ? ` poster="${escapeHtml(posterUrl)}"` : ''}>${videoSourcesHtml}</video>`
           : '<div class="ss-no-image ss-sfm-no-video">No video preview available</div>'
         }
 
@@ -6174,12 +6186,13 @@
   }
 
   /**
-   * Escape HTML and insert <wbr> break opportunities after underscores and
-   * dashes, so long titles/filenames with no spaces (e.g. "some_long_file-
-   * name_2024.mp4") still wrap instead of overflowing their container.
+   * Escape HTML and insert <wbr> break opportunities after underscores,
+   * dots, commas, and dashes, so long titles/filenames with no spaces
+   * (e.g. "some_long_file-name_2024.mp4") still wrap instead of
+   * overflowing their container.
    */
   function escapeHtmlBreakable(str) {
-    return escapeHtml(str).replace(/([_-])/g, '$1<wbr>');
+    return escapeHtml(str).replace(/([_.,-])/g, '$1<wbr>');
   }
 
   /**

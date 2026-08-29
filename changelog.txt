@@ -1,3 +1,18 @@
+## 2026-08-29
+
+### 0.18.1 (plugin only)
+- Fix: long scene titles with no spaces (e.g. dotted/underscored filenames
+  used as titles) didn't wrap in Face Recommendations cards, breaking the
+  card layout on narrow/mobile widths. Extended the existing break-point
+  helper to also break on `.` and `,` (it already handled `_` and `-`),
+  and switched that card's title to actually use it (it was calling plain
+  escapeHtml instead).
+- Fix: the Face Recommendations scene-review video preview showed no
+  cover image before playback started (no poster attribute set).
+- Add: pagination controls now also render above the recommendation card
+  listing (previously only below it), so long lists don't require
+  scrolling back up to change page.
+
 ## 2026-08-28
 
 ### 0.21.1 (sidecar only)
