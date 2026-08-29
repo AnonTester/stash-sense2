@@ -8,8 +8,16 @@ that key would ever have been usable).
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
+
 import identification_router as ir
 from sprite_parser import SpriteFrame
+
+# _process_sprite_frames reads .image.shape to size the detector per-scene
+# (see set_det_size_for_dims) -- a real (if tiny) array stands in for a
+# genuine sprite tile crop; these tests otherwise don't care about pixel
+# content, only frame_index/timestamp behavior.
+_FAKE_TILE = np.zeros((90, 160, 3), dtype=np.uint8)
 
 
 class _NullAsyncCM:
@@ -35,9 +43,9 @@ def _fake_httpx_client(paths: dict):
 class TestProcessSpriteFramesUniqueTimestamps:
     async def test_each_sprite_face_gets_a_distinct_frame_index_and_real_timestamp(self):
         sprite_frames = [
-            SpriteFrame(image=object(), timestamp=5.0, index=0),
-            SpriteFrame(image=object(), timestamp=15.0, index=1),
-            SpriteFrame(image=object(), timestamp=25.0, index=2),
+            SpriteFrame(image=_FAKE_TILE, timestamp=5.0, index=0),
+            SpriteFrame(image=_FAKE_TILE, timestamp=15.0, index=1),
+            SpriteFrame(image=_FAKE_TILE, timestamp=25.0, index=2),
         ]
         faces_per_tile = [
             [SimpleNamespace(bbox={"w": 100, "h": 100}, confidence=0.9, yaw=0.0)],
@@ -84,7 +92,7 @@ class TestProcessSpriteFramesUniqueTimestamps:
         assert set(timestamps_by_index.keys()) == set(frame_indices)
 
     async def test_single_sprite_face_still_gets_a_real_timestamp(self):
-        sprite_frames = [SpriteFrame(image=object(), timestamp=42.0, index=0)]
+        sprite_frames = [SpriteFrame(image=_FAKE_TILE, timestamp=42.0, index=0)]
         faces_per_tile = [[SimpleNamespace(bbox={"w": 100, "h": 100}, confidence=0.9, yaw=0.0)]]
 
         recognizer = MagicMock()
@@ -108,3 +116,75 @@ class TestProcessSpriteFramesUniqueTimestamps:
 
         assert cache_rows[0]["timestamp_sec"] == 42.0
         assert extra_results[0][0] == cache_rows[0]["frame_index"]
+
+
+class TestProcessSpriteFramesDetSize:
+    """_process_sprite_frames sizes the detector to this scene's actual
+    sprite-tile dimensions (see recognizer.set_det_size_for_dims's own
+    docstring for why -- ~3x faster and slightly more accurate than the
+    fixed default in a 500-scene production benchmark) and must restore it
+    afterward, since det_size is process-wide shared state that a real
+    video-frame identify running next would otherwise silently inherit."""
+
+    async def test_sizes_detector_to_max_tile_dims_and_restores_after(self):
+        # A shorter trailing tile (duration doesn't divide evenly into the
+        # sprite grid) must not shrink the canvas below what the other
+        # tiles need -- set_det_size_for_dims should see the batch max.
+        sprite_frames = [
+            SpriteFrame(image=np.zeros((90, 160, 3), dtype=np.uint8), timestamp=5.0, index=0),
+            SpriteFrame(image=np.zeros((60, 160, 3), dtype=np.uint8), timestamp=15.0, index=1),
+        ]
+        faces_per_tile = [[], []]
+
+        recognizer = MagicMock()
+        call_order = []
+        recognizer.set_det_size_for_dims.side_effect = lambda w, h: call_order.append(("set", w, h))
+        recognizer.reset_det_size.side_effect = lambda: call_order.append(("reset",))
+        recognizer.detect_faces_parallel.side_effect = lambda *a, **k: (
+            call_order.append(("detect",)) or faces_per_tile
+        )
+
+        with patch.object(ir, "httpx") as mock_httpx, \
+                patch.object(ir, "fetch_sprite_from_stash", AsyncMock(return_value=sprite_frames)), \
+                patch.object(ir, "_gpu_compute_lock", _NullAsyncCM), \
+                patch.object(ir, "_recognizer", recognizer):
+            mock_httpx.AsyncClient.return_value = _fake_httpx_client(
+                {"sprite": "http://stash/scene/abc_sprite.jpg", "vtt": "http://stash/scene/abc_vtt.vtt"}
+            )
+
+            result = await ir._process_sprite_frames(
+                "http://stash", "42", "apikey",
+                min_face_size=50, min_face_confidence=0.5,
+                match_config=object(), t_start=0.0,
+            )
+
+        assert result == ([], [])
+        recognizer.set_det_size_for_dims.assert_called_once_with(160, 90)
+        recognizer.reset_det_size.assert_called_once()
+        assert call_order == [("set", 160, 90), ("detect",), ("reset",)]
+
+    async def test_restores_det_size_even_when_detection_raises(self):
+        sprite_frames = [SpriteFrame(image=np.zeros((90, 160, 3), dtype=np.uint8), timestamp=5.0, index=0)]
+
+        recognizer = MagicMock()
+        recognizer.detect_faces_parallel.side_effect = RuntimeError("MIOPEN failure")
+
+        with patch.object(ir, "httpx") as mock_httpx, \
+                patch.object(ir, "fetch_sprite_from_stash", AsyncMock(return_value=sprite_frames)), \
+                patch.object(ir, "_gpu_compute_lock", _NullAsyncCM), \
+                patch.object(ir, "_recognizer", recognizer):
+            mock_httpx.AsyncClient.return_value = _fake_httpx_client(
+                {"sprite": "http://stash/scene/abc_sprite.jpg", "vtt": "http://stash/scene/abc_vtt.vtt"}
+            )
+
+            try:
+                await ir._process_sprite_frames(
+                    "http://stash", "42", "apikey",
+                    min_face_size=50, min_face_confidence=0.5,
+                    match_config=object(), t_start=0.0,
+                )
+                assert False, "expected the RuntimeError to propagate"
+            except RuntimeError:
+                pass
+
+        recognizer.reset_det_size.assert_called_once()

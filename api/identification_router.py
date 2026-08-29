@@ -882,12 +882,28 @@ async def _process_sprite_frames(
         return None
 
     detected: list[tuple[float, "DetectedFace", "np.ndarray"]] = []
+    # Sprite tiles are all one fixed size per scene (Stash generates a
+    # uniform grid), but a trailing tile can be shorter if the video's
+    # duration doesn't divide evenly -- take the max across the batch so
+    # every tile fits (a shorter tile just gets a little more letterbox
+    # padding, still far smaller than the fixed default). See
+    # set_det_size_for_dims's docstring for why this is worth doing at all.
+    tile_w = max(sf.image.shape[1] for sf in sprite_frames)
+    tile_h = max(sf.image.shape[0] for sf in sprite_frames)
     async with _gpu_compute_lock():
-        per_tile_faces = await asyncio.to_thread(
-            _recognizer.detect_faces_parallel,
-            [sf.image for sf in sprite_frames],
-            min_face_confidence,
-        )
+        _recognizer.set_det_size_for_dims(tile_w, tile_h)
+        try:
+            per_tile_faces = await asyncio.to_thread(
+                _recognizer.detect_faces_parallel,
+                [sf.image for sf in sprite_frames],
+                min_face_confidence,
+            )
+        finally:
+            # det_size is process-wide shared state -- must be back to the
+            # production default before any other caller can acquire this
+            # lock, or a real video-frame identify would silently detect at
+            # sprite scale. See set_det_size_for_dims's docstring.
+            _recognizer.reset_det_size()
     for sf, faces in zip(sprite_frames, per_tile_faces):
         for face in faces:
             if face.bbox["w"] >= min_face_size and face.bbox["h"] >= min_face_size:

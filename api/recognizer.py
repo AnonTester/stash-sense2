@@ -26,6 +26,10 @@ from stashbox_utils import classify_universal_id
 # runs; raise only after checking real headroom (e.g. `rocm-smi --showmemuse`).
 DETECTION_POOL_SIZE = 3
 
+# SCRFD's detection head uses feature-pyramid strides up to 32 -- det_size
+# must be a multiple of this. See set_det_size_for_dims() below.
+DET_SIZE_STRIDE = 32
+
 
 @dataclass
 class PerformerMatch:
@@ -199,6 +203,49 @@ class FaceRecognizer:
             ) from errors[0]
 
         return results
+
+    def set_det_size_for_dims(self, width: int, height: int) -> tuple[int, int]:
+        """Points every detection-pool generator's detector at a canvas
+        sized for (width, height) instead of the fixed production default,
+        rounded up to DET_SIZE_STRIDE (SCRFD's detection head uses strides
+        up to 32, so det_size must be a multiple of that). Returns the
+        det_size actually applied.
+
+        Confirmed via a 500-scene/~40k-tile production benchmark
+        (benchmark/sprite_detsize_benchmark.py) that sizing the detector to
+        a sprite tile's real dimensions instead of the fixed 640x640
+        default is ~3x faster AND slightly more accurate -- InsightFace's
+        SCRFD detector letterboxes *every* input onto whatever fixed square
+        det_size specifies, so a tiny sprite tile (~160x90) forced onto a
+        640x640 canvas pays full 640x640 compute and ends up occupying a
+        tiny fraction of a mostly-empty canvas, off the scale range SCRFD's
+        anchors were tuned for.
+
+        Must be called with every one of this recognizer's generators
+        (self.generator + self.detection_pool) since detect_faces_parallel
+        fans work across all of them -- a caller that only retargeted
+        self.generator would leave pooled workers detecting at the wrong
+        scale. Also must be called only inside the same gpu_compute_lock
+        critical section as the detection call itself, with reset_det_size()
+        called before that lock is released -- det_size is process-wide
+        shared state, so any other caller (a real video-frame identify)
+        that runs before the reset would silently detect faces at sprite
+        scale instead of its own."""
+        det_size = (
+            max(DET_SIZE_STRIDE, ((width + DET_SIZE_STRIDE - 1) // DET_SIZE_STRIDE) * DET_SIZE_STRIDE),
+            max(DET_SIZE_STRIDE, ((height + DET_SIZE_STRIDE - 1) // DET_SIZE_STRIDE) * DET_SIZE_STRIDE),
+        )
+        for gen in (self.generator, *self.detection_pool):
+            gen.set_det_size(det_size)
+        return det_size
+
+    def reset_det_size(self) -> None:
+        """Restores every detection-pool generator back to the production
+        default det_size -- see set_det_size_for_dims()'s docstring for why
+        this must run before the shared gpu_compute_lock is released."""
+        default = self.generator.default_det_size()
+        for gen in (self.generator, *self.detection_pool):
+            gen.set_det_size(default)
 
     def recognize_face_v2(
         self,

@@ -200,17 +200,45 @@ class FaceEmbeddingGenerator:
                     root=str(self._models_dir),
                     providers=self._ort_providers(),
                 )
-            # Get detection size from settings, fall back to 640
-            try:
-                from settings import get_setting
-                det_size = int(get_setting("detection_size"))
-            except (RuntimeError, KeyError):
-                det_size = 640
             self._face_analyzer.prepare(
                 ctx_id=0 if self.device == "gpu" else -1,
-                det_size=(det_size, det_size),
+                det_size=self.default_det_size(),
             )
         return self._face_analyzer
+
+    def default_det_size(self) -> tuple[int, int]:
+        """The production default det_size (square, from the live
+        "detection_size" setting, falling back to 640) -- used both for
+        face_analyzer's own first-load prepare() above and to restore the
+        analyzer after a temporary set_det_size() call (see that method)."""
+        try:
+            from settings import get_setting
+            det_size = int(get_setting("detection_size"))
+        except (RuntimeError, KeyError):
+            det_size = 640
+        return (det_size, det_size)
+
+    def set_det_size(self, det_size: tuple[int, int]) -> None:
+        """Change the detector's input canvas for subsequent detect_faces()
+        calls. InsightFace's FaceAnalysis.prepare() only updates the stored
+        resize/letterbox target (each sub-model's own prepare() just stores
+        the new input_size) -- it does not reload the ONNX session/weights,
+        so this is cheap to call repeatedly, unlike re-constructing
+        FaceAnalysis itself.
+
+        `face_analyzer` is process-wide shared state (this generator may be
+        one of several in a FaceRecognizer's detection pool, all used by
+        concurrent-looking calls that are actually serialized by
+        gpu_compute_lock -- see recognizer.py's set_det_size_for_dims/
+        reset_det_size): callers MUST restore the default det_size (via
+        reset_det_size()) before releasing that lock, or every other caller
+        sharing this generator will silently detect at the wrong scale."""
+        self.face_analyzer.prepare(ctx_id=0 if self.device == "gpu" else -1, det_size=det_size)
+
+    def reset_det_size(self) -> None:
+        """Restores this generator's detector to the production default
+        det_size -- see set_det_size()'s docstring for why this matters."""
+        self.set_det_size(self.default_det_size())
 
     @property
     def gender_model(self) -> Optional[Attribute]:

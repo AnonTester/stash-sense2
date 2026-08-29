@@ -87,6 +87,15 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
             logger.warning("[scene_face_match] Face recognition unavailable, skipping run: %s", e.detail)
             return AnalysisResult(items_processed=0, recommendations_created=0, errors=[str(e.detail)])
 
+        # Read once per run (see fingerprint_generator.generate_all's own
+        # read of this setting for why this granularity, not per-scene, is
+        # intended) -- "Use Sprite Tiles For Detection".
+        try:
+            from settings import get_setting
+            use_sprite = bool(get_setting("sprite_detection_enabled"))
+        except (RuntimeError, KeyError):
+            use_sprite = True
+
         # Manual/full scans should rebuild pending recommendations from
         # scratch so stale entries disappear, matching scene_fingerprint_match.
         if not incremental:
@@ -135,8 +144,8 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
         logger.warning(
             "[scene_face_match] Scan summary: candidates=%d, skipped_no_duration=%d, "
-            "incremental=%s, watermark=%s",
-            len(scenes_to_scan), skipped_no_duration, incremental, watermark_ts or "-",
+            "incremental=%s, watermark=%s, sprite_detection_enabled=%s",
+            len(scenes_to_scan), skipped_no_duration, incremental, watermark_ts or "-", use_sprite,
         )
 
         if not scenes_to_scan:
@@ -155,16 +164,23 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
         scene_titles = {str(scene["id"]): scene.get("title") or f"Scene {scene['id']}" for scene in scenes_to_scan}
 
-        # incremental: a scene with sprite coverage already stored is a pure
-        # DB read (fast, no identify call at all) -- everything else (full
-        # scans always; incremental scans only for scenes still missing
-        # sprite coverage) goes through identify_scenes_batched. This is a
-        # real rematch, not a re-read: use_cache=True skips ffmpeg/detection
-        # entirely (both video-frame and sprite-tile embeddings are cached
-        # -- see identification_router.py), so it only redoes matching, but
-        # it does so fresh, against whatever the local performer index and
-        # main database currently contain -- which is the whole point of a
-        # full scan (see module docstring).
+        # incremental: a scene with sprite coverage already stored, or one
+        # without it while the sprite-detection setting is off (nothing to
+        # top up in that case -- see this analyzer's own module docstring:
+        # incremental's top-up rematch exists solely to add sprite
+        # coverage, not to catch performer-DB changes), is a pure DB read
+        # (fast, no identify call at all). Everything else (full scans
+        # always; incremental scans only for scenes still missing sprite
+        # coverage with the setting on) goes through identify_scenes_batched.
+        # This is a real rematch, not a re-read: use_cache=True skips
+        # ffmpeg/detection entirely (both video-frame and sprite-tile
+        # embeddings are cached -- see identification_router.py), so it
+        # only redoes matching, but it does so fresh, against whatever the
+        # local performer index and main database currently contain --
+        # which is the whole point of a full scan (see module docstring).
+        # use_sprite on that rematch itself is also gated on the setting:
+        # a full scan still always rematches, just without requesting new
+        # sprite coverage when the setting is off.
         stored_scenes: list[tuple[str, dict]] = []  # (scene_id, fingerprint row)
         rematch_specs = []
         for scene in scenes_to_scan:
@@ -175,7 +191,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                 processed += 1
                 self.update_progress(processed, created)
                 continue
-            if incremental and fp.get("used_sprite"):
+            if incremental and (fp.get("used_sprite") or not use_sprite):
                 stored_scenes.append((scene_id, fp))
                 continue
             file_info = (scene.get("files") or [{}])[0]
@@ -188,7 +204,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     matching_mode="hybrid",
                     top_k=5,
                     use_cache=True,
-                    use_sprite=True,
+                    use_sprite=use_sprite,
                 ),
             ))
 

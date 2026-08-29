@@ -140,9 +140,15 @@ class TestUseSpriteAlwaysRequested:
     embeddings already are (scene_face_embeddings, is_sprite=1 -- see
     identification_router.py's scene_sprite_cache_status), so requesting
     them costs real detection time only the first time for a given scene,
-    then nothing on every call after. A bulk run always requests it now --
+    then nothing on every call after. A bulk run requests it by default --
     missing scenes, scenes refreshed for being outdated, and scenes that
-    already had sprite coverage all get (or keep) it."""
+    already had sprite coverage all get (or keep) it -- unless the "Use
+    Sprite Tiles For Detection" setting is off (see
+    TestUseSpriteGatedBySetting below); these tests don't call
+    settings.init_settings() at all, so generate_all()'s own
+    RuntimeError/KeyError fallback (settings unavailable -> default True)
+    is what's actually exercised here, same net effect as the setting
+    being on."""
 
     async def test_missing_scene_requests_use_sprite(self):
         gen, stash, rec_db = _generator()
@@ -201,6 +207,41 @@ class TestUseSpriteAlwaysRequested:
             [p async for p in gen.generate_all(batch_size=100, refresh_outdated=True)]
 
         assert captured_specs[0].request.use_sprite is True
+
+
+class TestUseSpriteGatedBySetting:
+    """generate_all() reads the "Use Sprite Tiles For Detection" setting
+    once per run (see its own docstring for why per-run, not per-scene) and
+    threads that value into every scene's use_sprite request -- explicit
+    coverage for both settings values, on top of TestUseSpriteAlwaysRequested's
+    settings-unavailable fallback case above."""
+
+    async def _run_with_setting(self, value: bool):
+        gen, stash, rec_db = _generator()
+        _scene = {"id": "1", "title": "S1", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
+        stash.get_scenes_for_fingerprinting = AsyncMock(
+            side_effect=[([_scene], 1), ([_scene], 1), ([], 1)]
+        )
+        rec_db.get_scene_fingerprint.return_value = None
+        captured_specs = []
+
+        def _batched(specs, is_stop_requested=None, before_scene=None, on_scene_start=None):
+            captured_specs.extend(specs)
+            return _batched_results([("1", _response(faces_after_filter=1))])(specs)
+
+        with patch("settings.get_setting", return_value=value), \
+                patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_batched):
+            [p async for p in gen.generate_all(batch_size=100)]
+
+        return captured_specs
+
+    async def test_setting_enabled_requests_use_sprite(self):
+        specs = await self._run_with_setting(True)
+        assert specs[0].request.use_sprite is True
+
+    async def test_setting_disabled_does_not_request_use_sprite(self):
+        specs = await self._run_with_setting(False)
+        assert specs[0].request.use_sprite is False
 
 
 class TestGenerateAllBatchedLoop:

@@ -238,6 +238,19 @@ class SceneFingerprintGenerator:
 
         resuming = start_offset > 0 or start_processed > 0
 
+        # Read once per run (a resumed job re-enters generate_all(), so this
+        # is also re-read on every resume) rather than per-scene/per-batch --
+        # see the "Use Sprite Tiles For Detection" setting's own description
+        # for why this granularity is the intended behavior: pausing a run,
+        # flipping the setting, and resuming picks up the new value; toggling
+        # it mid-run without pausing does not.
+        try:
+            from settings import get_setting
+            use_sprite = bool(get_setting("sprite_detection_enabled"))
+        except (RuntimeError, KeyError):
+            use_sprite = True
+        logger.warning("Fingerprint generation: sprite_detection_enabled=%s", use_sprite)
+
         try:
             # Get total scene count
             _, total = await self._get_scenes_with_retry(limit=1, offset=0)
@@ -362,9 +375,14 @@ class SceneFingerprintGenerator:
                             # sprite coverage just reuses that cache, and one
                             # that doesn't gets it computed and cached now
                             # instead of leaving that for a later on-demand
-                            # top-up in scene_face_match.py.
+                            # top-up in scene_face_match.py. Gated on the
+                            # "Use Sprite Tiles For Detection" setting
+                            # (use_sprite local var, read once above) --
+                            # when off, no sprite work is requested and
+                            # nothing gets generated for scenes that don't
+                            # already have it cached.
                             request=self._build_identify_request(
-                                sid, start_offset_pct, end_offset_pct, use_sprite=True,
+                                sid, start_offset_pct, end_offset_pct, use_sprite=use_sprite,
                             ),
                         )
 

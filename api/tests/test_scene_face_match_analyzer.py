@@ -212,6 +212,67 @@ class TestRematchPath:
         assert any("boom" in e for e in result.errors)
 
 
+class TestUseSpriteGatedBySetting:
+    """"Use Sprite Tiles For Detection" read once per run, same as
+    fingerprint_generator.generate_all(). When off: incremental's top-up
+    (whose only purpose is adding sprite coverage) has nothing to do, so a
+    scene without sprite coverage falls back to the stored-data read
+    instead of a rematch; a full scan still always rematches (that's its
+    whole point -- reflect the current performer DB), just without
+    requesting new sprite coverage on that rematch."""
+
+    async def test_incremental_scene_without_sprite_coverage_uses_stored_data_when_setting_off(self):
+        fp = {"id": 7, "fingerprint_status": "complete", "used_sprite": 0}
+        analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
+        rec_db.get_fingerprint_matches.return_value = [_match_row("stashdb.org:abc")]
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("settings.get_setting", return_value=False), \
+                    patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
+                result = await analyzer.run(incremental=True)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        assert batched.call_args.args[0] == []
+        rec_db.get_fingerprint_matches.assert_called_once_with(7)
+        assert result.recommendations_created == 1
+
+    async def test_full_scan_rematches_without_requesting_sprite_when_setting_off(self):
+        fp = {"id": 5, "fingerprint_status": "complete", "used_sprite": 1}
+        analyzer, stash, rec_db = _analyzer([_scene(1)], {1: fp})
+
+        match = SimpleNamespace(
+            stashdb_id="xyz", name="Someone", confidence=0.9, distance=0.1, country=None,
+            image_url=None, endpoint="stashdb.org", local_performer_id=None, source=None,
+            catalogue_url=None, profile_url=None, top_timestamps_sec=[],
+        )
+        person = SimpleNamespace(person_id=0, frame_count=20, best_match=match, all_matches=[match])
+        response = SimpleNamespace(persons=[person])
+
+        async def _fake_batched(specs, is_stop_requested=None, before_scene=None):
+            assert len(specs) == 1
+            assert specs[0].request.use_cache is True
+            assert specs[0].request.use_sprite is False
+            yield "1", response
+
+        patchers = _patch_common()
+        for p in patchers:
+            p.start()
+        try:
+            with patch("settings.get_setting", return_value=False), \
+                    patch("scene_batch_orchestrator.identify_scenes_batched", side_effect=_fake_batched):
+                result = await analyzer.run(incremental=False)
+        finally:
+            for p in patchers:
+                p.stop()
+
+        assert result.recommendations_created == 1
+
+
 class TestWatermarkAdvancement:
     """Confirmed live: a scene skipped for lacking Face Identification data
     still had its updated_at folded into the advanced watermark, so an

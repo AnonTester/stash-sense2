@@ -101,6 +101,17 @@ _define("idle_unload_minutes", "Idle Unload Timeout",
         "with a one-time delay for that request). Set to 0 to never unload once loaded.",
         "performance", SettingType.INT, fallback=60, min_val=0, max_val=1440)
 
+_define("sprite_detection_enabled", "Use Sprite Tiles For Detection",
+        "Additionally detect faces from each scene's sprite/scrubber-bar preview tiles "
+        "during Fingerprint Missing, Refresh Outdated, and Face Recommendations "
+        "background scans -- improves detection accuracy at the cost of longer "
+        "per-scene processing time. Sprite embeddings are cached once generated, so "
+        "this mainly adds cost the first time a scene is processed with it on. "
+        "Turning this off never deletes already-generated sprite data, it just stops "
+        "generating more. Checked at the start of each task run, so pausing and "
+        "resuming an in-progress task after changing this takes effect on that resume.",
+        "performance", SettingType.BOOL, fallback=True)
+
 # -- Rate Limits --
 _define("stash_api_rate", "Stash API Rate",
         "Maximum requests per second to local Stash instance",

@@ -1,5 +1,26 @@
 ## 2026-08-29
 
+### 0.23.0 (sidecar only)
+- Improvement: sprite-tile face detection now sizes the detector's input
+  canvas to each scene's actual sprite-tile dimensions instead of forcing
+  every tile onto the fixed 640x640 default. InsightFace's SCRFD detector
+  letterboxes *every* input onto whatever fixed square canvas det_size
+  specifies, so a ~160x90 sprite tile was paying the same full-canvas
+  detection cost as a real video frame despite being far smaller --
+  confirmed via a 500-scene/~40k-tile production benchmark to be ~3x
+  faster overall (up to ~8x per-tile in steady state) with a small
+  *positive* accuracy delta, not a tradeoff. Applies everywhere sprite
+  tiles get detected: Fingerprint Missing, Refresh Outdated, and Face
+  Recommendations.
+- Feature: new "Use Sprite Tiles For Detection" setting (Settings ->
+  Performance, on by default) lets sprite-tile detection be turned off for
+  Fingerprint Missing, Refresh Outdated, and Face Recommendations
+  background scans -- useful for comparing throughput/accuracy, or for
+  deferring sprite coverage to a later run. Turning it off never deletes
+  already-generated sprite data, it just stops generating more; read once
+  at the start of each task run, so pausing and resuming an in-progress
+  task after changing it takes effect on that resume.
+
 ### 0.22.0 (sidecar) / 0.19.0 (plugin)
 - Fix: accepting a Face Recommendations match (or an Upstream Scene
   Changes performer add, or the live Identify modal's "Add to Stash +
