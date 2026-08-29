@@ -11,6 +11,18 @@ the fetch too was tried and reverted -- Stash's image URL cache-busting
 param tracks updated_at, which changes on *any* field edit, not just an
 image swap, so it couldn't tell "nothing changed" from "renamed."
 
+The one bulk `get_all_performers()` call in `run()` already returns every
+field (image_path, stash_ids, name) that a per-performer GraphQL query
+would -- `_fetch_one()` uses that directly rather than re-fetching each
+performer individually. That per-performer re-fetch used to go through
+the shared RateLimiter that guards the local Stash instance's API (5
+req/sec by default) on every one of them -- confirmed live, that alone
+turned a run over ~1600 already-unchanged performers into 5+ minutes,
+regardless of FETCH_CONCURRENCY, since the limiter serializes across all
+concurrent fetches. The image download itself bypasses that GraphQL
+client/rate limiter entirely (a plain httpx call), so removing the
+redundant re-fetch leaves this job bound only by that.
+
 A performer with no custom cover image still returns an image_path, but
 Stash marks it with a "default=true" query param -- that's how "no image
 yet" is detected, without needing to fetch and fail to decode a
@@ -77,6 +89,17 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 # per-100-scenes checkpoint cadence.
 CHECKPOINT_BATCH_SIZE = 50
 
+# How often to push a live progress update (JobContext.report_progress).
+# Each call is a synchronous SQLite UPDATE (open connection, write, commit,
+# close) on the coordinator's own event loop -- confirmed live, calling it
+# on every single completion (as this job originally did) turned a run
+# over ~1600 already-unchanged performers (a few seconds of real fetch
+# work at FETCH_CONCURRENCY=8) into 5+ minutes, entirely spent on ~1600
+# individual DB commits with no GPU/CPU work behind them at all. A small
+# interval keeps the displayed progress/ETA responsive without paying that
+# cost per item.
+PROGRESS_REPORT_INTERVAL = 20
+
 FETCH_CONCURRENCY = 8
 EMBED_WORKERS = 2
 
@@ -100,16 +123,23 @@ async def _fetch_one(
     # (see _embed_worker) don't need this -- a blocking put() there only
     # blocks that one dedicated thread, which is fine/expected backpressure.
     async with semaphore:
-        try:
-            detail = await stash.get_performer(str(performer_id))
-        except Exception as e:
-            logger.warning("Local performer sync: failed to fetch performer %d: %s", performer_id, e)
-            await asyncio.to_thread(event_queue.put, ("fetch_error", performer_id, position, None))
-            return
-
-        image_path = detail.get("image_path") if detail else None
+        # `performer` already has everything get_performer() would return --
+        # get_all_performers() and get_performer() fetch the exact same
+        # field set (see stash_client_unified.py). Re-fetching it here
+        # per-performer was pure waste, and a costly one: every such call
+        # goes through RateLimiter (5 req/sec by default, protecting the
+        # user's own Stash instance), serializing all FETCH_CONCURRENCY
+        # fetches onto one shared budget -- confirmed live, this alone
+        # accounted for the ~5 minutes a run over ~1600 performers took
+        # regardless of the report_progress throttling fix above (that fix
+        # was real but not the dominant cost). The image download below
+        # bypasses the GraphQL client/rate limiter entirely (plain
+        # client.get), so removing this call leaves fetches bound only by
+        # that -- confirmed fast (single-digit milliseconds) even under
+        # concurrency.
+        image_path = performer.get("image_path")
         has_custom_image = bool(image_path) and "default=true" not in image_path
-        if not detail or not has_custom_image:
+        if not has_custom_image:
             await asyncio.to_thread(event_queue.put, ("no_image", performer_id, position, None))
             return
 
@@ -128,11 +158,11 @@ async def _fetch_one(
             return
 
         stashdb_id = next(
-            (sid["stash_id"] for sid in (detail.get("stash_ids") or [])
+            (sid["stash_id"] for sid in (performer.get("stash_ids") or [])
              if sid.get("endpoint") == STASHDB_ENDPOINT),
             None,
         )
-        meta = {"name": detail["name"], "stashdb_id": stashdb_id, "image_url": _relative_image_url(image_path)}
+        meta = {"name": performer["name"], "stashdb_id": stashdb_id, "image_url": _relative_image_url(image_path)}
         await asyncio.to_thread(
             event_queue.put, ("needs_embed", performer_id, position, (image_bytes, fingerprint, meta)),
         )
@@ -278,14 +308,28 @@ class LocalPerformerSyncJob(BaseJob):
         producer_finished = False
         worker_sentinels = 0
         since_checkpoint = 0
+        since_progress_report = 0
+        # Real completions, in whatever order they actually finish -- unlike
+        # next_expected (only the *contiguous* prefix, since that's what the
+        # resume cursor needs), this is what progress/ETA should be measured
+        # against. Confirmed live: with next_expected alone, one slow
+        # straggler position pinned the displayed progress at "2" for
+        # several minutes while ~93 later positions had already completed
+        # concurrently, making a healthy run look stuck with a wildly wrong
+        # ETA. Starts at start_position, same as next_expected, so a
+        # resumed run's displayed progress is absolute (out of `total`),
+        # not reset to 0 for just the remaining work.
+        completed_count = start_position
 
         def _advance_and_report(position: int) -> None:
-            nonlocal next_expected, since_checkpoint
+            nonlocal next_expected, since_checkpoint, since_progress_report, completed_count
             completed_positions.add(position)
             while next_expected in completed_positions:
                 completed_positions.discard(next_expected)
                 next_expected += 1
             since_checkpoint += 1
+            since_progress_report += 1
+            completed_count += 1
 
         while True:
             kind, performer_id, position, payload = await asyncio.to_thread(event_queue.get)
@@ -338,13 +382,23 @@ class LocalPerformerSyncJob(BaseJob):
                     added += 1
 
             _advance_and_report(position)
-            await context.report_progress(next_expected, total)
+            if since_progress_report >= PROGRESS_REPORT_INTERVAL:
+                since_progress_report = 0
+                await context.report_progress(completed_count, total)
 
             if since_checkpoint >= CHECKPOINT_BATCH_SIZE:
                 since_checkpoint = 0
                 index.save()
-                await context.checkpoint(cursor=json.dumps({"position": next_expected}), items_processed=next_expected)
-                logger.debug("Local performer sync checkpoint: position=%d/%d", next_expected, total)
+                # cursor stays next_expected (the contiguous-prefix resume
+                # point -- correctness-critical), but items_processed is
+                # completed_count (real progress -- display-critical). These
+                # can legitimately differ for a while under concurrency; see
+                # completed_count's own comment above.
+                await context.checkpoint(cursor=json.dumps({"position": next_expected}), items_processed=completed_count)
+                logger.debug(
+                    "Local performer sync checkpoint: resume_position=%d, completed=%d/%d",
+                    next_expected, completed_count, total,
+                )
 
             if context.is_stop_requested() and not stop_event.is_set():
                 stop_event.set()  # prevents new fetches from starting; in-flight ones still complete and get applied
@@ -353,6 +407,10 @@ class LocalPerformerSyncJob(BaseJob):
         for t in embed_threads:
             t.join()
         index.save()
+        # Final report regardless of the throttle above -- otherwise a total
+        # not evenly divisible by PROGRESS_REPORT_INTERVAL leaves the last
+        # few completions never reflected in the displayed progress.
+        await context.report_progress(completed_count, total)
 
         stopped_early = context.is_stop_requested()
         logger.warning(

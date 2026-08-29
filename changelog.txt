@@ -1,5 +1,29 @@
 ## 2026-08-29
 
+### 0.21.2 (sidecar only)
+- Fix: the local performer sync job's progress/ETA display got stuck
+  behind the slowest still-in-flight performer instead of reflecting real
+  completions -- confirmed live (a run reported "2/1567" with a climbing
+  ETA while actually running to completion normally in the background).
+  Progress and checkpoint item counts were both driven off the resumable
+  cursor position, which only advances through the contiguous prefix of
+  finished work by design (that's what a correct resume point needs);
+  displayed progress needs the real, possibly out-of-order completion
+  count instead. Added a separate counter for that, seeded from the
+  resume position so a resumed run's displayed progress stays absolute
+  rather than resetting.
+- Fix: local performer sync took 5+ minutes even when every performer was
+  already unchanged (no GPU/CPU work at all) -- confirmed live, a run over
+  1587 performers dropped from 5m19s to 10s. Two contributing costs, both
+  removed: report_progress() was called on every single completion instead
+  of periodically (each call is a synchronous SQLite commit); and, the
+  dominant cost, each performer was re-fetched individually via a GraphQL
+  call that's just as expensive as the one bulk get_all_performers() call
+  already made at job start, and goes through the sidecar's rate limiter
+  protecting the local Stash instance (5 req/sec by default) -- serializing
+  the entire run to that rate regardless of fetch concurrency. Removed the
+  redundant per-performer re-fetch entirely.
+
 ### 0.18.1 (plugin only)
 - Fix: long scene titles with no spaces (e.g. dotted/underscored filenames
   used as titles) didn't wrap in Face Recommendations cards, breaking the

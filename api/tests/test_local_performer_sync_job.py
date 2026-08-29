@@ -5,6 +5,8 @@ end to end (small performer counts, mocked network/model calls) rather
 than a simplified reimplementation -- concurrency bugs live in the real
 interleaving, not in a serial stand-in for it.
 """
+import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,19 +26,14 @@ class _FakeStash:
         self._performers = performers
 
     async def get_all_performers(self):
+        # _fetch_one() reads name/image_path/stash_ids straight off this --
+        # it no longer makes a separate per-performer get_performer() call
+        # (that used to re-fetch the exact same fields one at a time
+        # through the rate limiter; see local_performer_sync_job.py).
         return [
-            {"id": str(pid), "image_path": p["image_path"]}
+            {"id": str(pid), "name": p["name"], "image_path": p["image_path"], "stash_ids": []}
             for pid, p in self._performers.items()
         ]
-
-    async def get_performer(self, performer_id: str):
-        p = self._performers.get(int(performer_id))
-        if p is None:
-            return None
-        return {
-            "id": performer_id, "name": p["name"], "image_path": p["image_path"],
-            "stash_ids": [],
-        }
 
 
 def _make_context():
@@ -71,13 +68,19 @@ def _patch_load_image():
     return patch("jobs.local_performer_sync_job.load_image", return_value=np.zeros((10, 10, 3), dtype=np.uint8))
 
 
-def _patch_http(image_bytes: bytes = b"fake-image-bytes"):
+def _patch_http(image_bytes: bytes = b"fake-image-bytes", get_side_effect=None):
+    """get_side_effect, if given, replaces the default fixed-response mock
+    entirely (e.g. to delay/inspect specific URLs) -- see
+    test_progress_advances_past_a_slow_straggler."""
     mock_response = MagicMock()
     mock_response.content = image_bytes
     mock_response.raise_for_status = MagicMock()
 
     client_instance = AsyncMock()
-    client_instance.get = AsyncMock(return_value=mock_response)
+    if get_side_effect is not None:
+        client_instance.get = AsyncMock(side_effect=get_side_effect)
+    else:
+        client_instance.get = AsyncMock(return_value=mock_response)
 
     mock_client_cls = MagicMock()
     mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=client_instance)
@@ -235,3 +238,114 @@ class TestLocalPerformerSyncJob:
         assert len(index) == 20
         for i in range(1, 21):
             assert i in index
+
+    async def test_progress_advances_past_a_slow_straggler(self, index_paths, monkeypatch):
+        """Confirmed live: a job stuck reporting "2 of 1567" for several
+        minutes while ~93 later positions had already completed
+        concurrently -- one slow performer (position 0 here) must not pin
+        the *displayed* progress while later positions (1, 2) finish
+        first. See completed_count's own comment in the job for the fix."""
+        index_path, mapping_path = index_paths
+        monkeypatch.setattr(
+            "jobs.local_performer_sync_job.DatabaseConfig",
+            lambda data_dir: SimpleNamespace(
+                local_embedding_index_path=index_path, local_faces_json_path=mapping_path,
+            ),
+        )
+        # report_progress is throttled to PROGRESS_REPORT_INTERVAL completions
+        # in real runs (a synchronous DB write per call -- confirmed live,
+        # calling it per-item turned a few seconds of real work into 5+
+        # minutes over ~1600 performers). With only 3 performers here, the
+        # real interval would mean report_progress never fires at all before
+        # this test's own assertion window closes -- drop it to 1 so this
+        # test still observes every completion, same as it did before the
+        # throttle existed.
+        monkeypatch.setattr("jobs.local_performer_sync_job.PROGRESS_REPORT_INTERVAL", 1)
+        performers = {
+            i: {"name": f"P{i}", "image_path": f"http://stash/performer/{i}/image"}
+            for i in range(1, 4)
+        }
+        stash = _FakeStash(performers)
+        monkeypatch.setattr("jobs.local_performer_sync_job.get_stash_client", lambda: stash)
+
+        # Performer 1 (position 0, sorted first) hangs until released, at
+        # its image fetch -- the one remaining async call _fetch_one() makes
+        # per performer now that the redundant get_performer() re-fetch is
+        # gone (see local_performer_sync_job.py). Performers 2 and 3
+        # (positions 1, 2) must still be reported as progress before it
+        # resolves. threading.Event, not asyncio.Event: _produce() runs on
+        # its own event loop in its own OS thread (see
+        # LocalPerformerSyncJob.run()'s producer_thread), a different loop
+        # than this test's -- an asyncio.Event created here can't safely be
+        # awaited over there.
+        release_straggler = threading.Event()
+        mock_response = MagicMock()
+        mock_response.content = b"fake-image-bytes"
+        mock_response.raise_for_status = MagicMock()
+
+        async def _slow_get(url, **kwargs):
+            if "/performer/1/" in url:
+                await asyncio.to_thread(release_straggler.wait)
+            return mock_response
+
+        ctx = _make_context()
+        reported_before_release: list[int] = []
+        ctx.report_progress = AsyncMock(side_effect=lambda done, total: reported_before_release.append(done))
+
+        with _patch_generator(), _patch_load_image(), _patch_http(get_side_effect=_slow_get):
+            job = LocalPerformerSyncJob()
+            run_task = asyncio.create_task(job.run(ctx, cursor=None))
+            # Give the fast positions (1, 2) a real chance to complete on
+            # their own OS thread/event loop while position 0 is still
+            # blocked -- a zero-delay sleep loop only yields within this
+            # test's own loop, not real wall-clock time for the producer
+            # thread to actually run.
+            # release_straggler must always get set before this test exits --
+            # otherwise _produce()'s blocking asyncio.to_thread(...wait) never
+            # returns, leaking a permanently-stuck thread-pool worker that
+            # hangs the *entire* test process at interpreter shutdown, not
+            # just this test. try/finally so an assertion failure here still
+            # fails cleanly instead of hanging the whole suite.
+            try:
+                for _ in range(100):
+                    if max(reported_before_release, default=0) >= 2:
+                        break
+                    await asyncio.sleep(0.02)
+                assert max(reported_before_release, default=0) >= 2, (
+                    "progress should reflect positions 1/2 completing, not stay "
+                    "pinned at 0 behind the still-blocked straggler"
+                )
+            finally:
+                release_straggler.set()
+            await run_task
+
+    async def test_resumed_run_reports_absolute_progress(self, index_paths, monkeypatch):
+        """A resumed run's displayed progress must be absolute (out of the
+        full `total`), not reset to counting only the remaining work --
+        completed_count starts at start_position, same as next_expected."""
+        index_path, mapping_path = index_paths
+        monkeypatch.setattr(
+            "jobs.local_performer_sync_job.DatabaseConfig",
+            lambda data_dir: SimpleNamespace(
+                local_embedding_index_path=index_path, local_faces_json_path=mapping_path,
+            ),
+        )
+        performers = {
+            i: {"name": f"P{i}", "image_path": f"http://stash/performer/{i}/image"}
+            for i in range(1, 6)
+        }
+        stash = _FakeStash(performers)
+        monkeypatch.setattr("jobs.local_performer_sync_job.get_stash_client", lambda: stash)
+
+        ctx = _make_context()
+        reported: list[int] = []
+        ctx.report_progress = AsyncMock(side_effect=lambda done, total: reported.append(done))
+
+        with _patch_generator(), _patch_load_image(), _patch_http():
+            job = LocalPerformerSyncJob()
+            import json as json_mod
+            await job.run(ctx, cursor=json_mod.dumps({"position": 3}))
+
+        # Resuming from position 3 with 2 remaining performers -> reported
+        # progress should climb from 4 towards 5, never restart at 1.
+        assert min(reported) >= 4
