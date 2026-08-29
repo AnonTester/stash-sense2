@@ -1283,6 +1283,13 @@ def handle_recommendations(mode, args, sidecar_url):
             {"rec_id": args.get("rec_id")},
         )
 
+    elif mode == "rec_undismiss_scene_face_match":
+        return sidecar_post(
+            sidecar_url,
+            "/recommendations/actions/undismiss-scene-face-match",
+            {"rec_id": args.get("rec_id")},
+        )
+
     elif mode == "rec_accept_all_fingerprint_matches":
         payload = {}
         endpoint = args.get("endpoint")

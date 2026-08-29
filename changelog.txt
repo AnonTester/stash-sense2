@@ -1,3 +1,33 @@
+## 2026-08-30
+
+### 0.24.0 (sidecar) / 0.20.0 (plugin)
+- Feature: Face Recommendations gained a "Show Dismissed" toggle on a
+  scene's detail view, listing that scene's previously-dismissed candidate
+  matches with when each was dismissed, plus a per-candidate Undismiss
+  button. Dismissing correctly never resurfaces automatically (a later
+  rematch's UNIQUE-constrained insert silently no-ops against the
+  existing dismissed row, by design), but that made it invisible with no
+  way to recover from an accidental dismissal -- this makes dismissed
+  matches visible and reversible again without deleting any data. New
+  sidecar endpoints: `POST /recommendations/{rec_id}/undismiss` (generic)
+  and `POST /recommendations/actions/undismiss-scene-face-match`
+  (dedicated, mirroring the existing dismiss-scene-face-match action);
+  `GET /recommendations/{rec_id}` for a pending scene_face_match group now
+  also returns `details.dismissed_candidates`/`dismissed_persons`/
+  `dismissed_count`. Now requires sidecar v0.24.0+ (MIN_SIDECAR_VERSION
+  bumped) for the new toggle/button to have anything to call.
+- Fix: the live Identify results view could show "Add to Scene" for a
+  performer already tagged on the scene, requiring a manual re-identify
+  before it would correctly show as already assigned. A performer tagged
+  a long time before the scene's last identify run displayed correctly by
+  coincidence (the stored already_tagged flag happened to still be
+  accurate); one tagged more recently -- including one just added from
+  the same results view a moment earlier -- stayed stale until a full
+  re-identify forced a fresh scene-performer lookup. renderResults() now
+  always resolves the scene's current tagged performers live when a
+  stored/cached result didn't already carry them, instead of silently
+  treating everyone as untagged in that case.
+
 ## 2026-08-29
 
 ### 0.23.0 (sidecar only)

@@ -579,9 +579,19 @@
           return;
         }
 
-        // Build set of StashDB IDs already tagged on this scene
+        // Build set of StashDB IDs already tagged on this scene. Reuse
+        // results._scenePerformers when a fresh identifyScene() call
+        // already fetched it (avoids a duplicate query); a stored result
+        // (fingerprint_get_scene_result, the common "instant" path -- see
+        // handleIdentifyFullVideo) never has that attached at all, so
+        // without this live fallback every performer looked already
+        // untagged regardless of the scene's actual current state --
+        // confirmed live: "Add to Scene" showing for a performer already
+        // on the scene. Fetching fresh here also self-heals staleness in
+        // the *stored* already_tagged flag itself (computed once, at
+        // identify time, never refreshed just from viewing the result).
         const taggedStashDBIds = new Set();
-        const scenePerformers = results._scenePerformers || [];
+        const scenePerformers = results._scenePerformers || await this.getScenePerformerStashDBIds(sceneId);
         const scenePerformerLocalIds = new Set();
         for (const p of scenePerformers) {
           scenePerformerLocalIds.add(p.id);

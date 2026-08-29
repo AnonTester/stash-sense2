@@ -730,6 +730,11 @@ def _scene_face_match_candidate(rec: Recommendation) -> dict[str, Any]:
         "top_timestamps_sec": details.get("top_timestamps_sec") or [],
         "status": rec.status,
         "resolution_action": rec.resolution_action,
+        # Only meaningful for a dismissed row -- dismiss_recommendation()
+        # doesn't set resolved_at (that's resolve_recommendation()'s own
+        # field), so the dismissal moment is whatever updated_at was left
+        # at by that status change. None for a still-pending candidate.
+        "dismissed_at": (rec.resolved_at or rec.updated_at) if rec.status == "dismissed" else None,
     }
 
 
@@ -855,7 +860,20 @@ def _build_scene_face_match_group_for_recommendation(
     db: RecommendationsDB,
     rec: Recommendation,
 ) -> Recommendation:
-    """Expand one scene_face_match recommendation into its grouped scene view."""
+    """Expand one scene_face_match recommendation into its grouped scene view.
+
+    A performer dismissed here once never gets re-recommended by a later
+    rematch (create_recommendation's UNIQUE(type, target_type, target_id)
+    constraint blocks re-inserting that same scene+performer row, and
+    BaseAnalyzer.create_recommendation's own is_dismissed() pre-check skips
+    even trying) -- correct behavior (a dismissal means something, don't
+    silently resurrect it), but invisible to the user, who may have
+    dismissed something in error with no way to see or undo it. So when
+    the primary (pending) group is being built, also attach that scene's
+    dismissed candidates under "dismissed_candidates"/"dismissed_persons"
+    so the UI can offer a "show dismissed" toggle with a per-candidate
+    undismiss action (see the /{rec_id}/undismiss endpoint) -- without
+    an extra round trip."""
     scene_id = _extract_scene_face_match_scene_id(rec)
     if not scene_id:
         return rec
@@ -868,10 +886,42 @@ def _build_scene_face_match_group_for_recommendation(
             target_type=rec.target_type,
         )
     )
+    match = None
     for grouped_rec in grouped_recs:
         if _extract_scene_face_match_scene_id(grouped_rec) == scene_id:
-            return grouped_rec
-    return rec
+            match = grouped_rec
+            break
+    if match is None:
+        return rec
+
+    if rec.status == "pending":
+        dismissed_group = _dismissed_scene_face_match_group(db, scene_id, rec.target_type)
+        match.details["dismissed_candidates"] = dismissed_group["candidates"]
+        match.details["dismissed_persons"] = dismissed_group["persons"]
+        match.details["dismissed_count"] = len(dismissed_group["candidates"])
+
+    return match
+
+
+def _dismissed_scene_face_match_group(
+    db: RecommendationsDB, scene_id: str, target_type: str,
+) -> dict[str, Any]:
+    """The dismissed-status counterpart of one scene's scene_face_match
+    group -- candidates/persons only, no synthetic Recommendation wrapper
+    needed since callers just want the lists to attach onto another
+    response. Empty lists if nothing's been dismissed for this scene."""
+    dismissed_recs = _group_scene_face_match_recommendations(
+        _load_all_recommendations(
+            db, status="dismissed", type="scene_face_match", target_type=target_type,
+        )
+    )
+    for grouped_rec in dismissed_recs:
+        if _extract_scene_face_match_scene_id(grouped_rec) == scene_id:
+            return {
+                "candidates": grouped_rec.details.get("candidates", []),
+                "persons": grouped_rec.details.get("persons", []),
+            }
+    return {"candidates": [], "persons": []}
 
 
 def _load_all_recommendations(
@@ -1327,6 +1377,39 @@ async def dismiss_recommendation(rec_id: int, request: DismissRequest = None):
     if not success:
         raise HTTPException(status_code=404, detail="Recommendation not found")
     return {"success": True}
+
+
+@router.post("/{rec_id}/undismiss", response_model=SuccessResponse)
+async def undismiss_recommendation(rec_id: int):
+    """Reverse a dismissal so this scene+performer match can be
+    recommended/shown again -- the counterpart to /dismiss."""
+    logger.debug("Action: undismiss rec_id=%s", rec_id)
+    _undismiss_recommendation_by_id(get_rec_db(), rec_id)
+    return {"success": True}
+
+
+def _undismiss_recommendation_by_id(db: RecommendationsDB, rec_id: int) -> None:
+    """Shared by the generic /{rec_id}/undismiss endpoint above and
+    /actions/undismiss-scene-face-match below. Only valid on a currently-
+    dismissed recommendation; a dismissal made permanent via
+    add_recommendation_target_dismissal(permanent=True) elsewhere still
+    reverses here (this only ever writes soft dismissals -- see
+    RecommendationsDB.undismiss's own permanent=0 guard), consistent with
+    every other dismiss path in this router. Raises HTTPException (404/400)
+    on failure, same as every other single-recommendation action here."""
+    rec = db.get_recommendation(rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    if rec.status != "dismissed":
+        raise HTTPException(status_code=400, detail="Recommendation is not dismissed")
+
+    success = db.reopen_recommendation(rec_id, rec.details)
+    if not success:
+        raise HTTPException(status_code=404, detail="Recommendation not found")
+    # Clear the dismissed_targets entry too, or a later analyzer run's
+    # is_dismissed() pre-check (BaseAnalyzer.create_recommendation) would
+    # keep silently skipping a fresh recommendation for this exact target.
+    db.undismiss(rec.type, rec.target_type, rec.target_id)
 
 
 # ==================== Analysis Endpoints ====================
@@ -4389,6 +4472,16 @@ async def dismiss_scene_face_match(request: DismissSceneFaceMatchRequest):
     ok = db.dismiss_recommendation(request.rec_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Recommendation not found")
+    return {"success": True}
+
+
+@router.post("/actions/undismiss-scene-face-match", response_model=SuccessResponse)
+async def undismiss_scene_face_match(request: DismissSceneFaceMatchRequest):
+    """Reverse a dismissal on a single scene_face_match candidate -- the
+    counterpart to dismiss_scene_face_match above, for the "show dismissed"
+    toggle's per-candidate undismiss action (see
+    _build_scene_face_match_group_for_recommendation's docstring)."""
+    _undismiss_recommendation_by_id(get_rec_db(), request.rec_id)
     return {"success": True}
 
 

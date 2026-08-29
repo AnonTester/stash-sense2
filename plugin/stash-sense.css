@@ -4076,6 +4076,21 @@ a.ss-detail-entity-link:hover {
   border-top: 1px solid var(--bs-border-color, #333);
 }
 
+.ss-sfm-dismissed-toggle-row {
+  margin-top: 0.75rem;
+}
+
+.ss-sfm-dismissed-persons {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--bs-border-color, #333);
+}
+
+.ss-sfm-candidate-dismissed-at {
+  font-size: 11px;
+  color: var(--bs-secondary-color, #888);
+}
+
 @media (max-width: 600px) {
   .ss-sfm-persons {
     flex-direction: column;

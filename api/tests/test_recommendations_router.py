@@ -493,6 +493,143 @@ class TestSceneFaceMatchLocalLinkEnrichment:
         assert candidates[0]["local_performer_id"] is None
 
 
+class TestSceneFaceMatchDismissedCandidates:
+    """GET /recommendations/{rec_id} for a pending scene_face_match group
+    also attaches that scene's dismissed candidates (details.dismissed_*)
+    so the UI can offer a "show dismissed" toggle -- see
+    _build_scene_face_match_group_for_recommendation's own docstring for
+    why this exists (a dismissed match never gets re-recommended by a
+    later rematch, which is correct, but was previously invisible with no
+    way to undo an accidental dismissal)."""
+
+    def _seed(self, db, scene_id, universal_id, person_id, status="pending", **overrides):
+        details = {
+            "scene_id": scene_id, "scene_title": "Test Scene", "person_id": person_id,
+            "universal_id": universal_id, "name": "Someone", "endpoint": "stashdb.org",
+            "stashdb_id": universal_id.split(":", 1)[-1], "confidence": 0.8,
+            "frame_count": 10, "is_best_match": True,
+        }
+        details.update(overrides)
+        rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene",
+            target_id=f"{scene_id}|{universal_id}", details=details, confidence=details["confidence"],
+        )
+        if status == "dismissed":
+            db.dismiss_recommendation(rec_id, reason="test")
+        return rec_id
+
+    def test_pending_group_has_no_dismissed_candidates_when_none_exist(self, client, db):
+        rec_id = self._seed(db, "600", "stashdb.org:aaa", person_id=0)
+
+        resp = client.get(f"/recommendations/{rec_id}")
+
+        assert resp.status_code == 200
+        assert resp.json()["details"]["dismissed_candidates"] == []
+        assert resp.json()["details"]["dismissed_count"] == 0
+
+    def test_pending_group_attaches_dismissed_candidates_for_same_scene(self, client, db):
+        pending_id = self._seed(db, "601", "stashdb.org:aaa", person_id=0)
+        self._seed(db, "601", "stashdb.org:bbb", person_id=1, status="dismissed", name="Dismissed One")
+
+        resp = client.get(f"/recommendations/{pending_id}")
+
+        assert resp.status_code == 200
+        details = resp.json()["details"]
+        assert details["dismissed_count"] == 1
+        assert details["dismissed_candidates"][0]["name"] == "Dismissed One"
+        assert details["dismissed_candidates"][0]["universal_id"] == "stashdb.org:bbb"
+        assert details["dismissed_candidates"][0]["dismissed_at"] is not None
+        # The pending group itself must not include the dismissed one.
+        assert all(c["universal_id"] != "stashdb.org:bbb" for c in details["candidates"])
+
+    def test_dismissed_candidates_scoped_to_the_right_scene(self, client, db):
+        pending_id = self._seed(db, "602", "stashdb.org:aaa", person_id=0)
+        self._seed(db, "603", "stashdb.org:ccc", person_id=0, status="dismissed")
+
+        resp = client.get(f"/recommendations/{pending_id}")
+
+        assert resp.status_code == 200
+        assert resp.json()["details"]["dismissed_candidates"] == []
+
+
+# ==================== POST /recommendations/{rec_id}/undismiss ====================
+
+
+class TestUndismissRecommendation:
+    """Test POST /recommendations/{rec_id}/undismiss -- the counterpart to
+    /dismiss, letting a user reverse a dismissal they consider a mistake."""
+
+    def test_undismiss_success(self, db, client):
+        rec_id = db.create_recommendation(
+            type="duplicate_performer", target_type="performer", target_id="900",
+            details={"name": "Test"}, confidence=0.9,
+        )
+        db.dismiss_recommendation(rec_id, reason="oops")
+        assert db.get_recommendation(rec_id).status == "dismissed"
+        assert db.is_dismissed("duplicate_performer", "performer", "900") is True
+
+        resp = client.post(f"/recommendations/{rec_id}/undismiss")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        reopened = db.get_recommendation(rec_id)
+        assert reopened.status == "pending"
+        # The dismissed_targets entry must also be cleared, or a later
+        # analyzer run's is_dismissed() pre-check would keep blocking a
+        # fresh recommendation for this same target from ever being created.
+        assert db.is_dismissed("duplicate_performer", "performer", "900") is False
+
+    def test_undismiss_404_for_missing(self, client):
+        resp = client.post("/recommendations/99999/undismiss")
+        assert resp.status_code == 404
+
+    def test_undismiss_400_when_not_dismissed(self, db, client):
+        rec_id = db.create_recommendation(
+            type="duplicate_performer", target_type="performer", target_id="901",
+            details={"name": "Test"}, confidence=0.9,
+        )
+
+        resp = client.post(f"/recommendations/{rec_id}/undismiss")
+
+        assert resp.status_code == 400
+        assert db.get_recommendation(rec_id).status == "pending"
+
+
+class TestUndismissSceneFaceMatchAction:
+    """Test POST /recommendations/actions/undismiss-scene-face-match --
+    the scene_face_match "show dismissed" toggle's per-candidate undismiss
+    button goes through this dedicated action, mirroring
+    dismiss-scene-face-match's own dedicated (vs generic) endpoint."""
+
+    def test_undismiss_success(self, db, client):
+        rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id="700|stashdb.org:aaa",
+            details={"scene_id": "700", "person_id": 0}, confidence=0.8,
+        )
+        db.dismiss_recommendation(rec_id)
+
+        resp = client.post("/recommendations/actions/undismiss-scene-face-match", json={"rec_id": rec_id})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True}
+        assert db.get_recommendation(rec_id).status == "pending"
+        assert db.is_dismissed("scene_face_match", "scene", "700|stashdb.org:aaa") is False
+
+    def test_404_for_missing(self, client):
+        resp = client.post("/recommendations/actions/undismiss-scene-face-match", json={"rec_id": 99999})
+        assert resp.status_code == 404
+
+    def test_400_when_not_dismissed(self, db, client):
+        rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id="701|stashdb.org:bbb",
+            details={"scene_id": "701", "person_id": 0}, confidence=0.8,
+        )
+
+        resp = client.post("/recommendations/actions/undismiss-scene-face-match", json={"rec_id": rec_id})
+
+        assert resp.status_code == 400
+
+
 # ==================== POST /recommendations/{rec_id}/resolve ====================
 
 
