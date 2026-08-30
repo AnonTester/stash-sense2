@@ -5986,7 +5986,12 @@
     // design), which previously made it invisible with no way to undo an
     // accidental dismissal; this "show dismissed" toggle surfaces them.
     const dismissedPersons = d.dismissed_persons || [];
-    const dismissedCount = d.dismissed_count || 0;
+    // let, not const: the in-place dismiss/undismiss toggle below keeps
+    // this (and the toggle button's own label) in sync without a full
+    // reload -- see its own comment. The newly (un)dismissed candidate
+    // itself isn't moved into/out of the dismissed panel's own list on
+    // that path (would need constructing a whole new card), just the count.
+    let dismissedCount = d.dismissed_count || 0;
 
     container.innerHTML = '<div class="ss-loading">Loading scene details...</div>';
 
@@ -6167,22 +6172,41 @@
 
     if (!isPending) return;
 
+    // Dismissing a candidate in the main (pending) list toggles this same
+    // button to Undismiss in place, instead of removing it -- previously
+    // the only way back was leaving the recommendation and reopening it
+    // to reach the "Show Dismissed" panel's own Undismiss button.
     container.querySelectorAll('.ss-sfm-dismiss-one-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const recId = parseInt(btn.dataset.recId, 10);
+        const dismissing = btn.textContent.trim() === 'Dismiss';
         btn.disabled = true;
         try {
-          await RecommendationsAPI.dismissSceneFaceMatch(recId);
+          if (dismissing) {
+            await RecommendationsAPI.dismissSceneFaceMatch(recId);
+          } else {
+            await RecommendationsAPI.undismissSceneFaceMatch(recId);
+          }
           const card = btn.closest('.ss-sfm-candidate');
           if (card) {
-            card.classList.add('ss-sfm-candidate-inactive');
+            card.classList.toggle('ss-sfm-candidate-inactive', dismissing);
             const cb = card.querySelector('.ss-sfm-candidate-cb');
-            if (cb) { cb.checked = false; cb.disabled = true; }
-            btn.remove();
+            if (cb) {
+              cb.disabled = dismissing;
+              if (dismissing) cb.checked = false;
+            }
           }
-          showToast('Candidate dismissed.', 'info');
+          btn.textContent = dismissing ? 'Undismiss' : 'Dismiss';
+          dismissedCount += dismissing ? 1 : -1;
+          const toggleBtn = container.querySelector('#ss-sfm-toggle-dismissed-btn');
+          if (toggleBtn) {
+            const showing = !container.querySelector('#ss-sfm-dismissed-section')?.hidden;
+            toggleBtn.textContent = `${showing ? 'Hide' : 'Show'} Dismissed (${dismissedCount})`;
+          }
+          showToast(dismissing ? 'Candidate dismissed.' : 'Candidate restored.', 'info');
         } catch (e) {
-          showToast(`Failed to dismiss: ${e.message}`, 'error');
+          showToast(`Failed to ${dismissing ? 'dismiss' : 'undismiss'}: ${e.message}`, 'error');
+        } finally {
           btn.disabled = false;
         }
       });

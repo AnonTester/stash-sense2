@@ -1,5 +1,13 @@
 ## 2026-08-30
 
+### 0.20.4 (plugin only)
+- Improvement: dismissing a candidate from the main pending list now
+  toggles that same button to Undismiss in place (and dims/undims the
+  card, keeping the "Show Dismissed" count in sync) instead of just
+  removing the button -- previously the only way back from an accidental
+  dismiss was leaving the recommendation and reopening it to reach the
+  "Show Dismissed" panel's own Undismiss button.
+
 ### 0.20.3 (plugin only)
 - Fix: in a scene_face_match detail view, every person *after the first*
   showed "Undismiss" instead of "Dismiss" regardless of actually being
