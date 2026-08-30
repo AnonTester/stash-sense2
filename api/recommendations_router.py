@@ -3439,7 +3439,11 @@ async def _do_create_performer(
         fields = {"name": performer_name}
         source = stashbox_data.get("source")
         if source:
-            fields["disambiguation"] = f"({source.capitalize()})"
+            # No surrounding brackets -- Stash's own UI already wraps
+            # disambiguation in round brackets for display, so a literal
+            # "(Pornbox)" here renders as "((Pornbox))". Mirrors
+            # stashbox_router.py's create_performer_from_catalogue.
+            fields["disambiguation"] = source.capitalize()
         if stashbox_data.get("country"):
             fields["country"] = stashbox_data["country"]
         profile_url = stashbox_data.get("profile_url")

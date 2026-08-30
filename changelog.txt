@@ -1,5 +1,15 @@
 ## 2026-08-30
 
+### 0.25.1 (sidecar only)
+- Fix: creating a performer from a catalogue source (pornbox, seekfans,
+  etc.) wrote the source name into `disambiguation` already wrapped in
+  round brackets (e.g. "(Pornbox)") -- Stash's own UI adds those brackets
+  itself for display, so the performer showed as "((Pornbox))". Both
+  creation paths (the live Identify "Add to Stash" flow in
+  stashbox_router.py, and Face Recommendations' catalogue-candidate
+  accept flow in recommendations_router.py) now write the bare source
+  name instead.
+
 ### 0.20.4 (plugin only)
 - Improvement: dismissing a candidate from the main pending list now
   toggles that same button to Undismiss in place (and dims/undims the

@@ -1513,7 +1513,9 @@ class TestCatalogueSourcedPerformers:
         create_kwargs = mock_stash.create_performer.call_args.kwargs
         assert "stash_ids" not in create_kwargs
         assert create_kwargs["image"] == "https://seekfans.example/janedoe.jpg"
-        assert create_kwargs["disambiguation"] == "(Seekfans)"
+        # No surrounding brackets -- Stash's own UI already adds them for
+        # display; a literal "(Seekfans)" here would render as "((Seekfans))".
+        assert create_kwargs["disambiguation"] == "Seekfans"
         assert create_kwargs["alias_list"] == ["janedoe"]  # from the profile_url handle
 
         mock_stash.update_performer.assert_called_once_with(

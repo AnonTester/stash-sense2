@@ -375,7 +375,10 @@ async def create_performer_from_catalogue(request: CreatePerformerFromCatalogueR
 
     create_input = {
         "name": request.name,
-        "disambiguation": f"({request.source.capitalize()})",
+        # No surrounding brackets -- Stash's own UI already wraps
+        # disambiguation in round brackets for display, so a literal
+        # "(Pornbox)" here renders as "((Pornbox))".
+        "disambiguation": request.source.capitalize(),
     }
     if request.country:
         create_input["country"] = request.country
