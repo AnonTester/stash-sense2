@@ -1,5 +1,17 @@
 ## 2026-08-30
 
+### 0.20.3 (plugin only)
+- Fix: in a scene_face_match detail view, every person *after the first*
+  showed "Undismiss" instead of "Dismiss" regardless of actually being
+  pending -- `persons.map(renderPersonColumn)` passed `renderPersonColumn`
+  directly as the map callback, so Array.prototype.map's own (element,
+  index, array) call signature fed the array index into
+  renderPersonColumn's forDismissedSection parameter instead of the
+  intended default. Index 0 is falsy (the first person rendered
+  correctly, by accident), every later index is truthy (every other
+  person rendered as if dismissed). Confirmed live: scene "Benedikta and
+  Fabian 06 December 2009", person 2 correct, all others wrong.
+
 ### 0.20.2 (plugin only)
 - Fix: a dismissed candidate in Face Recommendations' "Show Dismissed"
   panel could render pre-selected (checked) even though its checkbox is

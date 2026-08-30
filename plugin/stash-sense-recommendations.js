@@ -6127,7 +6127,7 @@
         }
 
         <div class="ss-sfm-persons">
-          ${persons.map(renderPersonColumn).join('')}
+          ${persons.map(p => renderPersonColumn(p)).join('')}
         </div>
 
         ${isPending ? `
