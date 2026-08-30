@@ -1,5 +1,16 @@
 ## 2026-08-30
 
+### 0.20.2 (plugin only)
+- Fix: a dismissed candidate in Face Recommendations' "Show Dismissed"
+  panel could render pre-selected (checked) even though its checkbox is
+  disabled -- a disabled checkbox still matches `:checked` in
+  querySelectorAll, so it could silently ride along into "Accept
+  Selected"'s submission alongside a real selection. Dismissed candidates
+  are never pre-selected now.
+- Improvement: the "Show Dismissed" toggle (and the panel it reveals) now
+  sits above the Accept Selected/Reject All actions instead of below them,
+  so both the button and whatever it reveals need less scrolling to reach.
+
 ### 0.25.0 (sidecar) / 0.20.1 (plugin)
 - Fix: a local performer sync (the near-real-time auto-sync-on-performer-
   change hook, or the full/manual Local Performer Sync job) was forcing a

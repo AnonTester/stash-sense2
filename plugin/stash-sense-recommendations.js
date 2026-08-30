@@ -6058,8 +6058,12 @@
       const linksHtml = sceneFaceMatchLinksHtml(c);
       // Don't pre-select a weak match: 5 or fewer frames, or under 10%
       // confidence, needs a deliberate look before it gets added to a scene.
+      // Never pre-select a dismissed candidate either -- its checkbox is
+      // disabled (uninteractive) but a disabled checkbox still matches
+      // :checked in querySelectorAll, so a pre-checked dismissed candidate
+      // would silently ride along into "Accept Selected"'s submission.
       const meetsPreselectThreshold = (c.frame_count || 0) > 5 && (c.confidence || 0) >= 0.10;
-      const preselect = c.is_best_match && meetsPreselectThreshold;
+      const preselect = !forDismissedSection && c.is_best_match && meetsPreselectThreshold;
       const dismissedAtHtml = forDismissedSection && c.dismissed_at
         ? `<div class="ss-sfm-candidate-dismissed-at">Dismissed ${formatRecTimestamp(c.dismissed_at)}</div>`
         : '';
@@ -6127,10 +6131,6 @@
         </div>
 
         ${isPending ? `
-          <div class="ss-sfm-detail-actions">
-            <button id="ss-sfm-accept-btn" class="ss-btn ss-btn-primary">Accept Selected</button>
-            <button id="ss-sfm-reject-all-btn" class="ss-btn ss-btn-secondary">Reject All</button>
-          </div>
           ${dismissedCount > 0 ? `
             <div class="ss-sfm-dismissed-toggle-row">
               <button id="ss-sfm-toggle-dismissed-btn" class="ss-btn ss-btn-secondary ss-btn-tiny">
@@ -6141,6 +6141,10 @@
               ${dismissedPersons.map(p => renderPersonColumn(p, true)).join('')}
             </div>
           ` : ''}
+          <div class="ss-sfm-detail-actions">
+            <button id="ss-sfm-accept-btn" class="ss-btn ss-btn-primary">Accept Selected</button>
+            <button id="ss-sfm-reject-all-btn" class="ss-btn ss-btn-secondary">Reject All</button>
+          </div>
         ` : `
           <div class="ss-fp-detail-status">
             Status: <strong>${rec.status}</strong>
