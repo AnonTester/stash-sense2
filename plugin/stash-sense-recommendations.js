@@ -508,13 +508,29 @@
     page: 0,
     selectedRec: null,
     counts: null,
-    // Cache of the last-fetched list page, keyed by "type:status:page" --
-    // lets returning from a detail view (plain Back, or after resolving/
-    // dismissing/matching one recommendation) skip a full re-fetch +
-    // re-sort of the whole list. See renderList()'s cache-hit branch and
-    // removeFromListCache(). Any real change of type/status/page just
-    // naturally misses the cache since the key won't match.
+    // Cache of the entire fetched tab (all rows for the current type:status,
+    // not just one page) -- lets Next/Prev and returning from a detail view
+    // (plain Back, or after resolving/dismissing/matching one recommendation)
+    // paginate/re-render instantly with no re-fetch. See renderList()'s
+    // cache-hit branch and removeFromListCache(). Any real change of
+    // type/status just naturally misses the cache since the key won't match;
+    // page alone is not part of the key since pagination is a client-side
+    // slice of the cached array.
     listCache: null,
+    // Cache of the current type's tab counts ({pending, resolved,
+    // dismissed}), separate from listCache since counts cover all three
+    // statuses of a type at once rather than one status at a time. Reused
+    // across pure navigation (page/status changes within the same type);
+    // dropped by removeFromListCache/invalidateListCache whenever an action
+    // actually happens, forcing one real recount on the next render.
+    countsCache: null,
+    // window.scrollY captured right before opening a detail view, so
+    // returning to the list (Back button, or accept/reject) can restore it
+    // instead of leaving the user at whatever position the freshly-rebuilt
+    // list DOM happens to start at. Consumed and cleared by renderList() --
+    // stays null for a fresh list entry (dashboard/tab/page change), which
+    // deliberately leaves scroll position untouched in that case.
+    listScrollY: null,
   };
 
   // (Polling for analysis/fingerprint progress now handled by Operations tab)
@@ -719,8 +735,15 @@
         });
 
         const openType = () => {
+          // Always start a freshly-opened type at Pending/page 1 -- status
+          // and page belong to whichever type was last viewed, not the one
+          // being opened now, so without this a type opened after e.g.
+          // browsing Resolved/page 3 on a different type inherits that
+          // status/page instead of starting clean.
           currentState.type = type;
           currentState.view = 'list';
+          currentState.status = 'pending';
+          currentState.page = 0;
           renderCurrentView(mainContainer);
         };
         card.addEventListener('click', openType);
@@ -955,7 +978,137 @@
 
   // ==================== List View ====================
 
-  async function renderList(container, _retried = false) {
+  // Builds a Stash-style pagination control: first-page / prev / a "Page X
+  // of Y" button that opens a popover with a jump-to-page dropdown and an
+  // editable page-number input / next / last-page. Mirrors Stash's own list
+  // pagination UI as closely as a plugin injecting plain DOM into a separate
+  // script/bundle can -- there's no handle into Stash's actual React
+  // pagination component to reuse directly, so this is a from-scratch clone
+  // using this plugin's own ss-* component styling.
+  function buildStashStylePagination({ currentPage, totalPages, onGoToPage }) {
+    const nav = document.createElement('div');
+    nav.className = 'ss-pagination';
+
+    const goToPage = (page) => {
+      const clamped = Math.max(0, Math.min(totalPages - 1, page));
+      if (clamped === currentPage) return;
+      onGoToPage(clamped);
+    };
+
+    const mkIconBtn = (label, svgPath, disabled, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'ss-pagination-btn';
+      btn.setAttribute('aria-label', label);
+      btn.title = label;
+      btn.disabled = disabled;
+      btn.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">${svgPath}</svg>`;
+      btn.addEventListener('click', onClick);
+      return btn;
+    };
+
+    const atFirst = currentPage === 0;
+    const atLast = currentPage >= totalPages - 1;
+
+    nav.appendChild(mkIconBtn(
+      'First page',
+      '<path d="M18.41 7.41L17 6l-6 6 6 6 1.41-1.41L13.83 12z"/><path d="M6 6h2v12H6z"/>',
+      atFirst,
+      () => goToPage(0),
+    ));
+    nav.appendChild(mkIconBtn(
+      'Previous page',
+      '<path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>',
+      atFirst,
+      () => goToPage(currentPage - 1),
+    ));
+
+    // "Page X of Y" -- click to open a popover with a full page dropdown
+    // plus an editable jump-to-page input, matching Stash's own control.
+    const jumpWrap = document.createElement('div');
+    jumpWrap.className = 'ss-pagination-jump';
+
+    const jumpBtn = document.createElement('button');
+    jumpBtn.type = 'button';
+    jumpBtn.className = 'ss-pagination-jump-btn';
+    jumpBtn.textContent = `Page ${currentPage + 1} of ${totalPages}`;
+
+    const popover = document.createElement('div');
+    popover.className = 'ss-pagination-popover';
+    popover.hidden = true;
+
+    const select = document.createElement('select');
+    select.className = 'ss-pagination-select';
+    for (let i = 0; i < totalPages; i++) {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `Page ${i + 1}`;
+      if (i === currentPage) opt.selected = true;
+      select.appendChild(opt);
+    }
+    select.addEventListener('change', () => goToPage(Number(select.value)));
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = String(totalPages);
+    input.value = String(currentPage + 1);
+    input.className = 'ss-pagination-input';
+    const commitInput = () => {
+      const n = parseInt(input.value, 10);
+      if (Number.isFinite(n)) {
+        goToPage(n - 1);
+      } else {
+        input.value = String(currentPage + 1);
+      }
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commitInput(); }
+    });
+    input.addEventListener('blur', commitInput);
+    input.addEventListener('click', (e) => e.stopPropagation());
+
+    popover.appendChild(select);
+    popover.appendChild(input);
+
+    const closePopover = () => {
+      popover.hidden = true;
+      document.removeEventListener('click', onOutsideClick, true);
+    };
+    function onOutsideClick(e) {
+      if (!jumpWrap.contains(e.target)) closePopover();
+    }
+    jumpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // Only one popover open at a time -- there are two copies of this
+      // control on screen (above and below the card list).
+      document.querySelectorAll('.ss-pagination-popover').forEach((p) => { p.hidden = true; });
+      popover.hidden = false;
+      input.value = String(currentPage + 1);
+      document.addEventListener('click', onOutsideClick, true);
+    });
+
+    jumpWrap.appendChild(jumpBtn);
+    jumpWrap.appendChild(popover);
+    nav.appendChild(jumpWrap);
+
+    nav.appendChild(mkIconBtn(
+      'Next page',
+      '<path d="M8.59 16.59L10 18l6-6-6-6-1.41 1.41L13.17 12z"/>',
+      atLast,
+      () => goToPage(currentPage + 1),
+    ));
+    nav.appendChild(mkIconBtn(
+      'Last page',
+      '<path d="M5.59 7.41L7 6l6 6-6 6-1.41-1.41L10.17 12z"/><path d="M16 6h2v12h-2z"/>',
+      atLast,
+      () => goToPage(totalPages - 1),
+    ));
+
+    return nav;
+  }
+
+  async function renderList(container) {
     const typeConfigs = {
       duplicate_performer: 'Duplicate Performers',
       duplicate_scenes: 'Duplicate Scenes',
@@ -1040,6 +1193,10 @@
       invalidateListCache();
       currentState.view = 'dashboard';
       currentState.type = null;
+      // Defensive reset (openType() on the dashboard already does this too)
+      // so state is clean regardless of which path re-enters a type next.
+      currentState.status = 'pending';
+      currentState.page = 0;
       renderCurrentView(container);
     });
 
@@ -1516,52 +1673,80 @@
       });
     }
 
-    // Load recommendations -- reuse the cached last-fetched page instead of
-    // re-fetching and re-sorting from scratch when returning from a detail
+    // Load recommendations -- reuse the cached full tab (every row for the
+    // current type:status, not just one page) instead of re-fetching and
+    // re-sorting from scratch on Next/Prev, when returning from a detail
     // view with nothing to invalidate (plain Back button), or after a
     // single recommendation was resolved/dismissed/matched there
     // (removeFromListCache() already surgically removed it from the cache
-    // before navigating back). Any real change of type/status/page
-    // naturally misses the cache since the key below won't match.
+    // before navigating back). Any real change of type/status naturally
+    // misses the cache since the key below won't match; page alone doesn't
+    // need to, since pagination below is a client-side slice of the cached
+    // array -- this is what makes Next/Prev instant instead of a full
+    // backend round-trip (GraphQL runPluginOperation -> exec plugin process
+    // -> sidecar HTTP call -> DB query/sort) on every click.
     //
-    // Tab counts are fetched fresh every time regardless of the row-list
-    // cache hit/miss above -- a surgical single-item removal only knows how
-    // to decrement the status you were just viewing (pending), never the
-    // status the item transitioned *into* (resolved/dismissed), so a count
-    // cached alongside the row list can never be trusted after any action.
-    // This is a small, cheap request on its own, so there's no real cost to
-    // always doing it live.
+    // Tab counts are cached separately from the row list (currentState.
+    // countsCache, keyed by type alone -- counts cover all three statuses
+    // of a type at once, unlike the row cache which is one status at a
+    // time), and invalidated by removeFromListCache/invalidateListCache
+    // whenever an action actually happens -- a surgical single-item removal
+    // only knows how to decrement the status you were just viewing
+    // (pending), never the status the item transitioned *into*
+    // (resolved/dismissed), so a count cached through an action can never
+    // be trusted and must be dropped, forcing one real fetch on the next
+    // render. Pure navigation (Next/Prev/jump-to-page, or switching status
+    // tabs within the same type) never touches either cache, so it reuses
+    // both and does zero backend round-trips -- this, together with the
+    // row-list cache above, is what makes those instant instead of a full
+    // backend round-trip (GraphQL runPluginOperation -> exec plugin process
+    // -> sidecar HTTP call -> DB query/sort) on every click. Previously
+    // counts were re-fetched unconditionally on every render regardless of
+    // the row-list cache hit/miss, which alone accounted for the whole
+    // perceived "still not instant" delay once the row list itself was
+    // cached, plus the tabs visibly redrawing without counts and then
+    // resizing once the (slow) fetch resolved.
     const PAGE_SIZE = 25;
-    const cacheKey = `${currentState.type}:${currentState.status}:${currentState.page}`;
+    // Matches the limit already used by every "Accept All" flow in this file
+    // (e.g. RecommendationsAPI.getList({ ..., limit: 10000 })) to fetch a
+    // whole tab in one call.
+    const BULK_FETCH_LIMIT = 10000;
+    const cacheKey = `${currentState.type}:${currentState.status}`;
     const cached = currentState.listCache;
+    const cachedCounts = currentState.countsCache;
     try {
-      let recommendations, total, typeCounts;
-      const countsPromise = RecommendationsAPI.getCounts()
-        .then(r => r.counts?.[currentState.type] || {})
-        .catch(() => ({}));
+      let allRecommendations, total, typeCounts;
+      const countsHit = cachedCounts && cachedCounts.type === currentState.type;
+      const countsPromise = countsHit
+        ? Promise.resolve(cachedCounts.counts)
+        : RecommendationsAPI.getCounts()
+          .then(r => r.counts?.[currentState.type] || {})
+          .catch(() => ({}));
 
       if (cached && cached.key === cacheKey) {
-        ({ recommendations, total } = cached);
+        ({ recommendations: allRecommendations, total } = cached);
         typeCounts = await countsPromise;
+        if (!countsHit) currentState.countsCache = { type: currentState.type, counts: typeCounts };
       } else {
         const [result, resolvedTypeCounts] = await Promise.all([
           RecommendationsAPI.getList({
             type: currentState.type,
             status: currentState.status,
-            limit: PAGE_SIZE,
-            offset: currentState.page * PAGE_SIZE,
+            limit: BULK_FETCH_LIMIT,
+            offset: 0,
           }),
           countsPromise,
         ]);
 
         typeCounts = resolvedTypeCounts;
-        recommendations = result.recommendations;
+        if (!countsHit) currentState.countsCache = { type: currentState.type, counts: typeCounts };
+        allRecommendations = result.recommendations;
         total = result.total;
 
         // Defensive client-side ordering for Scene Stash-Box Tagger:
         // high-confidence first, then confidence descending.
         if (currentState.type === 'scene_fingerprint_match') {
-          recommendations.sort((a, b) => {
+          allRecommendations.sort((a, b) => {
             const aHigh = a?.details?.high_confidence ? 1 : 0;
             const bHigh = b?.details?.high_confidence ? 1 : 0;
             if (aHigh !== bHigh) return bHigh - aHigh;
@@ -1573,7 +1758,7 @@
         } else if (currentState.type === 'duplicate_scenes' && currentState.status === 'pending') {
           // Defensive client-side ordering for pending items: high confidence first.
           // Dismissed/resolved use server-side recency sort — don't override it.
-          recommendations.sort((a, b) => {
+          allRecommendations.sort((a, b) => {
             const aConf = getDuplicateSceneConfidencePercent(a);
             const bConf = getDuplicateSceneConfidencePercent(b);
             if (aConf !== bConf) return bConf - aConf;
@@ -1581,31 +1766,23 @@
           });
         }
 
-        currentState.listCache = { key: cacheKey, recommendations, total };
+        currentState.listCache = { key: cacheKey, recommendations: allRecommendations, total };
       }
 
-      // The current page came back empty but recommendations still remain
-      // overall -- either every entry on this page was surgically removed
-      // from the cache (removeFromListCache, e.g. resolving/dismissing
-      // items one by one) while the page index itself stayed 0 (the common
-      // case, since that's the default and where most people work), or this
-      // is a stale cache from a previous visit to this same type/status/page
-      // (e.g. Back to the dashboard and straight back into the same type,
-      // which doesn't reset page/status and so hits the exact same cache
-      // key). Either way, force a real re-fetch instead of showing a false
-      // "no recommendations" empty state -- snapping back to the last valid
-      // page first if the current page index is genuinely beyond the real
-      // total. _retried guards against ever looping more than once. Applies
-      // to every recommendation type/status, since this is the one shared
-      // list renderer they all go through.
-      if (recommendations.length === 0 && total > 0 && !_retried) {
-        const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
-        if (currentState.page > maxPage) {
-          currentState.page = maxPage;
-        }
-        currentState.listCache = null;
-        return renderList(container, true);
+      // The requested page index is beyond the cached array (e.g. enough
+      // items were surgically removed via removeFromListCache -- resolving/
+      // dismissing cards one by one -- that the page the user was on no
+      // longer exists) while items still remain overall -- clamp back to the
+      // last valid page. No re-fetch needed: the full tab is already in
+      // hand, so this is just an in-memory slice adjustment.
+      const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
+      if (currentState.page > maxPage) {
+        currentState.page = maxPage;
       }
+      const recommendations = allRecommendations.slice(
+        currentState.page * PAGE_SIZE,
+        (currentState.page + 1) * PAGE_SIZE,
+      );
 
       // Update tab labels with counts
       container.querySelectorAll('.ss-filter-tab').forEach(tab => {
@@ -1627,6 +1804,7 @@
             <p>No ${currentState.status} recommendations found.</p>
           </div>
         `;
+        currentState.listScrollY = null;
         return;
       }
 
@@ -1639,41 +1817,20 @@
       // Pagination controls -- built once, rendered both above and below
       // the card listing (top copy saves a scroll-to-top on long lists;
       // bottom copy matches where people naturally look after reading
-      // through a page).
+      // through a page). Mirrors Stash's own list pagination control
+      // (first/prev/"X of Y" page jump/next/last) -- built from scratch
+      // rather than reusing Stash's actual React component, since this
+      // plugin injects vanilla DOM into a separate script/bundle with no
+      // handle into Stash's component tree.
       const totalPages = Math.ceil(total / PAGE_SIZE);
-      const buildPaginationEl = () => {
-        const pagination = document.createElement('div');
-        pagination.style.cssText = 'display:flex;align-items:center;justify-content:center;gap:12px;padding:16px 0;';
-
-        const prevBtn = document.createElement('button');
-        prevBtn.className = 'ss-btn ss-btn-secondary';
-        prevBtn.textContent = '← Prev';
-        prevBtn.disabled = currentState.page === 0;
-        prevBtn.style.cssText = 'min-width:80px;';
-        prevBtn.addEventListener('click', () => {
-          currentState.page--;
+      const buildPaginationEl = () => buildStashStylePagination({
+        currentPage: currentState.page,
+        totalPages,
+        onGoToPage: (page) => {
+          currentState.page = page;
           renderCurrentView(container);
-        });
-
-        const pageText = document.createElement('span');
-        pageText.style.cssText = 'color:var(--ss-text-secondary, #aaa);font-size:14px;';
-        pageText.textContent = `Page ${currentState.page + 1} of ${totalPages}`;
-
-        const nextBtn = document.createElement('button');
-        nextBtn.className = 'ss-btn ss-btn-secondary';
-        nextBtn.textContent = 'Next →';
-        nextBtn.disabled = currentState.page >= totalPages - 1;
-        nextBtn.style.cssText = 'min-width:80px;';
-        nextBtn.addEventListener('click', () => {
-          currentState.page++;
-          renderCurrentView(container);
-        });
-
-        pagination.appendChild(prevBtn);
-        pagination.appendChild(pageText);
-        pagination.appendChild(nextBtn);
-        return pagination;
-      };
+        },
+      });
 
       listContent.innerHTML = '';
 
@@ -1691,6 +1848,11 @@
         }
         card.addEventListener('click', (e) => {
           if (e.target.closest('.ss-dup-scene-select')) return;
+          // Save scroll position so the Back button / a resolved accept-
+          // reject action (both funnel back through renderCurrentView ->
+          // renderList) can restore it below instead of leaving the user at
+          // the top of a freshly-rebuilt list.
+          currentState.listScrollY = window.scrollY;
           currentState.selectedRec = rec;
           currentState.view = 'detail';
           renderCurrentView(container);
@@ -1744,6 +1906,24 @@
         listContent.appendChild(buildPaginationEl());
       }
 
+      // Restore scroll position saved on the way into a detail view (see the
+      // card click handler above) -- only set for a genuine detail-return
+      // (Back button, or an accept/reject success path, both of which funnel
+      // back through renderCurrentView -> renderList); left null for a fresh
+      // list entry (dashboard/tab/page change), which deliberately leaves
+      // scroll position untouched. Double rAF lets thumbnail <img> layout
+      // settle first, since restoring immediately after the synchronous DOM
+      // build above can land short if images haven't affected layout yet.
+      if (currentState.listScrollY != null) {
+        const targetY = currentState.listScrollY;
+        currentState.listScrollY = null;
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            window.scrollTo(0, targetY);
+          });
+        });
+      }
+
     } catch (e) {
       container.querySelector('.ss-list-content').innerHTML = `
         <div class="ss-error-state">
@@ -1768,16 +1948,23 @@
       .filter(id => Number.isFinite(id));
   }
 
-  // Surgically drops one recommendation from the cached list page (see
+  // Surgically drops one recommendation from the cached full-tab list (see
   // renderList()'s cache-hit branch) instead of invalidating the whole
   // cache -- called right before navigating back to the list from a
   // detail view whose recommendation was just resolved/dismissed/matched,
-  // or found stale (source/target no longer exists). No-ops harmlessly if
-  // there's no cache yet, or the id isn't on the cached page (e.g. it was
-  // resolved from a different page/filter than what's cached).
+  // or found stale (source/target no longer exists). Immediately backfills
+  // the next card into the now-shorter page slice on the next render, with
+  // no re-fetch. No-ops harmlessly if there's no cache yet, or the id isn't
+  // in the cached array (e.g. it was resolved from a different type/status
+  // than what's cached).
   function removeFromListCache(recId) {
-    // Row list only -- tab counts are never cached (always fetched fresh in
-    // renderList), so there's nothing to patch here for them.
+    // Always called right after a real action succeeded server-side (or a
+    // stale rec was pruned), so the cached tab counts are now stale
+    // regardless of whether the row-list splice below actually finds
+    // anything to remove -- drop them unconditionally so the next render
+    // does one real recount instead of showing a number that no longer
+    // reflects this action.
+    currentState.countsCache = null;
     const cache = currentState.listCache;
     if (!cache || recId == null) return;
     const idx = cache.recommendations.findIndex(r => r.id === recId);
@@ -1788,10 +1975,12 @@
 
   // Bulk actions (Accept All / Dismiss All) change an unknown, unbounded
   // number of recommendations server-side in one go -- surgical per-item
-  // removal doesn't scale to that, so just drop the whole cached page and
-  // let the next renderList() do a real fetch.
+  // removal doesn't scale to that, so just drop the whole cached tab (and
+  // the cached counts, now stale too) and let the next renderList() do a
+  // real fetch.
   function invalidateListCache() {
     currentState.listCache = null;
+    currentState.countsCache = null;
   }
 
   function renderRecommendationCard(rec) {
@@ -6034,8 +6223,30 @@
       const endpoint = c.endpoint || 'stashdb.org';
       if (c.source) {
         const href = c.profile_url || c.catalogue_url;
-        if (!href) return '';
-        const label = c.profile_url ? 'View profile' : `View on ${c.source}`;
+        if (!href) {
+          // Known source but no URL for it at all -- e.g. baseline data
+          // from a legacy crawler (a "pornstar" source_endpoint, seen on
+          // real data, matches no crawler in this codebase's scrape/
+          // directory -- almost certainly inherited from the original
+          // private pre-fork pipeline, which is gone) that this pipeline
+          // has no catalogue_url/profile_url pattern for. Show where the
+          // match came from as plain text instead of nothing, rather than
+          // silently omitting any source indication at all.
+          return `<span class="ss-link-disabled">Source: ${escapeHtml(c.source)}</span>`;
+        }
+        // Same "View on <domain>" convention as the manual identify flow's
+        // _matchLinksHtml (stash-sense.js) -- a real external profile_url
+        // (e.g. onlyfans.com for seekfans matches) is labeled by its own
+        // hostname rather than the generic "View profile", falling back to
+        // the source name for a catalogue_url-only match or an unparseable URL.
+        let label = `View on ${c.source}`;
+        if (c.profile_url) {
+          try {
+            label = `View on ${new URL(c.profile_url).hostname.replace(/^www\./, '')}`;
+          } catch (e) {
+            label = 'View profile';
+          }
+        }
         return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener" class="ss-link">${escapeHtml(label)}</a>`;
       }
       if (!c.local_performer_id) {
@@ -6079,7 +6290,7 @@
               ${preselect ? 'checked' : ''} ${isCandidatePending ? '' : 'disabled'} />
             <div class="ss-sfm-candidate-thumb">
               ${c.image_url
-                ? `<img src="${escapeHtml(c.image_url)}" alt="${escapeHtml(c.name || '')}" loading="lazy" onerror="this.style.display='none'" />`
+                ? `<img src="${escapeHtml(SS.thumbnailUrl(c.image_url))}" alt="${escapeHtml(c.name || '')}" loading="lazy" onerror="this.style.display='none'" />`
                 : '<div class="ss-no-image">No Image</div>'
               }
             </div>
@@ -6622,6 +6833,8 @@
       selectedRec: null,
       counts: null,
       listCache: null,
+      countsCache: null,
+      listScrollY: null,
     };
 
     renderCurrentView(container);
@@ -6649,6 +6862,8 @@
       selectedRec: null,
       counts: null,
       listCache: null,
+      countsCache: null,
+      listScrollY: null,
     };
 
     entityCache.clear();

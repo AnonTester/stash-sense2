@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.20.4';
+  const PLUGIN_VERSION = '0.21.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -596,6 +596,56 @@
   }
 
   /**
+   * Rewrite an external performer match photo (StashDB/catalogue
+   * `image_url`, e.g. on a match card or a Face Recommendations candidate)
+   * to a source-specific *thumbnail* variant, instead of loading the
+   * full-size original just to display it at card size -- meaningful
+   * bandwidth savings across a list of many match cards. Falls back to the
+   * original URL untouched for any source with no known rewrite (including
+   * on a URL parse failure), so this always returns something displayable.
+   *
+   * Only for *display* -- never rewrite a URL that's about to be sent back
+   * to the sidecar to actually download/import a performer photo (e.g.
+   * _catalogueDataAttrs' data-image-url), which needs the real full-size
+   * original.
+   *
+   * Known sources, add more here as needed:
+   * - stashdb.org (`/images/<uuid>`) -- StashDB's own image endpoint
+   *   accepts a `size` query param for a resized variant.
+   * - media.seekfans.com -- no resizing of its own; proxied through
+   *   seekfans.com's own Next.js image optimizer (the same one the site
+   *   itself uses to serve these same photos at thumbnail size).
+   *
+   * Deliberately NOT rewritten: pornbox (cdn77-image.gtflixtv.com). Its
+   * `image_url` is already a pre-sized CDN77 thumbnail as stored by
+   * stash-sense2-data-gen's pornbox_discovery.py -- that module's own
+   * docstring documents (against live testing) that changing the
+   * signed URL's width/height query params is unreliable and mostly 403s,
+   * so the stored URL is always left query-intact and used as-is. No
+   * rewrite needed here since it's already thumbnail-sized; don't add one.
+   */
+  function thumbnailUrl(url) {
+    if (!url) return url;
+    try {
+      const parsed = new URL(url);
+      const host = parsed.hostname.replace(/^www\./, '');
+
+      if (host === 'stashdb.org' && parsed.pathname.startsWith('/images/')) {
+        parsed.searchParams.set('size', '600');
+        return parsed.toString();
+      }
+
+      if (host === 'media.seekfans.com') {
+        return `https://seekfans.com/_next/image?url=${encodeURIComponent(url)}&w=256&q=75`;
+      }
+
+      return url;
+    } catch (e) {
+      return url;
+    }
+  }
+
+  /**
    * Render a set of local-performer candidates as visual cards (cover
    * image, name, alias preview, verifiable external links) for the user
    * to explicitly pick from or reject -- replaces matching by name/alias
@@ -784,6 +834,7 @@
     getConfidenceClass,
     escapeHtml,
     relativeUrl,
+    thumbnailUrl,
     renderPerformerCandidateCards,
   };
 

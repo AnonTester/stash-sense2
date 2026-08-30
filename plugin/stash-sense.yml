@@ -1,6 +1,6 @@
 name: Stash Sense 2
 description: ML-powered performer identification and library curation for Stash
-version: 0.20.4
+version: 0.21.0
 url: https://github.com/AnonTester/stash-sense2
 
 ui:

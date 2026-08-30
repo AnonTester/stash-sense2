@@ -1,5 +1,51 @@
 ## 2026-08-30
 
+### 0.21.0 (plugin only)
+- Improvement: Recommendations list pagination is now client-side -- the
+  whole tab (type + status) is fetched once and Next/Prev/jump-to-page
+  slice the already-fetched data in the browser instead of re-querying and
+  re-sorting on the backend on every click, removing the ~2s delay each
+  page change previously incurred. Resolving/dismissing a card now
+  immediately backfills the next row into the page from the same cached
+  data, with no refetch. Tab counts (the numbers on the Pending/Resolved/
+  Dismissed tabs) are now cached alongside the row data too, instead of
+  being re-fetched on every render regardless -- that leftover per-render
+  fetch was still hitting the backend on every page change even after the
+  row-list cache above, which was most of the remaining delay and also
+  caused the tabs to visibly redraw without their counts and then resize
+  once the fetch resolved. The count cache is dropped and force-refetched
+  the moment a real action (resolve/dismiss/accept) happens, so it can't
+  go stale.
+- Improvement: new pagination control (first/prev/"page X of Y" jump
+  dropdown+input/next/last) replacing the old plain Prev/Next buttons.
+- Fix: opening a recommendation type from the dashboard no longer inherits
+  the status tab/page that was last viewed on a *different* type -- it now
+  always starts at Pending, page 1.
+- Fix: returning to the recommendations list (Back button, or after an
+  accept/reject/dismiss action on a detail page) now restores the scroll
+  position the list was at before the detail view was opened, instead of
+  landing back at the top.
+- Fix: Face Recommendations detail cards now use the same rectangular,
+  rounded-corner performer thumbnail (100x130px, matching the manual
+  Identify results' own .ss-match-image dimensions) as the manual Identify
+  results, instead of a smaller circular one that was cropping the top/
+  bottom of some photos.
+- Fix: Face Recommendations detail cards' catalogue-match link now reads
+  "View on <site>" (e.g. onlyfans.com) like the manual Identify flow
+  already does, instead of the generic "View profile" it showed before.
+- Fix: a match with a known source but no profile/catalogue URL at all
+  (seen on baseline data predating this pipeline, e.g. a "pornstar"
+  source_endpoint with no matching crawler in this codebase) now shows
+  "Source: <name>" as plain text in both Face Recommendations and the
+  manual Identify flow, instead of silently showing no source info at all.
+- Improvement: performer match photos (Identify results and Face
+  Recommendations candidates) now load a source-specific thumbnail instead
+  of the full-size original where the source supports one -- StashDB's own
+  `?size=600` resize param, or seekfans.com's Next.js image proxy for
+  media.seekfans.com photos -- cutting bandwidth on cards that only ever
+  display these at thumbnail size. New `SS.thumbnailUrl()` helper in
+  stash-sense-core.js, easy to extend for other catalogue sources.
+
 ### 0.25.1 (sidecar only)
 - Fix: creating a performer from a catalogue source (pornbox, seekfans,
   etc.) wrote the source name into `disambiguation` already wrapped in

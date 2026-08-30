@@ -339,6 +339,16 @@
   text-decoration: underline;
 }
 
+/* A catalogue match with a known source but no URL to link to at all (e.g.
+   legacy baseline data from a crawler no longer part of this pipeline) --
+   plain muted text so the source is still visible instead of showing
+   nothing, without looking like a clickable link that goes nowhere. */
+.ss-link-disabled {
+  font-size: 13px;
+  color: var(--bs-secondary-color, #888);
+  font-style: italic;
+}
+
 /* Actions */
 .ss-actions {
   display: flex;
@@ -1460,6 +1470,100 @@
 .ss-batch-progress-text {
   font-size: 14px;
   color: var(--bs-secondary-color, #aaa);
+}
+
+/* Pagination -- mirrors Stash's own list pagination control (first/prev/
+   "X of Y" page jump/next/last), rebuilt from scratch since this plugin has
+   no handle into Stash's actual React pagination component. */
+.ss-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 16px 0;
+}
+
+.ss-pagination-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 6px;
+  background: var(--bs-tertiary-bg, #2a2a2a);
+  color: var(--bs-body-color, #fff);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.ss-pagination-btn:hover:not(:disabled) {
+  background: var(--bs-secondary-bg, #3a3a3a);
+  border-color: var(--bs-secondary-color, #888);
+}
+
+.ss-pagination-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.ss-pagination-jump {
+  position: relative;
+  margin: 0 8px;
+}
+
+.ss-pagination-jump-btn {
+  min-width: 120px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 6px;
+  background: var(--bs-tertiary-bg, #2a2a2a);
+  color: var(--bs-body-color, #fff);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.ss-pagination-jump-btn:hover {
+  background: var(--bs-secondary-bg, #3a3a3a);
+  border-color: var(--bs-secondary-color, #888);
+}
+
+.ss-pagination-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px;
+  min-width: 160px;
+  background: var(--bs-tertiary-bg, #2a2a2a);
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.ss-pagination-select,
+.ss-pagination-input {
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--bs-border-color, #444);
+  border-radius: 6px;
+  background: var(--bs-body-bg, #1a1a1a);
+  color: var(--bs-body-color, #fff);
+  font-size: 13px;
+}
+
+.ss-pagination-select:focus,
+.ss-pagination-input:focus {
+  outline: none;
+  border-color: var(--bs-primary, #0d6efd);
 }
 
 /* List Content */
@@ -4015,9 +4119,9 @@ a.ss-detail-entity-link:hover {
 }
 
 .ss-sfm-candidate-thumb {
-  width: 80px;
-  height: 80px;
-  border-radius: 50%;
+  width: 100px;
+  height: 130px;
+  border-radius: 4px;
   overflow: hidden;
   background: var(--bs-body-bg, #1a1a1a);
   display: flex;

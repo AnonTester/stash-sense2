@@ -850,7 +850,14 @@
       _matchLinksHtml(match, stashboxUrl, endpoint) {
         if (match.source) {
           const href = match.profile_url || match.catalogue_url;
-          if (!href) return '';
+          if (!href) {
+            // Known source but no URL for it at all -- e.g. baseline data
+            // from a legacy crawler this pipeline no longer has (inherited
+            // from the original private pre-fork dataset), so there's no
+            // catalogue_url/profile_url pattern known for it. Show where
+            // the match came from as plain text instead of nothing.
+            return `<span class="ss-link-disabled">Source: ${match.source}</span>`;
+          }
           // Same "View on <domain>" style as the StashBox link below --
           // a real external profile_url (e.g. onlyfans.com for seekfans
           // matches) gets labeled by its own hostname rather than the
@@ -966,7 +973,7 @@
           </div>
           <div class="ss-match">
             <div class="ss-match-image">
-              ${match.image_url ? `<img src="${match.image_url}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+              ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
             </div>
             <div class="ss-match-info">
               <h4>${match.name}</h4>
@@ -1036,7 +1043,7 @@
             li.innerHTML = `
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${m.image_url ? `<img src="${m.image_url}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${m.name}</h4>
@@ -1724,7 +1731,7 @@
               </div>
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${match.image_url ? `<img src="${match.image_url}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
@@ -1780,7 +1787,7 @@
                 li.innerHTML = `
                   <div class="ss-match">
                     <div class="ss-match-image">
-                      ${m.image_url ? `<img src="${m.image_url}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
@@ -2041,7 +2048,7 @@
               </div>
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${match.image_url ? `<img src="${match.image_url}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
@@ -2102,7 +2109,7 @@
                 li.innerHTML = `
                   <div class="ss-match">
                     <div class="ss-match-image">
-                      ${m.image_url ? `<img src="${m.image_url}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
@@ -2612,7 +2619,7 @@
             </div>
             <div class="ss-match">
               <div class="ss-match-image">
-                ${performer.image_url ? `<img src="${performer.image_url}" alt="${performer.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                ${performer.image_url ? `<img src="${SS.thumbnailUrl(performer.image_url)}" alt="${performer.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
               </div>
               <div class="ss-match-info">
                 <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
