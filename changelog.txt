@@ -1,5 +1,17 @@
 ## 2026-09-02
 
+### 0.26.0 (sidecar only)
+- Feature: delta packages can now remove a fully-disabled catalogue
+  performer (pornbox.com/seekfans.com/legacy-site, no stash-box linkage --
+  a human flagged them via stash-sense2-data-gen's review_app) via a new
+  `catalogue_removed_performers` delta table, applied by
+  `_remove_catalogue_performer` in `api/delta_applier.py`. Strictly
+  additive/backward-compatible: an older sidecar simply never queries the
+  new table (older delta.db + this sidecar, or this sidecar + an older
+  delta.db, are both silent no-ops via the existing `_has_table` guard --
+  see that module's own docstring). No MIN_PLUGIN_VERSION bump -- nothing
+  plugin-facing changed.
+
 ### 0.25.2 (sidecar only)
 - Fix: pinned `onnx<1.18` + added `ml_dtypes<0.5` (insightface pulls onnx in
   unpinned; onnx>=1.18 registers a new ml_dtypes dtype at import whose

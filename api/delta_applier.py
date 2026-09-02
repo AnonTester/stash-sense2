@@ -10,7 +10,7 @@ drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
 needed client-side, that already happened when the delta was built.
 
-Three independent parts, all applied by `apply_delta_db` below: the
+Four independent parts, all applied by `apply_delta_db` below: the
 `performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
 identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table -- a
 locally-inserted performer's own autoincrement id is never assumed to
@@ -20,10 +20,14 @@ match the server's, since identity doesn't depend on it),
 at all -- identity there IS the raw `performers.id`, portable specifically
 because the server's own performers.db is one continuously-evolving file,
 never regenerated from scratch, so a given performer's id is permanent),
-and `face_field_updates` (gender/age/image_sha256 backfilled server-side
-onto a face that already shipped in an earlier release -- identity is
+`catalogue_removed_performers` (a catalogue performer a human fully
+disabled via stash-sense2-data-gen's review_app -- same raw-id identity as
+the upsert path, see `_remove_catalogue_performer`'s own docstring for why
+their faces are normally already gone by the time this runs), and
+`face_field_updates` (gender/age/image_sha256 backfilled server-side onto
+a face that already shipped in an earlier release -- identity is
 `embedding_index`, applied as a plain field UPDATE with no INSERT/
-identity-resolution involved). All three of these table groups are
+identity-resolution involved). All four of these table groups are
 strictly additive and may not exist in an older delta.db -- `_has_table`
 guards every read of them, so applying an older delta through this code
 is simply a no-op for whichever part it predates, not an error.
@@ -361,6 +365,34 @@ def _upsert_catalogue_performer_url(conn: sqlite3.Connection, row: sqlite3.Row) 
         )
 
 
+def _remove_catalogue_performer(conn: sqlite3.Connection, index: Index, performer_id: int) -> None:
+    """Deletes a catalogue performer entirely by its raw, portable id (see
+    _upsert_catalogue_performer's own docstring for why the raw id IS the
+    identity here). A human disabled this performer via stash-sense2-data-
+    gen's review_app; catalogue_removed_performers is the delta table that
+    tells us so (see that repo's build/export_delta.py).
+
+    Any of this performer's faces are normally already gone by the time
+    this runs -- build/assemble.py's _apply_exclusions records every one
+    of a fully-disabled performer's faces through the *same*
+    staging_db.record_removed_face path a stale-image prune or an
+    individually-flagged face uses, so the removed_faces loop above
+    (which runs first) already cleaned up the usearch index and the
+    `faces` rows. The explicit cleanup below is a defensive no-op in the
+    normal case, not the primary removal path -- it only does real work if
+    a delta somehow lists a performer removal without a matching
+    removed_faces entry for one of their faces."""
+    stray_faces = conn.execute(
+        "SELECT embedding_index FROM faces WHERE performer_id = ?", (performer_id,)
+    ).fetchall()
+    for (idx,) in stray_faces:
+        if idx in index:
+            index.remove(idx)
+    conn.execute("DELETE FROM faces WHERE performer_id = ?", (performer_id,))
+    conn.execute("DELETE FROM performer_urls WHERE performer_id = ?", (performer_id,))
+    conn.execute("DELETE FROM performers WHERE id = ?", (performer_id,))
+
+
 def apply_delta_db(
     delta_db_path: Path, data_dir: Path, progress_cb: Optional[Callable[[int], None]] = None,
 ) -> dict[str, int]:
@@ -397,10 +429,13 @@ def apply_delta_db(
     delta_conn.row_factory = sqlite3.Row
 
     catalogue_tables_present = _has_table(delta_conn, "catalogue_performers")
+    catalogue_removals_present = _has_table(delta_conn, "catalogue_removed_performers")
     field_updates_present = _has_table(delta_conn, "face_field_updates")
     progress_tables = ["performers", "faces", "removed_faces"]
     if catalogue_tables_present:
         progress_tables += ["catalogue_performers", "catalogue_performer_urls", "catalogue_faces"]
+    if catalogue_removals_present:
+        progress_tables += ["catalogue_removed_performers"]
     if field_updates_present:
         progress_tables += ["face_field_updates"]
     total_rows = sum(delta_conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in progress_tables)
@@ -491,6 +526,17 @@ def apply_delta_db(
             catalogue_faces_added += 1
             _tick()
 
+    # Fully-disabled catalogue performers (see _remove_catalogue_performer's
+    # own docstring) -- deliberately last among the catalogue_* tables, and
+    # deliberately not added to touched_performers: there's nothing left of
+    # them to face-count-sync.
+    catalogue_performers_removed = 0
+    if catalogue_removals_present:
+        for row in delta_conn.execute("SELECT * FROM catalogue_removed_performers"):
+            _remove_catalogue_performer(conn, index, row["id"])
+            catalogue_performers_removed += 1
+            _tick()
+
     # Field-only updates to faces that already existed before this delta
     # (e.g. gender/age inference or image_sha256 backfilled server-side
     # after the face's own release) -- see stash-sense2-data-gen's
@@ -535,6 +581,7 @@ def apply_delta_db(
         "faces_added": faces_added, "faces_removed": faces_removed,
         "catalogue_performers_upserted": catalogue_upserted,
         "catalogue_faces_added": catalogue_faces_added,
+        "catalogue_performers_removed": catalogue_performers_removed,
         "face_field_updates_applied": field_updates_applied,
     }
 
@@ -618,7 +665,8 @@ async def apply_delta_chain(
     work_dir.mkdir(parents=True, exist_ok=True)
 
     totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0,
-              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0, "face_field_updates_applied": 0}
+              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0,
+              "catalogue_performers_removed": 0, "face_field_updates_applied": 0}
 
     try:
         for i, hop in enumerate(chain):
