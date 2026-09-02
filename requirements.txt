@@ -6,7 +6,12 @@ tqdm>=4.65.0,<5
 # Face recognition
 insightface>=0.7.3,<1  # buffalo_l detection+recognition (GPU via ONNX Runtime)
 onnxruntime-gpu>=1.15.0,<2  # GPU support for InsightFace
-usearch>=2.16.0,<3
+onnx>=1.15.0,<1.18  # insightface pulls this in unpinned; onnx>=1.18 registers a new
+                     # ml_dtypes dtype at import whose finfo() segfaults under numpy<2
+ml_dtypes>=0.4.0,<0.5
+usearch>=2.16.0,<2.25  # 2.25+ switched its SIMD backend to numkong, whose mere import
+                        # destabilizes process state and segfaults onnxruntime later
+                        # when it creates a CPU inference session
 
 # API (for sidecar)
 fastapi>=0.100.0,<1
