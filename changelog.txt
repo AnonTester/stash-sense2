@@ -20,6 +20,18 @@
   since query-time detection must stay in lock-step with whatever
   produced the database's own stored embeddings.
 
+### 0.22.0 (plugin only)
+- Fix: "Select to identify" now pads the user's drawn selection by 40%
+  on each side before sending it for identification. A selection drawn
+  tight to just the face (the natural thing to do) reliably found NO face
+  at all -- confirmed against the sidecar's own detector: SCRFD needs
+  some surrounding context (hair/jaw/ears) to recognize a face pattern,
+  independent of rotation. Doesn't help a face that's genuinely partial
+  or at an extreme angle within the frame -- there's no missing context
+  to add back for that -- but recovers the much more common "selection
+  was just too tight" case. "Identify current frame" is unaffected (no
+  user-drawn selection involved).
+
 ### 0.26.0 (sidecar only)
 - Feature: delta packages can now remove a fully-disabled catalogue
   performer (pornbox.com/seekfans.com/legacy-site, no stash-box linkage --

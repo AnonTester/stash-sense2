@@ -1284,6 +1284,35 @@
         return null;
       },
 
+      // "Select to identify" margin: users naturally drag a box around
+      // just the face (or the face is all that fits, e.g. a close-up
+      // frame) rather than the full head+hair+neck. SCRFD needs some
+      // surrounding context to recognize a face pattern at all --
+      // confirmed live against the sidecar's own detector (same buffalo_l
+      // model, same code path -- see api/embeddings.py): a crop tight to
+      // (or tighter than) the face's own bounding box reliably finds NO
+      // face whatsoever, independent of rotation; +30% margin on each
+      // side was the first point that reliably worked in that same test.
+      // This pads a user's selection by MORE than that (a real drag
+      // selection is rarely pixel-perfect to the face either way, so a
+      // deliberately generous margin costs nothing when the selection
+      // already had slack, and is what actually rescues the tight case)
+      // before it's ever sent for identification. Doesn't help a face
+      // that's genuinely partial/at an extreme angle within the frame --
+      // there's no missing context to add back for that -- but recovers
+      // every case where the failure was purely "selection too tight."
+      SELECT_TO_IDENTIFY_PAD_FRACTION: 0.4,
+
+      padCropRect(cropRect, maxWidth, maxHeight, marginFraction) {
+        const padX = cropRect.width * marginFraction;
+        const padY = cropRect.height * marginFraction;
+        const x0 = Math.max(0, cropRect.x - padX);
+        const y0 = Math.max(0, cropRect.y - padY);
+        const x1 = Math.min(maxWidth, cropRect.x + cropRect.width + padX);
+        const y1 = Math.min(maxHeight, cropRect.y + cropRect.height + padY);
+        return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+      },
+
       // Draw a frame (or just cropRect, in native source-pixel coordinates)
       // from a <video> or <img> source to an offscreen canvas and return
       // base64 JPEG (no data: URL prefix) for the /identify image_base64
@@ -1434,12 +1463,19 @@
           // Scale from displayed CSS pixels to native source pixel coordinates
           const scaleX = frameSource.width / rect.width;
           const scaleY = frameSource.height / rect.height;
-          const cropRect = {
+          const rawCropRect = {
             x: selRect.x * scaleX,
             y: selRect.y * scaleY,
             width: selRect.w * scaleX,
             height: selRect.h * scaleY,
           };
+          // Pad the user's own selection -- see SELECT_TO_IDENTIFY_PAD_FRACTION's
+          // own comment for why: a selection drawn tight to just the face
+          // (the natural thing to do when identifying a specific face)
+          // otherwise reliably fails detection entirely.
+          const cropRect = this.padCropRect(
+            rawCropRect, frameSource.width, frameSource.height, this.SELECT_TO_IDENTIFY_PAD_FRACTION,
+          );
           const imageBase64 = this.captureVideoFrameBase64(frameSource.source, frameSource.width, frameSource.height, cropRect);
           cleanup();
 
