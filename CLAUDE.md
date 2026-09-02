@@ -37,8 +37,6 @@ cd api && make lint-fix        # auto-fix
 
 # Deploy to the live sidecar + plugin (this fork's actual deployment —
 # a local Docker build on <stash-host>, not a registry push):
-scp api/<changed files> <stash-host>:/root/homeserver/stash-sense2/api/
-scp plugin/<changed files> <stash-host>:/root/homeserver/stash-sense2/plugin/
 ssh <stash-host> "cd /root/homeserver/stash-sense2 && sh rebuild.sh"
 # rebuild.sh rebuilds the ROCm sidecar image (see the script's own comment
 # for the CPU-variant swap) AND copies plugin/* into Stash's installed
@@ -48,6 +46,15 @@ ssh <stash-host> "cd /root/homeserver/stash-sense2 && sh rebuild.sh"
 # Stash's Settings > Plugins page (or restart Stash) for the new JS to
 # take effect — rebuild.sh alone doesn't do that last step.
 ```
+
+**This directory (`/root/homeserver/stash-sense2` on `<stash-host>`) is the
+actual git working copy** — the one with `origin` pointing at
+`AnonTester/stash-sense2`, where commits/pushes happen. There is no
+separate local dev clone to `scp` changes from anymore; edit, commit, and
+push directly here (over the network mount, or via `ssh <stash-host>`),
+then run `rebuild.sh` as above to redeploy. (Earlier revisions of this repo
+described a workflow with a separate local clone that got `scp`'d over on
+every change — that's gone; this checkout is the only one that matters.)
 
 **Plugin identity — `PLUGIN_ID` must match the install folder name.** Stash derives a locally-installed plugin's id from its directory name, not from any field in the `.yml` manifest. `plugin/stash-sense-core.js`'s `PLUGIN_ID` constant is used both to look up this plugin's settings (`configuration.plugins[PLUGIN_ID]`) and to route `runPluginOperation` calls to the right backend script — if it doesn't match the real install folder name, this plugin silently reads and drives *whichever other plugin* is registered under that stale id instead (this happened once already: `PLUGIN_ID` was left at `'stash-sense'`, v1's id, causing v2 to unknowingly control v1's sidecar when installed side-by-side — see changelog 0.14.1). The reference deployment's local install folder is `stash-sense2`; keep `PLUGIN_ID` and the manifest's `name:` field (`Stash Sense 2`, for the same side-by-side-distinguishability reason) in sync with that.
 
@@ -64,13 +71,13 @@ ssh <stash-host> "cd /root/homeserver/stash-sense2 && sh rebuild.sh"
 cp plugin/stash-sense-core.js plugin/stash-sense.js plugin/stash-sense-operations.js \
    plugin/stash-sense-recommendations.js plugin/stash-sense-settings.js \
    plugin/stash-sense.css plugin/stash_sense_backend.py \
-   ~/Codeprojects/stash-plugin-repo/plugins/stash-sense2/
-cp plugin/stash-sense.yml ~/Codeprojects/stash-plugin-repo/plugins/stash-sense2/stash-sense2.yml
+   <stash-plugin-repo-checkout>/plugins/stash-sense2/
+cp plugin/stash-sense.yml <stash-plugin-repo-checkout>/plugins/stash-sense2/stash-sense2.yml
 
 # 3. Cut the release — build.sh diffs the manifest version against
 #    index.yml, zips, computes the sha256, updates index.yml, and
 #    commits+pushes automatically:
-cd ~/Codeprojects/stash-plugin-repo && ./build.sh
+cd <stash-plugin-repo-checkout> && ./build.sh
 ```
 
 `build.sh` only touches `version`/`date`/`path`/`sha256` in `index.yml` — if the plugin's *display* `name:` changed (not just its version), edit that repo's `index.yml` entry by hand before running `build.sh`, in the same commit/PR as everything else. See `stash-plugin-repo/CLAUDE.md` for the full mechanics (release pruning, the directory-name-derived id rule, why `build.sh` needs a `.py` glob for this plugin's `exec:` backend).
