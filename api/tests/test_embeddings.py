@@ -22,6 +22,7 @@ from embeddings import (
     FaceEmbedding,
     FaceEmbeddingGenerator,
     GPU_COMPUTE_LOCK,
+    MAX_ROLL_CORRECTION_ATTEMPTS,
     gpu_compute_lock,
     load_image,
     load_image_from_path,
@@ -160,7 +161,10 @@ class TestDetectFaces:
         face = faces[0]
         assert isinstance(face, DetectedFace)
         assert face.confidence == pytest.approx(0.9)
-        assert face.bbox == {"x": 10, "y": 10, "w": 50, "h": 50}
+        # rotation_applied: 0.0 -- no roll correction fired (this mock's
+        # kps=None gives _face_roll_degrees() nothing to measure), see
+        # TestRollCorrection below for the correction path itself.
+        assert face.bbox == {"x": 10, "y": 10, "w": 50, "h": 50, "rotation_applied": 0.0}
         assert face.embedding.shape == (512,)
 
     def test_filters_faces_below_min_confidence(self):
@@ -218,6 +222,125 @@ class TestDetectFaces:
         faces = generator.detect_faces(image)
 
         assert faces[0].yaw is None
+
+
+def _rolled_kps():
+    """~90 degree roll: mouth corners to the SIDE of the eyes rather than
+    below them (eye-center (50,50) -> mouth-center (80,50), a horizontal
+    eye-to-mouth vector)."""
+    return np.array([
+        [50.0, 35.0],  # left eye
+        [50.0, 65.0],  # right eye
+        [65.0, 50.0],  # nose
+        [80.0, 35.0],  # mouth left
+        [80.0, 65.0],  # mouth right
+    ], dtype=np.float32)
+
+
+def _upright_kps():
+    """~0 degree roll: mouth corners below the eyes (same shape
+    test_estimates_yaw_from_landmarks above already uses)."""
+    return np.array([
+        [40.0, 40.0], [60.0, 40.0], [50.0, 55.0], [42.0, 70.0], [58.0, 70.0],
+    ], dtype=np.float32)
+
+
+class TestRollCorrection:
+    """detect_faces()'s in-plane rotation correction -- see that method's
+    own docstring. These use side_effect (not the module-level
+    _generator_with_mock_analyzer helper, which returns a fixed value on
+    every call) since the whole point under test is what happens on the
+    SECOND face_analyzer.get() call, after a rotated re-detection."""
+
+    def test_corrects_large_roll_and_replaces_results(self):
+        generator = FaceEmbeddingGenerator(device="cpu")
+        rolled = _mock_face(det_score=0.7, kps=_rolled_kps())
+        corrected = _mock_face(det_score=0.9, kps=_upright_kps())
+        mock_analyzer = Mock(get=Mock(side_effect=[[rolled], [corrected]]))
+        generator._face_analyzer = mock_analyzer
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        faces = generator.detect_faces(image)
+
+        assert mock_analyzer.get.call_count == 2
+        assert len(faces) == 1
+        # The corrected pass's face, not the original rolled one.
+        assert faces[0].confidence == pytest.approx(0.9)
+        assert faces[0].bbox["rotation_applied"] == pytest.approx(-90.0, abs=1.0)
+
+    def test_small_roll_does_not_trigger_a_second_detection_pass(self):
+        generator = FaceEmbeddingGenerator(device="cpu")
+        upright = _mock_face(det_score=0.9, kps=_upright_kps())
+        mock_analyzer = Mock(get=Mock(return_value=[upright]))
+        generator._face_analyzer = mock_analyzer
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        faces = generator.detect_faces(image)
+
+        assert mock_analyzer.get.call_count == 1
+        assert faces[0].bbox["rotation_applied"] == 0.0
+
+    def test_falls_back_to_original_when_correction_finds_no_face(self):
+        generator = FaceEmbeddingGenerator(device="cpu")
+        rolled = _mock_face(det_score=0.7, kps=_rolled_kps())
+        mock_analyzer = Mock(get=Mock(side_effect=[[rolled], []]))
+        generator._face_analyzer = mock_analyzer
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        faces = generator.detect_faces(image)
+
+        assert len(faces) == 1
+        assert faces[0].confidence == pytest.approx(0.7)
+        assert faces[0].bbox["rotation_applied"] == 0.0
+
+    def test_falls_back_to_original_after_exhausting_all_attempts(self):
+        # A rotation-correction pass that NEVER converges, across every
+        # attempt the budget allows -- 1 initial call + MAX_ROLL_
+        # CORRECTION_ATTEMPTS retries, all still rolled.
+        generator = FaceEmbeddingGenerator(device="cpu")
+        rolled = _mock_face(det_score=0.7, kps=_rolled_kps())
+        still_rolled = _mock_face(det_score=0.5, kps=_rolled_kps())
+        mock_analyzer = Mock(get=Mock(
+            side_effect=[[rolled]] + [[still_rolled]] * MAX_ROLL_CORRECTION_ATTEMPTS
+        ))
+        generator._face_analyzer = mock_analyzer
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        faces = generator.detect_faces(image)
+
+        assert mock_analyzer.get.call_count == 1 + MAX_ROLL_CORRECTION_ATTEMPTS
+        assert len(faces) == 1
+        # The ORIGINAL rolled face (0.7), not any of the still-bad
+        # "corrected" attempts (0.5) -- a correction that never actually
+        # converges within budget is discarded entirely.
+        assert faces[0].confidence == pytest.approx(0.7)
+        assert faces[0].bbox["rotation_applied"] == 0.0
+
+    def test_second_attempt_converges_after_first_does_not(self):
+        # Regression test for the real bug this iteration was added for:
+        # a tightly-cropped ("just the head," not the full frame) upside-
+        # down photo whose roll estimate was noisy enough that ONE
+        # correction pass wasn't enough (-142 degrees -> -49 residual,
+        # still outside ROLL_RESIDUAL_OK_DEG) -- a single-pass version
+        # fell back to the original, badly-rotated detection and matched
+        # the wrong performer. A second pass (correcting that -49 degree
+        # residual) converged. This confirms the loop actually retries
+        # instead of giving up after the first attempt.
+        generator = FaceEmbeddingGenerator(device="cpu")
+        initial = _mock_face(det_score=0.6, kps=_rolled_kps())
+        still_rolled = _mock_face(det_score=0.65, kps=_rolled_kps())
+        converged = _mock_face(det_score=0.9, kps=_upright_kps())
+        mock_analyzer = Mock(get=Mock(side_effect=[[initial], [still_rolled], [converged]]))
+        generator._face_analyzer = mock_analyzer
+        image = np.zeros((100, 100, 3), dtype=np.uint8)
+
+        faces = generator.detect_faces(image)
+
+        assert mock_analyzer.get.call_count == 3
+        assert len(faces) == 1
+        assert faces[0].confidence == pytest.approx(0.9)
+        # Both corrections accumulated (90 + 90 = 180), not just the last one.
+        assert faces[0].bbox["rotation_applied"] == pytest.approx(-180.0, abs=1.0)
 
 
 class TestGetEmbeddings:

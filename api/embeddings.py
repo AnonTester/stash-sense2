@@ -30,6 +30,7 @@ import os
 import io
 import asyncio
 import logging
+import math
 import threading
 import warnings
 from contextlib import asynccontextmanager
@@ -91,6 +92,46 @@ MODELS_DIR = Path(__file__).parent / "models"
 DATA_MODELS_DIR = Path(os.environ.get("DATA_DIR", "./data")) / "models"
 
 GPU_PROVIDERS = {"CUDAExecutionProvider", "ROCMExecutionProvider", "MIGraphXExecutionProvider"}
+
+# In-plane rotation ("roll") correction -- mirrors stash-sense2-data-gen's
+# own embed/embeddings.py exactly (same thresholds, same formula; see this
+# module's own docstring for why the two MUST stay identical). A source
+# photo/frame can be genuinely rotated (no EXIF to recover, or a real
+# candid pose) and while SCRFD's own detection confidence stays
+# deceptively high across the full rotation range, the actual recognition
+# embedding degrades badly past ~60-90 degrees of roll -- confirmed
+# empirically on the data-gen side: rotating known-good faces 90-180
+# degrees kept detection confidence around 0.7-0.9 while embedding cosine
+# similarity to the unrotated original collapsed to 0.06-0.86,
+# unpredictably. Confidence alone never warns you this happened.
+#
+# ROLL_CORRECTION_THRESHOLD_DEG: only attempt a correction above this.
+# ROLL_RESIDUAL_OK_DEG: after rotating and re-detecting, only trust the
+# corrected result if ITS OWN measured roll comes back below this bar --
+# landmark detection itself occasionally gets confused at extreme angles,
+# so re-verifying against the corrected image rather than assuming the
+# correction worked catches that.
+# MAX_ROLL_CORRECTION_ATTEMPTS: a single rotate-and-recheck pass is not
+# always enough -- confirmed live on a real, tightly-cropped ("just the
+# head," via the plugin's own "Select to identify" -- not the full frame)
+# upside-down photo: the roll ESTIMATE itself gets noisier the smaller/
+# tighter the crop is (less surrounding context for landmark
+# localization), so a photo measured at -142 degrees of roll corrected
+# only as far as -49 degrees residual on the first attempt -- still well
+# outside ROLL_RESIDUAL_OK_DEG, so a single-pass version of this fell back
+# to the ORIGINAL, still-badly-rotated detection and confidently matched
+# the wrong performer (exactly the plugin bug this was written to fix: a
+# large-area/full-frame selection worked because it happened to converge
+# in one pass, a tight head-only selection didn't). A second pass on that
+# same photo (measuring/correcting the new -49 degree residual) converged
+# to +5 degrees. Iterating up to this many times before giving up handles
+# that case (and is still cheap -- it only ever fires for the already-rare
+# large-roll case at all). Only ever falls back to the pristine original,
+# never a partially-corrected intermediate state that was never itself
+# verified as converged.
+ROLL_CORRECTION_THRESHOLD_DEG = 25.0
+ROLL_RESIDUAL_OK_DEG = 15.0
+MAX_ROLL_CORRECTION_ATTEMPTS = 3
 
 
 def _onnxruntime_has_gpu_provider() -> bool:
@@ -324,7 +365,28 @@ class FaceEmbeddingGenerator:
         min_confidence: float = 0.5,
     ) -> list[DetectedFace]:
         """
-        Detect + align + embed every face in an image, in one buffalo_l call.
+        Detect + align + embed every face in an image, in one buffalo_l call,
+        with an in-plane rotation ("roll") correction pass -- see
+        ROLL_CORRECTION_THRESHOLD_DEG's own comment for why this exists, and
+        MAX_ROLL_CORRECTION_ATTEMPTS's for why it iterates rather than
+        trying only once. Mirrors stash-sense2-data-gen's own embed/
+        embeddings.py exactly (same reasoning applies here: query-time
+        detection needs the same correction the database's own faces get,
+        or a rotated query face would be compared against a correctly-
+        oriented stored embedding on unequal footing).
+
+        Scoped to the whole image, not per-face: roll is measured off the
+        single largest-area candidate. Each iteration rotates the CURRENT
+        image (not always the original -- the second attempt corrects the
+        first attempt's own residual, and so on) and re-detects from
+        scratch; the loop stops the moment a re-detection's own measured
+        roll comes back under ROLL_RESIDUAL_OK_DEG, at which point every
+        face from that final pass replaces the original results wholesale.
+        Any face returned this way carries `bbox["rotation_applied"]` (the
+        TOTAL degrees applied across every accepted attempt, 0.0 if no
+        correction was needed/kept). Exhausting the attempt budget without
+        converging, or an attempt that makes the face undetectable
+        outright, both fall back to the pristine original detection.
 
         Args:
             image: RGB image as numpy array
@@ -332,6 +394,56 @@ class FaceEmbeddingGenerator:
 
         Returns:
             List of DetectedFace objects (embedding already populated)
+        """
+        faces = self._detect_faces_raw(image, min_confidence)
+        if not faces:
+            return faces
+
+        primary = max(faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
+        roll = _face_roll_degrees(primary.landmarks)
+        if roll is None or abs(roll) < ROLL_CORRECTION_THRESHOLD_DEG:
+            return faces
+
+        current_image = image
+        current_roll = roll
+        cumulative_rotation = 0.0
+
+        for _ in range(MAX_ROLL_CORRECTION_ATTEMPTS):
+            correction = -current_roll
+            rotated_image = _rotate_image_array(current_image, correction)
+            rotated_faces = self._detect_faces_raw(rotated_image, min_confidence)
+            if not rotated_faces:
+                break  # this attempt made the face undetectable -- stop, fall back below
+
+            cumulative_rotation += correction
+            current_image = rotated_image
+
+            rotated_primary = max(rotated_faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
+            residual_roll = _face_roll_degrees(rotated_primary.landmarks)
+            if residual_roll is None:
+                break
+
+            if abs(residual_roll) < ROLL_RESIDUAL_OK_DEG:
+                for f in rotated_faces:
+                    f.bbox["rotation_applied"] = cumulative_rotation
+                return rotated_faces
+
+            current_roll = residual_roll  # not converged yet -- correct the new residual next
+
+        # Never converged within the attempt budget -- trust the ORIGINAL,
+        # uncorrected detection.
+        return faces
+
+    def _detect_faces_raw(
+        self,
+        image: np.ndarray,
+        min_confidence: float = 0.5,
+    ) -> list[DetectedFace]:
+        """The actual buffalo_l detect+embed call, with no rotation
+        awareness at all -- detect_faces() above is the entry point every
+        caller should use; this exists so that wrapper can invoke it twice
+        (original orientation, then again on a corrected copy) without
+        recursing into its own correction logic the second time.
         """
         results = self.face_analyzer.get(image)
 
@@ -370,7 +482,14 @@ class FaceEmbeddingGenerator:
 
             faces.append(DetectedFace(
                 image=face_img,
-                bbox={"x": int(x1), "y": int(y1), "w": int(w), "h": int(h)},
+                bbox={
+                    "x": int(x1), "y": int(y1), "w": int(w), "h": int(h),
+                    # Overwritten by detect_faces() to the actual applied
+                    # angle when a roll correction is kept -- see that
+                    # method's own docstring. 0.0 here (not None) since
+                    # this raw call has no rotation awareness of its own.
+                    "rotation_applied": 0.0,
+                },
                 confidence=conf,
                 embedding=np.asarray(face.normed_embedding, dtype=np.float32),
                 landmarks=kps,
@@ -407,6 +526,40 @@ def load_image_from_path(path: str) -> np.ndarray:
     if image.mode != "RGB":
         image = image.convert("RGB")
     return np.array(image)
+
+
+def _face_roll_degrees(landmarks: Optional[np.ndarray]) -> Optional[float]:
+    """In-plane rotation ("roll") of a detected face, from its 5-point
+    landmarks (insightface order: left_eye, right_eye, nose, mouth_left,
+    mouth_right) -- the angle of the eye-center-to-mouth-center vector
+    relative to straight down (0 = upright, eyes above the mouth).
+    Mirrors stash-sense2-data-gen's own embed/embeddings.py exactly.
+
+    Deliberately the eye-to-mouth axis, not the simpler eye-to-eye line:
+    the eye-line alone is ambiguous near its own +-180 degree boundary,
+    while eye-center vs. mouth-center stays a single, unambiguous vector
+    all the way around a full rotation -- confirmed empirically to track
+    applied rotation correctly at every 45-degree step from 0-315 degrees,
+    including where the simpler formula produced a wrong reading. Returns
+    None if fewer than 5 landmark points are available."""
+    if landmarks is None or len(landmarks) < 5:
+        return None
+    left_eye, right_eye, _nose, mouth_left, mouth_right = landmarks[:5]
+    eye_center = ((left_eye[0] + right_eye[0]) / 2, (left_eye[1] + right_eye[1]) / 2)
+    mouth_center = ((mouth_left[0] + mouth_right[0]) / 2, (mouth_left[1] + mouth_right[1]) / 2)
+    dx, dy = mouth_center[0] - eye_center[0], mouth_center[1] - eye_center[1]
+    return math.degrees(math.atan2(dx, dy))
+
+
+def _rotate_image_array(image: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Rotate a full image (numpy array, as detect_faces() takes) by
+    `angle_deg` -- via PIL, since numpy alone has no expand-the-canvas
+    rotation. `expand=True` grows the canvas to fit the whole rotated
+    image rather than cropping corners off. Mirrors stash-sense2-data-gen's
+    own embed/embeddings.py exactly."""
+    pil_image = Image.fromarray(image)
+    rotated = pil_image.rotate(angle_deg, expand=True)
+    return np.array(rotated)
 
 
 if __name__ == "__main__":

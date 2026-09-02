@@ -1,5 +1,25 @@
 ## 2026-09-02
 
+### 0.27.0 (sidecar only)
+- Fix: face detection/recognition now corrects for in-plane rotation
+  ("roll") -- a source photo/frame can be genuinely stored sideways or
+  upside-down (no EXIF orientation to recover) or a real candid pose
+  (head tilted back), and while the detector's own confidence stays
+  deceptively high across the full rotation range, the actual
+  recognition embedding degrades badly past roughly 60-90 degrees of
+  roll. Measures roll from the detector's own 5-point landmarks, rotates
+  and re-detects, and iterates (up to 3 attempts, each correcting the
+  previous attempt's own residual) until a re-detection's own roll comes
+  back near zero -- a single-pass version left a tightly-cropped
+  ("Select to identify" on just the head, not the full frame) upside-
+  down photo only partially corrected and it matched the wrong
+  performer with high confidence; the second pass converges. Falls back
+  to the original detection whenever correction doesn't clearly
+  converge within budget. api/embeddings.py mirrors stash-sense2-data-
+  gen's own embed/embeddings.py exactly (same thresholds, same formula)
+  since query-time detection must stay in lock-step with whatever
+  produced the database's own stored embeddings.
+
 ### 0.26.0 (sidecar only)
 - Feature: delta packages can now remove a fully-disabled catalogue
   performer (pornbox.com/seekfans.com/legacy-site, no stash-box linkage --
