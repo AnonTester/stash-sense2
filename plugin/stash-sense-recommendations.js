@@ -6484,6 +6484,18 @@
           acceptBtn.textContent = 'Accepting...';
           result = await RecommendationsAPI.acceptSceneFaceMatches(sceneId, selectedIds, resolutionsByRecId);
         }
+        // The matched local performer no longer exists in Stash (deleted
+        // or merged away) -- see accept_scene_face_matches's own comment
+        // on the backend. Nothing was actually accepted (that stale
+        // selection's recommendation was dismissed and this scene's match
+        // data refreshed instead), so this must NOT fall through to the
+        // success toast below.
+        if (result.success === false && result.stale_performers) {
+          acceptBtn.textContent = 'Accept Selected';
+          acceptBtn.disabled = false;
+          showToast(result.detail || 'The matched performer no longer exists in Stash.', 'warning', 6000);
+          return;
+        }
         showSuccessAndReturn(acceptBtn, 'Accepted!');
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;

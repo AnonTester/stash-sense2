@@ -18,6 +18,13 @@
   investigated separately, appears to be a pre-existing hybrid-mode
   matching gap unrelated to this fix, tracked for follow-up.
 
+### 0.23.0 (plugin only)
+- Fix: the Face Recommendations accept button silently showed "Accepted!"
+  even when the backend reported the new stale-performer failure above
+  (0.28.0) -- it only ever checked for the pre-existing ambiguous-match
+  response shape. Now shows a clear toast explaining the match no longer
+  exists instead of falsely claiming success.
+
 ## 2026-09-02
 
 ### 0.27.0 (sidecar only)
