@@ -132,6 +132,99 @@ class TestAcceptSceneFaceMatchesAmbiguity:
         assert db.get_recommendation(rec_id).status == "resolved"
 
 
+class TestAcceptSceneFaceMatchesStalePerformer:
+    """A scene_face_match candidate whose local_performer_id was deleted or
+    merged away in Stash directly (no hook/sync has caught up yet) used to
+    crash this endpoint outright: Stash's own sceneUpdate raised a raw
+    FOREIGN KEY error with no validation of its own, surfacing as an
+    opaque 500 -- confirmed live (performer merged into a different id,
+    "Internal server error" on accept). Regression coverage for the fix:
+    validate before mutating, dismiss (not silently drop) the stale
+    recommendation, and refresh the scene's own match data so a future
+    scan can surface the correct candidate instead of repeating the dead
+    one -- see accept_scene_face_matches's own comment."""
+
+    async def test_stale_local_performer_id_is_dismissed_not_crashed(self, db):
+        from recommendations_router import accept_scene_face_matches, AcceptSceneFaceMatchesRequest, SceneFaceMatchSelection
+
+        rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id="1|local:2722",
+            details={"scene_id": "1", "name": "Nattyprincessx", "local_performer_id": "2722"},
+            confidence=0.9,
+        )
+
+        # get_performer(None) simulates Stash's findPerformer returning
+        # null for an id that's been deleted/merged away.
+        stash = _mock_stash(get_performer=AsyncMock(return_value=None))
+
+        import recommendations_router as rec_mod
+        rec_mod.rec_db = db
+        rec_mod.stash_client = stash
+
+        with patch("identification_router._identify_scene_impl", new=AsyncMock()) as mock_reidentify:
+            result = await accept_scene_face_matches(AcceptSceneFaceMatchesRequest(
+                scene_id="1",
+                selections=[SceneFaceMatchSelection(recommendation_id=rec_id)],
+            ))
+
+        assert result["success"] is False
+        assert result["stale_performers"] == ["2722"]
+
+        # Never attempted the mutation that would have raised the FK error.
+        stash.update_scene_performers.assert_not_called()
+
+        # Dismissed (not left pending, not marked "accepted") -- it must
+        # leave the pending queue since retrying the exact same selection
+        # would just fail the exact same way again.
+        rec = db.get_recommendation(rec_id)
+        assert rec.status == "resolved"
+        assert rec.resolution_action == "dismissed"
+
+        # Scene's own match data was refreshed so a future scan can find
+        # whoever this performer was actually merged into.
+        mock_reidentify.assert_called_once()
+        assert mock_reidentify.call_args[0][0].scene_id == "1"
+
+    async def test_stale_performer_alongside_a_valid_one_still_accepts_the_valid_one(self, db):
+        """Two candidates for the same scene, one stale and one still
+        valid -- the valid one must not be collateral damage."""
+        from recommendations_router import accept_scene_face_matches, AcceptSceneFaceMatchesRequest, SceneFaceMatchSelection
+
+        stale_rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id="1|local:2722",
+            details={"scene_id": "1", "name": "Stale Person", "local_performer_id": "2722"},
+            confidence=0.9,
+        )
+        valid_rec_id = db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id="1|local:42",
+            details={"scene_id": "1", "name": "Valid Person", "local_performer_id": "42"},
+            confidence=0.85,
+        )
+
+        async def _get_performer(performer_id):
+            return None if performer_id == "2722" else {"id": "42", "name": "Valid Person", "stash_ids": []}
+
+        stash = _mock_stash(get_performer=AsyncMock(side_effect=_get_performer))
+
+        import recommendations_router as rec_mod
+        rec_mod.rec_db = db
+        rec_mod.stash_client = stash
+
+        with patch("identification_router._identify_scene_impl", new=AsyncMock()):
+            result = await accept_scene_face_matches(AcceptSceneFaceMatchesRequest(
+                scene_id="1",
+                selections=[
+                    SceneFaceMatchSelection(recommendation_id=stale_rec_id),
+                    SceneFaceMatchSelection(recommendation_id=valid_rec_id),
+                ],
+            ))
+
+        assert result["success"] is True
+        stash.update_scene_performers.assert_called_once_with("1", ["42"])
+        assert db.get_recommendation(stale_rec_id).resolution_action == "dismissed"
+        assert db.get_recommendation(valid_rec_id).resolution_action == "accepted"
+
+
 class TestApplyFullSceneRecommendationAmbiguity:
     def _seed_rec(self, db, added_performers):
         return db.create_recommendation(

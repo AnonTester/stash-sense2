@@ -1,3 +1,23 @@
+## 2026-09-03
+
+### 0.28.0 (sidecar only)
+- Fix: accepting a Face Recommendations match whose local performer was
+  deleted or merged away in Stash directly (no hook/sync had caught up
+  yet) crashed with an unhandled 500 -- Stash's own sceneUpdate raised a
+  raw FOREIGN KEY constraint error with no validation of its own.
+  accept_scene_face_matches now checks each newly-added performer id
+  against Stash before mutating anything: a still-valid selection in the
+  same batch is unaffected, and a stale one is dismissed (not silently
+  left pending, and not crashing the request) with its scene's own match
+  data refreshed (a real rematch, matching_mode="hybrid"/use_sprite=True
+  to mirror what a real Face Recommendations scan uses -- not the
+  request's own weaker defaults) so a future scan can surface whoever the
+  performer actually merged into. Confirmed live end-to-end against the
+  actual bug report (a performer merge). Note: this refresh alone doesn't
+  always immediately produce a new match for the affected scene --
+  investigated separately, appears to be a pre-existing hybrid-mode
+  matching gap unrelated to this fix, tracked for follow-up.
+
 ## 2026-09-02
 
 ### 0.27.0 (sidecar only)

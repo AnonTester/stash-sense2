@@ -4436,6 +4436,71 @@ async def accept_scene_face_matches(request: AcceptSceneFaceMatchesRequest):
     if not accepted_rec_ids:
         raise HTTPException(status_code=422, detail="No valid pending selections to accept")
 
+    # A resolved performer_id can be stale: the local performer it names
+    # was deleted, or merged into a different id, directly in Stash since
+    # this recommendation was generated -- Stash itself has no validation
+    # for this (confirmed live: sceneUpdate raises a raw FOREIGN KEY
+    # constraint error from its own SQLite backend, which otherwise
+    # surfaces here as an opaque 500 with no indication of what went
+    # wrong). Check each *newly-added* id (already-on-the-scene ids are
+    # trivially fine) before attempting the mutation, so one stale
+    # selection can't take an otherwise-valid batch down with it.
+    stale_rec_ids: dict[int, str] = {}  # rec_id -> the performer_id that no longer exists
+    valid_resolved_ids: list[str] = []
+    valid_accepted_rec_ids: list[int] = []
+    for performer_id, rec_id in zip(resolved_ids, accepted_rec_ids):
+        if performer_id in current_ids or await stash.get_performer(performer_id) is not None:
+            valid_resolved_ids.append(performer_id)
+            valid_accepted_rec_ids.append(rec_id)
+        else:
+            stale_rec_ids[rec_id] = performer_id
+
+    if stale_rec_ids:
+        logger.warning(
+            "accept_scene_face_matches: performer(s) %s no longer exist in Stash "
+            "(deleted or merged) -- dismissing rec(s) %s and refreshing scene %s's match data",
+            list(stale_rec_ids.values()), list(stale_rec_ids.keys()), request.scene_id,
+        )
+        for rec_id, performer_id in stale_rec_ids.items():
+            db.resolve_recommendation(
+                rec_id, action="dismissed",
+                details={"reason": f"Matched local performer {performer_id} no longer exists in Stash "
+                                    f"(deleted or merged) -- rechecking"},
+            )
+        # Refresh this scene's own match data (layer 3 only -- use_cache
+        # defaults to True, so this reuses the already-extracted/embedded
+        # faces and just re-matches against whoever's actually in the
+        # local index now) so the *next* Face Recommendations scan
+        # surfaces a fresh, correct candidate instead of repeating the
+        # same stale one. Best-effort: a failure here shouldn't block the
+        # still-valid selections below from being applied.
+        try:
+            from identification_router import SceneIdentifyRequest, _identify_scene_impl
+            # matching_mode="hybrid", use_sprite=True: match
+            # analyzers/scene_face_match.py's own identify_scenes_batched
+            # call shape exactly (SceneIdentifyRequest otherwise defaults
+            # to matching_mode="frequency", use_sprite=False -- a
+            # different, weaker matching pass than what a real Face
+            # Recommendations scan actually uses, confirmed live: the
+            # default-mode refresh alone found no match for a scene this
+            # hybrid-mode shape doesn't either -- see the follow-up on
+            # hybrid-mode clustering, a separate issue from this fix).
+            await _identify_scene_impl(SceneIdentifyRequest(
+                scene_id=request.scene_id, matching_mode="hybrid", use_sprite=True,
+            ))
+        except Exception:
+            logger.exception("Failed to refresh match data for scene %s after stale performer match", request.scene_id)
+
+    resolved_ids, accepted_rec_ids = valid_resolved_ids, valid_accepted_rec_ids
+    if not accepted_rec_ids:
+        return {
+            "success": False,
+            "stale_performers": list(stale_rec_ids.values()),
+            "detail": "The matched performer(s) no longer exist in Stash (deleted or merged). "
+                      "This scene's match data has been refreshed -- run Face Recommendations "
+                      "again to get a fresh candidate.",
+        }
+
     # SceneUpdateInput's performer_ids replaces the full list -- merge with
     # whatever's already on the scene rather than clobbering it.
     merged_ids = list(dict.fromkeys(current_ids + resolved_ids))

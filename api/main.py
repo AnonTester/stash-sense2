@@ -434,7 +434,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.27.0",
+    version="0.28.0",
     lifespan=lifespan,
 )
 
