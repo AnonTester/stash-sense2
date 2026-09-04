@@ -11,7 +11,7 @@ import asyncio
 import io
 import sys
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -438,12 +438,21 @@ class TestQualityModel:
         assert generator.score_face_quality(face) is None
 
     def test_score_face_quality_reads_back_session_output(self, tmp_path):
+        # cv2 is a blanket MagicMock in CI (see conftest.py -- no real
+        # opencv there), so cv2.resize's return value is pinned explicitly
+        # here rather than relying on it actually resizing face.image --
+        # this makes the test environment-independent (same behavior
+        # whether cv2 is the real module or CI's stub) instead of
+        # accidentally depending on real-opencv-only behavior no other
+        # test in this file exercises.
+        resized = np.zeros((112, 112, 3), dtype=np.uint8)
         generator = FaceEmbeddingGenerator(device="cpu", models_dir=tmp_path)
         generator._quality_model_load_attempted = True
         generator._quality_model = Mock(run=Mock(return_value=[np.array([[1.75]], dtype=np.float32)]))
         face = _face(60, 60, 0.9)
 
-        score = generator.score_face_quality(face)
+        with patch("embeddings.cv2.resize", return_value=resized):
+            score = generator.score_face_quality(face)
 
         assert score == pytest.approx(1.75)
         # 112x112x3 BGR blob, batch-of-1 -- what CR-FIQA(S) was validated against.
