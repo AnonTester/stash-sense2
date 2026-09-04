@@ -1,8 +1,15 @@
 {
-  "version": 3,
+  "version": 4,
   "repo": "AnonTester/stash-sense2-data",
   "release_tag": "models",
   "models": {
+    "face_quality_crfiqa_s": {
+      "file": "models/quality/crfiqa_s.onnx",
+      "size": 174407204,
+      "sha256": "1620db9d4b03113328e34979a97efbb1f1397b86b6b013b3d6142768cfb997d7",
+      "group": "face_recognition",
+      "description": "CR-FIQA(S) face quality scorer (fdbtrs/CR-FIQA, CC BY-NC 4.0) -- catches a misidentified non-face object (tattoo/wallpaper/poster/etc.) or badly-occluded face beating the real subject when building the local performer index. Deliberately under models/quality/, not models/buffalo_l/ -- FaceAnalysis's directory auto-scan misclassifies its 112x112 input as a second recognition model if placed alongside w600k_r50.onnx."
+    },
     "buffalo_l_detection": {
       "file": "models/buffalo_l/det_10g.onnx",
       "size": 16923827,

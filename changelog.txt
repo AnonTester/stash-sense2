@@ -1,5 +1,17 @@
 ## 2026-09-03
 
+### 0.29.0 (sidecar only)
+- Local performer index syncing (Settings -> Local Performers) now uses a
+  face-quality signal (CR-FIQA) to catch a performer cover photo where
+  the detector picked a misidentified non-face object (a tattoo,
+  wallpaper/carpet pattern, poster/painting in the background, a cushion,
+  boots) or a badly-occluded face instead of the real subject -- picking
+  the largest detected box alone couldn't tell the two apart. Only
+  applies to a performer's cover being synced for the first time or after
+  a real photo change; already-synced entries are untouched. Optional --
+  falls back to the previous largest-area selection if the model hasn't
+  been downloaded yet (Settings -> Models).
+
 ### 0.28.0 (sidecar only)
 - Fix: accepting a Face Recommendations match whose local performer was
   deleted or merged away in Stash directly (no hook/sync had caught up

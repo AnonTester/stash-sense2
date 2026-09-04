@@ -187,7 +187,7 @@ async def sync_one_performer(
             return "urls_updated"
         return "unchanged"
 
-    from embeddings import load_image, gpu_compute_lock
+    from embeddings import load_image, gpu_compute_lock, select_local_performer_face
     image = load_image(image_bytes)
     # See embeddings.py's gpu_compute_lock() docstring -- this runs as a
     # real coroutine on the event loop (the Performer hook handler calls it
@@ -206,7 +206,7 @@ async def sync_one_performer(
         index.remove(performer_id)
         return "removed" if was_present else "skipped_no_image"
 
-    best_face = max(faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
+    best_face = select_local_performer_face(faces, generator)
     embedding = generator.get_embedding(best_face)
 
     stashdb_id = next(

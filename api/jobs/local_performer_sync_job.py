@@ -71,7 +71,7 @@ import httpx
 
 from base_job import BaseJob, JobContext
 from config import DatabaseConfig
-from embeddings import FaceEmbeddingGenerator, load_image, GPU_COMPUTE_LOCK
+from embeddings import FaceEmbeddingGenerator, load_image, GPU_COMPUTE_LOCK, select_local_performer_face
 from local_performer_index import (
     STASHDB_ENDPOINT,
     LocalPerformerIndex,
@@ -224,7 +224,7 @@ def _embed_worker(embed_queue: "queue.Queue", event_queue: "queue.Queue") -> Non
             event_queue.put(("no_face", performer_id, position, None))
             continue
 
-        best_face = max(faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
+        best_face = select_local_performer_face(faces, generator)
         embedding = generator.get_embedding(best_face)
         event_queue.put(("embedded", performer_id, position, (embedding.embedding, fingerprint, meta)))
 

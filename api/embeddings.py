@@ -211,6 +211,8 @@ class FaceEmbeddingGenerator:
         self._face_analyzer = None
         self._gender_model: Optional[Attribute] = None
         self._gender_model_load_attempted = False
+        self._quality_model = None
+        self._quality_model_load_attempted = False
 
     def _ort_providers(self) -> list[str]:
         """Get ONNX Runtime providers based on device."""
@@ -358,6 +360,69 @@ class FaceEmbeddingGenerator:
         confidence = float(probs[idx])
         age = int(np.round(float(pred[2]) * 100))
         return gender, confidence, age
+
+    @property
+    def quality_model(self) -> Optional["ort.InferenceSession"]:  # noqa: F821 -- onnxruntime imported lazily below
+        """Lazy-loaded CR-FIQA(S) ONNX session -- an optional face-quality
+        signal used by select_local_performer_face() below (api/
+        local_performer_index.py, api/jobs/local_performer_sync_job.py) to
+        catch a failure mode plain largest-area selection can't see: a
+        misidentified non-face object (tattoo, wallpaper, poster/painting,
+        cushion, boots, someone's stomach) or a badly-occluded real face
+        beating a smaller-but-genuine candidate as a performer's cover
+        photo. Mirrors data-gen's own embed/embeddings.py exactly -- same
+        model, same validation (35/39 real misidentified examples
+        correctly re-ranked, 90%, with every correct call showing a
+        decisive score gap and every wrong call a small/negative one --
+        see that repo's own select_primary_face_quality_aware() docstring
+        for the full numbers this margin is based on).
+
+        Returns None (not an exception) if the file isn't present (e.g.
+        not yet downloaded via Settings -> Models) -- quality-aware
+        selection is an enhancement, never a hard requirement for local
+        performer syncing to keep working.
+
+        Lives under models/quality/, NOT models/buffalo_l/ alongside the
+        real buffalo_l models -- FaceAnalysis's directory auto-scan
+        misclassifies this model's 112x112x3 input as a second
+        "recognition" model and steals that task slot from the real
+        w600k_r50.onnx if the two sit in the same directory (confirmed
+        live in data-gen's own copy of this same model). Loaded directly
+        here via its own onnxruntime session, never through FaceAnalysis."""
+        if self._quality_model_load_attempted:
+            return self._quality_model
+        self._quality_model_load_attempted = True
+
+        model_path = Path(self._models_dir) / "models" / "quality" / "crfiqa_s.onnx"
+        if not model_path.exists():
+            logger.warning("crfiqa_s.onnx not found at %s -- quality-aware face selection disabled", model_path)
+            return None
+
+        import onnxruntime as ort
+        self._quality_model = ort.InferenceSession(str(model_path), providers=self._ort_providers())
+        return self._quality_model
+
+    def score_face_quality(self, face: "DetectedFace") -> Optional[float]:
+        """CR-FIQA(S) quality score for one already-detected face crop.
+        Higher is better; observed range in validation was roughly 0.2-2.0.
+        None if quality_model isn't available.
+
+        Preprocessing mirrors data-gen's own embed/embeddings.py exactly
+        (the validated pipeline, not buffalo_l's own alignment): plain
+        resize of face.image (the raw bbox crop, RGB) to 112x112, converted
+        to BGR (CR-FIQA was trained/validated against cv2.imread's native
+        channel order), CHW, normalized to [-1, 1]. Don't change this
+        without re-running that validation."""
+        session = self.quality_model
+        if session is None:
+            return None
+        crop = cv2.resize(face.image, (112, 112))
+        crop = crop[:, :, ::-1]  # RGB -> BGR
+        blob = np.transpose(crop, (2, 0, 1)).astype(np.float32)
+        blob = np.expand_dims(blob, axis=0)
+        blob = (blob / 255.0 - 0.5) / 0.5
+        out = session.run(None, {"input": blob})
+        return float(out[0][0][0])
 
     def detect_faces(
         self,
@@ -560,6 +625,59 @@ def _rotate_image_array(image: np.ndarray, angle_deg: float) -> np.ndarray:
     pil_image = Image.fromarray(image)
     rotated = pil_image.rotate(angle_deg, expand=True)
     return np.array(rotated)
+
+
+# api/local_performer_index.py and api/jobs/local_performer_sync_job.py both
+# used to pick a performer's cover-photo face via plain `max(faces, key=
+# area)` inline (no confidence tiering at all -- unlike data-gen's own
+# select_primary_face(), stash-sense2 never had that concept). That heuristic
+# has the same blind spot data-gen's validation spike found: a misidentified
+# non-face object (a tattoo, wallpaper/carpet pattern, poster/painting,
+# cushion, boots, someone's stomach) or a badly-occluded real face can
+# confidently beat the actual subject. FACE_QUALITY_OVERRIDE_MARGIN is the
+# same threshold data-gen's own select_primary_face_quality_aware() uses,
+# validated the same way (35/39 real misidentified examples correctly
+# re-ranked, 90%, every correct call a decisive score gap, every wrong call
+# small/negative) -- see that function's own docstring in stash-sense2-
+# data-gen's embed/embeddings.py for the full numbers.
+FACE_QUALITY_OVERRIDE_MARGIN = 0.3
+
+
+def select_local_performer_face(
+    detected: list[DetectedFace], generator: "FaceEmbeddingGenerator", margin: float = FACE_QUALITY_OVERRIDE_MARGIN,
+) -> DetectedFace:
+    """Picks which face to embed as a performer's local-index cover-photo
+    entry: plain largest-area (the same selection api/local_performer_
+    index.py's sync_one_performer() and api/jobs/local_performer_sync_job.py's
+    _embed_worker() always used, before either called this instead of
+    inlining it), plus the CR-FIQA(S) override described above.
+
+    Deliberately does NOT add data-gen-style confidence-trust tiering on
+    top of the largest-area baseline -- out of scope for this change, and
+    Stash's own performer cover photos are a different source distribution
+    than the StashDB/catalogue photos that tiering was tuned against. The
+    override here re-ranks among ALL detected candidates, not a
+    confidence-restricted pool; a future confidence-trust pass could layer
+    on top of this the same way data-gen's did, if local-performer-index
+    misidentifications turn out to need it too.
+
+    Falls back to the plain largest-area pick whenever there's nothing to
+    re-rank against (a single candidate), the quality model isn't
+    available (see FaceEmbeddingGenerator.quality_model -- an optional,
+    warn-and-disable dependency, not a hard requirement), or no other
+    candidate clears the margin -- so this can only ever correct a
+    lopsided, clear-cut selection, never second-guess a close call."""
+    baseline = max(detected, key=lambda f: f.bbox["w"] * f.bbox["h"])
+    if len(detected) < 2 or generator.quality_model is None:
+        return baseline
+
+    scored = [(f, generator.score_face_quality(f)) for f in detected]
+    baseline_score = next(s for f, s in scored if f is baseline)
+    others = [(f, s) for f, s in scored if f is not baseline]
+    best_other = max(others, key=lambda item: item[1]) if others else None
+    if best_other is not None and best_other[1] - baseline_score >= margin:
+        return best_other[0]
+    return baseline
 
 
 if __name__ == "__main__":

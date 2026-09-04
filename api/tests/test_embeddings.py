@@ -23,9 +23,11 @@ from embeddings import (
     FaceEmbeddingGenerator,
     GPU_COMPUTE_LOCK,
     MAX_ROLL_CORRECTION_ATTEMPTS,
+    FACE_QUALITY_OVERRIDE_MARGIN,
     gpu_compute_lock,
     load_image,
     load_image_from_path,
+    select_local_performer_face,
 )
 
 
@@ -408,3 +410,106 @@ class TestGpuComputeLock:
             ["a-start", "a-end", "b-start", "b-end"],
             ["b-start", "b-end", "a-start", "a-end"],
         )
+
+
+def _face(w, h, conf, x=0, y=0):
+    return DetectedFace(
+        image=np.zeros((h, w, 3), dtype=np.uint8), bbox={"x": x, "y": y, "w": w, "h": h},
+        confidence=conf, embedding=np.zeros(512, dtype=np.float32),
+    )
+
+
+class TestQualityModel:
+    """quality_model/score_face_quality -- CR-FIQA(S), same optional-model
+    tolerance as gender_model (see that property's own tests, and this
+    one's docstring in embeddings.py): warn and disable, never raise."""
+
+    def test_quality_model_none_when_file_missing(self, tmp_path):
+        generator = FaceEmbeddingGenerator(device="cpu", models_dir=tmp_path)
+
+        assert generator.quality_model is None
+        # Cached -- a second access doesn't re-probe the filesystem.
+        assert generator.quality_model is None
+
+    def test_score_face_quality_none_when_model_unavailable(self, tmp_path):
+        generator = FaceEmbeddingGenerator(device="cpu", models_dir=tmp_path)
+        face = _face(60, 60, 0.9)
+
+        assert generator.score_face_quality(face) is None
+
+    def test_score_face_quality_reads_back_session_output(self, tmp_path):
+        generator = FaceEmbeddingGenerator(device="cpu", models_dir=tmp_path)
+        generator._quality_model_load_attempted = True
+        generator._quality_model = Mock(run=Mock(return_value=[np.array([[1.75]], dtype=np.float32)]))
+        face = _face(60, 60, 0.9)
+
+        score = generator.score_face_quality(face)
+
+        assert score == pytest.approx(1.75)
+        # 112x112x3 BGR blob, batch-of-1 -- what CR-FIQA(S) was validated against.
+        call_kwargs = generator._quality_model.run.call_args
+        blob = call_kwargs[0][1]["input"]
+        assert blob.shape == (1, 3, 112, 112)
+
+
+class TestSelectLocalPerformerFace:
+    """select_local_performer_face() -- plain largest-area (matching what
+    api/local_performer_index.py and api/jobs/local_performer_sync_job.py
+    both inlined before this existed) plus the CR-FIQA(S) override. See
+    that function's own docstring in embeddings.py for the validation
+    (35/39 real misidentified examples correctly re-ranked, 90%) the
+    FACE_QUALITY_OVERRIDE_MARGIN threshold is based on."""
+
+    def _generator_with_scores(self, scores: dict):
+        generator = FaceEmbeddingGenerator(device="cpu")
+        generator._quality_model_load_attempted = True
+        generator._quality_model = Mock()  # just needs to be non-None
+        generator.score_face_quality = lambda face: scores[id(face)]
+        return generator
+
+    def test_single_candidate_returns_it_unchanged(self):
+        generator = FaceEmbeddingGenerator(device="cpu")
+        only = _face(100, 100, 0.9)
+
+        assert select_local_performer_face([only], generator) is only
+
+    def test_falls_back_to_largest_area_when_model_unavailable(self, tmp_path):
+        generator = FaceEmbeddingGenerator(device="cpu", models_dir=tmp_path)
+        larger = _face(200, 150, 0.8)
+        smaller = _face(100, 100, 0.7)
+
+        result = select_local_performer_face([larger, smaller], generator)
+
+        assert result is larger
+
+    def test_overrides_on_decisive_margin(self):
+        # Larger, "confidently" wrong (a misidentified non-face object);
+        # smaller, real face scores decisively higher.
+        misidentified = _face(200, 150, 0.80)
+        real = _face(100, 100, 0.70)
+        generator = self._generator_with_scores({id(misidentified): 0.3, id(real): 0.3 + FACE_QUALITY_OVERRIDE_MARGIN})
+
+        result = select_local_performer_face([misidentified, real], generator)
+
+        assert result is real
+
+    def test_does_not_override_on_small_margin(self):
+        misidentified = _face(200, 150, 0.80)
+        real = _face(100, 100, 0.70)
+        generator = self._generator_with_scores(
+            {id(misidentified): 0.3, id(real): 0.3 + FACE_QUALITY_OVERRIDE_MARGIN - 0.01}
+        )
+
+        result = select_local_performer_face([misidentified, real], generator)
+
+        assert result is misidentified
+
+    def test_does_not_override_a_correct_largest_area_pick(self):
+        # Baseline (largest-area) already scores highest -- nothing to override.
+        correct = _face(200, 150, 0.9)
+        other = _face(100, 100, 0.5)
+        generator = self._generator_with_scores({id(correct): 1.8, id(other): 0.4})
+
+        result = select_local_performer_face([correct, other], generator)
+
+        assert result is correct
