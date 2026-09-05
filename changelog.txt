@@ -1,3 +1,16 @@
+## 2026-09-05
+
+### 0.30.0 (sidecar only)
+- Feature: face matches now collapse a stash-sense2-data-gen-detected
+  "same real person, different unlinked identity" group (performer_links.json,
+  optional -- absent on an older dataset) down to a single candidate,
+  preferring whichever member has a stash-box source highest in the
+  existing Settings -> Endpoint priority order over one with a marginally
+  tighter match score. Fixes a catalogue-sourced match (e.g. iafd/pornpics)
+  surfacing instead of an already-known StashDB/ThePornDB entry for the
+  same person, which risked creating a duplicate performer in Stash on
+  Accept. See matching.py's collapse_linked_candidates().
+
 ## 2026-09-03
 
 ### 0.29.0 (sidecar only)

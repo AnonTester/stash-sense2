@@ -82,6 +82,15 @@ class DatabaseConfig:
     # this feature). See export_db_to_json.py's export_face_yaw_json().
     face_yaw_json_path: Path = None
 
+    # List of universal_id groups -- each group is a list of universal_ids
+    # stash-sense2-data-gen's build/link_duplicate_performers.py determined
+    # are the same real person under different, unlinked identities (e.g.
+    # a StashDB performer and a pornpics-only catalogue performer with no
+    # shared URL). Optional, same tolerance as face_yaw_json_path above --
+    # an older dataset published before this feature simply doesn't have
+    # it. See matching.py's collapse_linked_candidates().
+    performer_links_json_path: Path = None
+
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +103,7 @@ class DatabaseConfig:
         self.performers_json_path = self.performers_json_path or self.data_dir / "performers.json"
         self.manifest_json_path = self.manifest_json_path or self.data_dir / "manifest.json"
         self.face_yaw_json_path = self.face_yaw_json_path or self.data_dir / "face_yaw.json"
+        self.performer_links_json_path = self.performer_links_json_path or self.data_dir / "performer_links.json"
 
 
 # Embedding dimensions

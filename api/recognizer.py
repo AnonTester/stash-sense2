@@ -17,6 +17,7 @@ from embeddings import FaceEmbeddingGenerator, DetectedFace, FaceEmbedding
 from matching import MatchingConfig, match_face, MatchingResult
 from database_reader import PerformerDatabaseReader
 from stashbox_utils import classify_universal_id
+from stashbox_connection_manager import get_connection_manager
 
 # Extra FaceEmbeddingGenerator instances (beyond the main self.generator)
 # kept warm for the whole sidecar's uptime so identification_router.py can
@@ -119,7 +120,21 @@ class FaceRecognizer:
             with open(db_config.face_yaw_json_path) as f:
                 self.face_yaw = json.load(f)
 
-        print(f"Loaded {len(self.faces)} faces, {len(self.performers)} performers")
+        # Optional, same tolerance as face_yaw above -- an older dataset
+        # published before this feature has no performer_links.json.
+        # Indexed once here (universal_id -> every OTHER universal_id in
+        # its group) rather than re-scanning the raw group list on every
+        # match call -- see matching.py's collapse_linked_candidates().
+        self.performer_link_index: dict[str, list[str]] = {}
+        if db_config.performer_links_json_path and db_config.performer_links_json_path.exists():
+            with open(db_config.performer_links_json_path) as f:
+                performer_link_groups: list[list[str]] = json.load(f)
+            for group in performer_link_groups:
+                for uid in group:
+                    self.performer_link_index[uid] = [other for other in group if other != uid]
+
+        print(f"Loaded {len(self.faces)} faces, {len(self.performers)} performers, "
+              f"{len(self.performer_link_index)} performers in a linked group")
 
         # Optionally load the local performer index -- built from this
         # Stash instance's own performer cover images by the
@@ -168,6 +183,29 @@ class FaceRecognizer:
     def _get_performer_info(self, universal_id: str) -> dict:
         """Get performer info from universal ID."""
         return self.performers.get(universal_id, {})
+
+    def _endpoint_priority_domains(self) -> list[str]:
+        """Current user-configured stash-box endpoint priority order
+        (Settings > ... > Endpoint priority), as a list of domains (e.g.
+        ["stashdb.org", "theporndb.net", ...]) matching a universal_id's
+        own endpoint prefix -- for matching.py's
+        collapse_linked_candidates() to pick a "main" entry from a linked
+        group. Re-read on every call rather than cached: this is a cheap
+        local read (no network call), and the setting can change at any
+        time via Settings, so it should take effect on the very next
+        match, not after a restart. get_rec_db is imported lazily here
+        (not at module top-level) to avoid a circular import with
+        recommendations_router.py, which -- via its analyzers -- can end
+        up importing this module."""
+        try:
+            from recommendations_router import get_rec_db
+            connections_by_endpoint = {c["endpoint"]: c for c in get_connection_manager().get_connections()}
+            priority_order = get_rec_db().get_endpoint_priorities()
+            return [connections_by_endpoint[ep]["domain"] for ep in priority_order if ep in connections_by_endpoint]
+        except Exception as e:
+            print(f"Could not resolve endpoint priority order (linked-candidate collapse will fall back to "
+                  f"match score for any group with no stashbox member): {e}")
+            return []
 
     def detect_faces_parallel(
         self, frames: list[np.ndarray], min_confidence: float,
@@ -325,6 +363,8 @@ class FaceRecognizer:
             query_gender=query_gender,
             query_gender_confidence=query_gender_confidence,
             face_yaw=self.face_yaw,
+            performer_link_index=self.performer_link_index,
+            endpoint_priority_domains=self._endpoint_priority_domains(),
         )
 
         # Convert to PerformerMatch format for compatibility

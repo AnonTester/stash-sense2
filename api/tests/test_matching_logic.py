@@ -17,6 +17,7 @@ from matching import (
     LOCAL_MATCH_BOOST,
     MatchingConfig,
     build_matches,
+    collapse_linked_candidates,
     fuse_local_results,
     match_face,
     merge_local_candidates,
@@ -602,6 +603,140 @@ class TestMergeLocalCandidatesUrlCrossCheck:
 
         assert len(merged) == 1
         assert merged[0].universal_id == "local:7"
+
+
+class TestCollapseLinkedCandidates:
+    """stash-sense2-data-gen's own non-destructive performer_link_groups --
+    a third "same real person" signal alongside merge_local_candidates'
+    stash_id/URL checks, sourced from that project's build/
+    link_duplicate_performers.py rather than derived here. See
+    collapse_linked_candidates()'s own docstring for the full rationale."""
+
+    def _match(self, universal_id, distance, name="P"):
+        return CandidateMatch(face_index=1, universal_id=universal_id, name=name, combined_distance=distance)
+
+    def test_no_op_when_index_empty(self):
+        matches = [self._match("stashdb.org:uuid-1", 0.30)]
+        assert collapse_linked_candidates(matches, {}, ["stashdb.org"]) == matches
+
+    def test_only_one_group_member_present_is_a_no_op(self):
+        matches = [self._match("stashdb.org:uuid-1", 0.30)]
+        link_index = {"stashdb.org:uuid-1": ["pornpics:99"]}  # the other member isn't in this call's results
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org"])
+
+        assert [c.universal_id for c in collapsed] == ["stashdb.org:uuid-1"]
+
+    def test_stashbox_member_wins_regardless_of_distance(self):
+        # Catalogue candidate scores BETTER (lower distance) but the
+        # stashbox member should still win -- the point of this feature is
+        # which entity gets created in Stash, not the tighter score.
+        matches = [
+            self._match("stashdb.org:uuid-1", distance=0.45, name="StashDB Entry"),
+            self._match("pornpics:123", distance=0.10, name="Catalogue Entry"),
+        ]
+        link_index = {
+            "stashdb.org:uuid-1": ["pornpics:123"],
+            "pornpics:123": ["stashdb.org:uuid-1"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org", "theporndb.net"])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "stashdb.org:uuid-1"
+
+    def test_higher_priority_endpoint_wins_over_lower_priority_one(self):
+        matches = [
+            self._match("theporndb.net:uuid-2", distance=0.20),
+            self._match("stashdb.org:uuid-1", distance=0.50),
+        ]
+        link_index = {
+            "theporndb.net:uuid-2": ["stashdb.org:uuid-1"],
+            "stashdb.org:uuid-1": ["theporndb.net:uuid-2"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org", "theporndb.net"])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "stashdb.org:uuid-1"
+
+    def test_falls_back_to_distance_when_no_member_has_a_stashbox_endpoint(self):
+        matches = [
+            self._match("pornpics:123", distance=0.40),
+            self._match("iafd:456", distance=0.15),
+        ]
+        link_index = {
+            "pornpics:123": ["iafd:456"],
+            "iafd:456": ["pornpics:123"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org", "theporndb.net"])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "iafd:456"
+
+    def test_empty_endpoint_priority_falls_back_to_distance(self):
+        # No priority configured at all (default/fresh install) -- should
+        # behave like the no-stashbox-member case, not crash on an empty list.
+        matches = [
+            self._match("stashdb.org:uuid-1", distance=0.40),
+            self._match("pornpics:123", distance=0.10),
+        ]
+        link_index = {"stashdb.org:uuid-1": ["pornpics:123"], "pornpics:123": ["stashdb.org:uuid-1"]}
+
+        collapsed = collapse_linked_candidates(matches, link_index, [])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "pornpics:123"
+
+    def test_unrelated_candidates_untouched(self):
+        matches = [
+            self._match("stashdb.org:uuid-1", distance=0.30),
+            self._match("stashdb.org:uuid-2", distance=0.35),
+        ]
+        collapsed = collapse_linked_candidates(matches, {}, ["stashdb.org"])
+        assert collapsed == matches
+
+    def test_three_way_group_collapses_to_one(self):
+        matches = [
+            self._match("iafd:1", distance=0.50),
+            self._match("pornbox:2", distance=0.40),
+            self._match("stashdb.org:uuid-3", distance=0.60),
+        ]
+        link_index = {
+            "iafd:1": ["pornbox:2", "stashdb.org:uuid-3"],
+            "pornbox:2": ["iafd:1", "stashdb.org:uuid-3"],
+            "stashdb.org:uuid-3": ["iafd:1", "pornbox:2"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org"])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "stashdb.org:uuid-3"
+
+
+class TestMatchFaceLinkedCandidates:
+    def test_match_face_collapses_linked_group_via_endpoint_priority(self):
+        index = _mock_index(keys=[0, 1], distances=[0.10, 0.45])
+        faces = ["pornpics:123", "stashdb.org:uuid-1"]
+        performers = {"pornpics:123": {"name": "Catalogue"}, "stashdb.org:uuid-1": {"name": "StashDB"}}
+        link_index = {"pornpics:123": ["stashdb.org:uuid-1"], "stashdb.org:uuid-1": ["pornpics:123"]}
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), index, faces, performers,
+            performer_link_index=link_index, endpoint_priority_domains=["stashdb.org"],
+        )
+
+        assert [m.universal_id for m in result.matches] == ["stashdb.org:uuid-1"]
+
+    def test_match_face_without_performer_link_index_is_unaffected(self):
+        index = _mock_index(keys=[0, 1], distances=[0.10, 0.45])
+        faces = ["pornpics:123", "stashdb.org:uuid-1"]
+        performers = {"pornpics:123": {"name": "Catalogue"}, "stashdb.org:uuid-1": {"name": "StashDB"}}
+
+        result = match_face(np.zeros(512, dtype=np.float32), index, faces, performers)
+
+        assert [m.universal_id for m in result.matches] == ["pornpics:123", "stashdb.org:uuid-1"]
 
 
 class TestMatchFace:

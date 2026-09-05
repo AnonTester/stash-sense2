@@ -416,6 +416,75 @@ def merge_local_candidates(
     return merged
 
 
+def collapse_linked_candidates(
+    matches: list[CandidateMatch], performer_link_index: dict[str, list[str]],
+    endpoint_priority_domains: list[str],
+) -> list[CandidateMatch]:
+    """Collapses multiple CandidateMatch entries in `matches` that
+    represent the SAME real person, per stash-sense2-data-gen's own
+    non-destructive performer_link_groups/members (see that project's
+    build/link_duplicate_performers.py -- name+face-cosine-confirmed,
+    never a merge/delete on that side either). Same class of problem
+    merge_local_candidates() above already solves for local-vs-main
+    duplicates (stash_id linkage, matching URLs) -- this is a third such
+    signal, sourced from stash-sense2-data-gen rather than derived here.
+
+    Unlike merge_local_candidates' "keep whichever scored better" rule,
+    the winner here is picked by `endpoint_priority_domains` (the user's
+    own configured stash-box endpoint order, Settings > ... > Endpoint
+    priority -- see recognizer.py's _endpoint_priority_domains()) when at
+    least one present group member has a stashbox-shaped universal_id --
+    the actual goal is which entity gets CREATED in the user's Stash
+    instance, not just which one has a marginally tighter distance score
+    today (confirmed live: this is what motivated the feature -- an iafd/
+    pornpics catalogue match was surfacing instead of an already-known
+    StashDB entry for the same person, risking a duplicate performer
+    getting created in Stash). Falls back to match-score, same convention
+    as merge_local_candidates, only when NO present group member has a
+    stashbox endpoint at all (an all-catalogue group, e.g. two catalogue-
+    only performers linked to each other with no stashbox member present
+    in this particular match's results).
+
+    `performer_link_index` empty (no dataset support yet, or nothing
+    linked) is a no-op returning `matches` unchanged -- same "optional,
+    absent means skip" tolerance as face_yaw."""
+    if not performer_link_index:
+        return matches
+
+    by_uid = {c.universal_id: c for c in matches}
+    seen: set[str] = set()
+    result: list[CandidateMatch] = []
+
+    def endpoint_rank(uid: str) -> int:
+        domain = _extract_endpoint_domain(uid)
+        if domain in endpoint_priority_domains:
+            return endpoint_priority_domains.index(domain)
+        return len(endpoint_priority_domains)  # no configured stashbox endpoint -- lowest priority
+
+    for candidate in matches:
+        uid = candidate.universal_id
+        if uid in seen:
+            continue
+        present_group = [uid] + [other for other in performer_link_index.get(uid, []) if other in by_uid]
+        seen.update(present_group)
+        if len(present_group) == 1:
+            result.append(candidate)
+            continue
+
+        ranked = sorted(present_group, key=endpoint_rank)
+        if endpoint_rank(ranked[0]) < len(endpoint_priority_domains):
+            winner_uid = ranked[0]
+        else:
+            winner_uid = min(present_group, key=lambda u: by_uid[u].combined_distance)
+        result.append(by_uid[winner_uid])
+
+    return result
+
+
+def _extract_endpoint_domain(universal_id: str) -> Optional[str]:
+    return universal_id.split(":", 1)[0] if ":" in universal_id else None
+
+
 def match_face(
     embedding: np.ndarray,
     index: Index,
@@ -427,6 +496,8 @@ def match_face(
     query_gender: Optional[str] = None,
     query_gender_confidence: Optional[float] = None,
     face_yaw: Optional[list] = None,
+    performer_link_index: Optional[dict[str, list[str]]] = None,
+    endpoint_priority_domains: Optional[list[str]] = None,
 ) -> MatchingResult:
     """
     Match a face against the database.
@@ -453,6 +524,15 @@ def match_face(
             the steep-angle penalty. Not applicable to local-index
             candidates (each local performer contributes exactly one
             vector from their own cover image, no per-vector yaw tracked).
+        performer_link_index: universal_id -> every OTHER universal_id
+            stash-sense2-data-gen determined is the same real person (see
+            recognizer.py's own loading of performer_links.json). Optional;
+            omitting it (or an empty dict) skips collapse_linked_candidates
+            entirely -- see that function's own docstring.
+        endpoint_priority_domains: The user's current configured stash-box
+            endpoint priority, as domains in priority order (see
+            recognizer.py's _endpoint_priority_domains()) -- used only to
+            pick a winner among a linked group's present candidates.
 
     Returns:
         MatchingResult with candidates
@@ -463,6 +543,11 @@ def match_face(
         query_gender=query_gender, query_gender_confidence=query_gender_confidence,
         face_yaw=face_yaw,
     )
+
+    if performer_link_index:
+        result.matches = collapse_linked_candidates(
+            result.matches, performer_link_index, endpoint_priority_domains or [],
+        )
 
     # Optionally merge in local-performer-index matches (see fuse_local_results).
     # A handful of local performers is common (especially right after the
