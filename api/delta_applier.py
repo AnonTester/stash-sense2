@@ -10,46 +10,60 @@ drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
 needed client-side, that already happened when the delta was built.
 
-Four independent parts, all applied by `apply_delta_db` below: the
+Five independent parts, all applied by `apply_delta_db` below: the
 `performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
 identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table --
 this is still the primary resolution path, but a delta.db built after
 stash-sense2-data-gen's export_delta.py started carrying the server's own
 `performers.id` also keeps this client's local id in sync with it, see
-`_upsert_performer`'s migration branch below and the module-level note in
-that file. Older deltas simply lack the `id` column and this degrades to
-plain client-side autoincrement, exactly as before),
-`catalogue_performers`/`catalogue_performer_urls`/`catalogue_faces`
-(pornbox.com/seekfans.com/legacy-site performers with no stashbox linkage
-at all -- identity there IS the raw `performers.id`, portable specifically
-because the server's own performers.db is one continuously-evolving file,
-never regenerated from scratch, so a given performer's id is permanent).
+`_upsert_performer`'s migration branch below. Older deltas simply lack the
+`id` column and this degrades to plain client-side autoincrement, exactly
+as before), `catalogue_performers`/`catalogue_performer_urls`/
+`catalogue_faces` (pornbox.com/seekfans.com/legacy-site performers with no
+stashbox linkage at all -- identity there IS the raw `performers.id`,
+portable specifically because the server's own performers.db is one
+continuously-evolving file, never regenerated from scratch, so a given
+performer's id is permanent), `catalogue_removed_performers` (a catalogue
+performer a human fully disabled via stash-sense2-data-gen's review_app --
+same raw-id identity as the upsert path, see `_remove_catalogue_performer`'s
+own docstring for why their faces are normally already gone by the time
+this runs), `face_field_updates` (gender/age/image_sha256 backfilled
+server-side onto a face that already shipped in an earlier release --
+identity is `embedding_index`, applied as a plain field UPDATE with no
+INSERT/identity-resolution involved), and `face_owner_repair` (one-off,
+only present in a full-identity-resync repair delta -- see that table's
+own comment in export_delta.py's DELTA_SCHEMA and `apply_delta_db`'s own
+comment on it below). All five of these table groups are strictly
+additive and may not exist in an older delta.db -- `_has_table` guards
+every read of them, so applying an older delta through this code is
+simply a no-op for whichever part it predates, not an error.
 
-Both id-bearing paths above now share one collision guard
-(`_relocate_performer`, used by `_upsert_performer`'s migration branch and
-`_upsert_catalogue_performer`): before ever writing a performer at an
-explicit id, check whether a *different* performer already occupies it,
-and move that occupant to a fresh id first rather than silently
-overwriting its content. This closes a real, confirmed-live data
-corruption bug: `performers.id` used to be shared, unpartitioned, between
-this client's own locally-invented stashbox ids and the server's
-explicitly-assigned catalogue ids -- once a client's own next
-autoincremented id happened to land on a number the server later assigned
-to an unrelated catalogue performer, the old unconditional
-`ON CONFLICT(id) DO UPDATE` in `_upsert_catalogue_performer` clobbered
-that unrelated performer's name/photo/gender outright, with the original
-performer's own stashbox identity left pointing at now-wrong content.
-`catalogue_removed_performers` (a catalogue performer a human fully
-disabled via stash-sense2-data-gen's review_app -- same raw-id identity as
-the upsert path, see `_remove_catalogue_performer`'s own docstring for why
-their faces are normally already gone by the time this runs), and
-`face_field_updates` (gender/age/image_sha256 backfilled server-side onto
-a face that already shipped in an earlier release -- identity is
-`embedding_index`, applied as a plain field UPDATE with no INSERT/
-identity-resolution involved). All four of these table groups are
-strictly additive and may not exist in an older delta.db -- `_has_table`
-guards every read of them, so applying an older delta through this code
-is simply a no-op for whichever part it predates, not an error.
+Both id-bearing paths above (`_upsert_performer`'s migration branch and
+`_upsert_catalogue_performer`) share one collision guard
+(`_relocate_performer`): before ever writing a performer at an explicit
+id, check whether a *different* performer already occupies it, and move
+that occupant to a fresh id first rather than silently overwriting its
+content. This closes a real, confirmed-live data corruption bug:
+`performers.id` used to be shared, unpartitioned, between this client's
+own locally-invented stashbox ids and the server's explicitly-assigned
+catalogue ids -- once a client's own next autoincremented id happened to
+land on a number the server later assigned to an unrelated catalogue
+performer, the old unconditional `ON CONFLICT(id) DO UPDATE` in
+`_upsert_catalogue_performer` clobbered that unrelated performer's
+name/photo/gender outright, with the original performer's own stashbox
+identity left pointing at now-wrong content. `face_owner_repair` closes a
+second-order consequence of the same bug: migrating a stashbox performer
+off a stale/collided local id can only safely move the *metadata* fields
+it's sure about -- any face that had been silently fused onto that same
+local row by the original corruption (e.g. a catalogue performer's own
+face, clobbered onto an unrelated stashbox performer's row) would
+otherwise follow the migration to the wrong new owner too, since nothing
+local can distinguish "this performer's own real face" from "a face stuck
+here by the corruption." Confirmed live: without `face_owner_repair`, a
+first repair attempt correctly fixed the clobbered stashbox performer's
+own name/photo but silently absorbed the catalogue performer's face and
+URL along with it, and the catalogue performer never reappeared as its
+own entry at all.
 
 Lifecycle
 ---------
@@ -546,6 +560,7 @@ def apply_delta_db(
     catalogue_tables_present = _has_table(delta_conn, "catalogue_performers")
     catalogue_removals_present = _has_table(delta_conn, "catalogue_removed_performers")
     field_updates_present = _has_table(delta_conn, "face_field_updates")
+    owner_repairs_present = _has_table(delta_conn, "face_owner_repair")
     progress_tables = ["performers", "faces", "removed_faces"]
     if catalogue_tables_present:
         progress_tables += ["catalogue_performers", "catalogue_performer_urls", "catalogue_faces"]
@@ -553,6 +568,8 @@ def apply_delta_db(
         progress_tables += ["catalogue_removed_performers"]
     if field_updates_present:
         progress_tables += ["face_field_updates"]
+    if owner_repairs_present:
+        progress_tables += ["face_owner_repair"]
     total_rows = sum(delta_conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in progress_tables)
     processed = 0
 
@@ -682,6 +699,27 @@ def apply_delta_db(
             for _ in delta_conn.execute("SELECT embedding_index FROM face_field_updates"):
                 _tick()
 
+    # One-off (only present in a full-identity-resync repair delta -- see
+    # stash-sense2-data-gen's export_delta.py DELTA_SCHEMA comment on
+    # face_owner_repair): corrects faces.performer_id for any face this
+    # client has under the wrong owner. Deliberately last among the
+    # row-processing loops above -- both the stashbox migration branch in
+    # _upsert_performer and the catalogue_performers loop above may need
+    # to have already (re)created the *correct* owner row before a face
+    # can be safely repointed at it. A face id not present locally yet is
+    # skipped -- nothing to repair, a normal future delta adds it as usual.
+    owner_repairs_applied = 0
+    if owner_repairs_present:
+        for r in delta_conn.execute("SELECT embedding_index, performer_id FROM face_owner_repair"):
+            idx, correct_pid = r["embedding_index"], r["performer_id"]
+            current = conn.execute("SELECT performer_id FROM faces WHERE embedding_index = ?", (idx,)).fetchone()
+            if current is not None and current[0] != correct_pid:
+                conn.execute("UPDATE faces SET performer_id = ? WHERE embedding_index = ?", (correct_pid, idx))
+                touched_performers.add(current[0])
+                touched_performers.add(correct_pid)
+                owner_repairs_applied += 1
+            _tick()
+
     for pid in touched_performers:
         _sync_face_count(conn, pid)
 
@@ -698,6 +736,7 @@ def apply_delta_db(
         "catalogue_faces_added": catalogue_faces_added,
         "catalogue_performers_removed": catalogue_performers_removed,
         "face_field_updates_applied": field_updates_applied,
+        "face_owner_repairs_applied": owner_repairs_applied,
     }
 
 
@@ -781,7 +820,8 @@ async def apply_delta_chain(
 
     totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0,
               "catalogue_performers_upserted": 0, "catalogue_faces_added": 0,
-              "catalogue_performers_removed": 0, "face_field_updates_applied": 0}
+              "catalogue_performers_removed": 0, "face_field_updates_applied": 0,
+              "face_owner_repairs_applied": 0}
 
     try:
         for i, hop in enumerate(chain):

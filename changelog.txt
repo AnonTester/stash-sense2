@@ -1,5 +1,22 @@
 ## 2026-09-06
 
+### 0.31.1 (sidecar only)
+- Fix: 0.31.0's id-collision migration only moved a stashbox performer's
+  metadata fields off a stale/collided local id, not any face that had
+  been silently fused onto that same row by the original corruption (a
+  catalogue performer's own face, clobbered onto an unrelated stashbox
+  performer's row). Confirmed live: applying 0.31.0's first repair delta
+  correctly fixed the clobbered performer's own name/photo, but silently
+  absorbed the catalogue performer's face and URL along with it instead
+  of letting that performer reappear as their own entry. Delta.db now
+  carries an optional `face_owner_repair` table (embedding_index ->
+  correct performer_id, straight from the server's own authoritative
+  data) that a full-identity-resync repair delta uses to reassign any
+  misattributed face back to its true owner. Requires
+  stash-sense2-data-gen's next release (min-sidecar-version: 0.31.1) for
+  the repair itself; an older delta.db lacking this table is unaffected
+  (nothing to guard, this part is purely additive).
+
 ### 0.31.0 (sidecar only)
 - Fix: a locally-installed sidecar's own SQLite-autoincremented performer
   id (used for stashbox performers, decoupled from the server's numbering
