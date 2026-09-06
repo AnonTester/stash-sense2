@@ -1,5 +1,24 @@
 ## 2026-09-06
 
+### 0.31.0 (sidecar only)
+- Fix: a locally-installed sidecar's own SQLite-autoincremented performer
+  id (used for stashbox performers, decoupled from the server's numbering
+  by design) could collide with a server-assigned catalogue performer id
+  (iafd/pornpics/seekfans) sharing the same `performers.id` column, since
+  neither space was partitioned. When it happened, delta_applier.py's
+  catalogue-performer upsert silently overwrote the colliding stashbox
+  performer's name/photo/gender with the catalogue performer's data.
+  Stashbox performer deltas now carry the server's own permanent id too
+  (when the source delta.db provides one -- an older delta.db without it
+  degrades to the previous client-autoincrement behavior unchanged), and
+  every id-targeted write (stashbox or catalogue) now checks for and
+  relocates a colliding occupant first instead of overwriting it. See
+  delta_applier.py's own module docstring for the full mechanics.
+  Requires stash-sense2-data-gen's next release (min-sidecar-version:
+  0.31.0) to actually self-heal an already-affected install -- that
+  release's delta re-sends every currently-known stashbox performer's
+  identity once so affected installs converge onto correct ids.
+
 ### 0.23.1
 - Fix: accepting/resolving a recommendation from its detail view (Scene
   Stash-Box Tagger and every other recommendation type) often left it

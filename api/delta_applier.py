@@ -12,14 +12,33 @@ needed client-side, that already happened when the delta was built.
 
 Four independent parts, all applied by `apply_delta_db` below: the
 `performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
-identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table -- a
-locally-inserted performer's own autoincrement id is never assumed to
-match the server's, since identity doesn't depend on it),
+identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table --
+this is still the primary resolution path, but a delta.db built after
+stash-sense2-data-gen's export_delta.py started carrying the server's own
+`performers.id` also keeps this client's local id in sync with it, see
+`_upsert_performer`'s migration branch below and the module-level note in
+that file. Older deltas simply lack the `id` column and this degrades to
+plain client-side autoincrement, exactly as before),
 `catalogue_performers`/`catalogue_performer_urls`/`catalogue_faces`
 (pornbox.com/seekfans.com/legacy-site performers with no stashbox linkage
 at all -- identity there IS the raw `performers.id`, portable specifically
 because the server's own performers.db is one continuously-evolving file,
-never regenerated from scratch, so a given performer's id is permanent),
+never regenerated from scratch, so a given performer's id is permanent).
+
+Both id-bearing paths above now share one collision guard
+(`_relocate_performer`, used by `_upsert_performer`'s migration branch and
+`_upsert_catalogue_performer`): before ever writing a performer at an
+explicit id, check whether a *different* performer already occupies it,
+and move that occupant to a fresh id first rather than silently
+overwriting its content. This closes a real, confirmed-live data
+corruption bug: `performers.id` used to be shared, unpartitioned, between
+this client's own locally-invented stashbox ids and the server's
+explicitly-assigned catalogue ids -- once a client's own next
+autoincremented id happened to land on a number the server later assigned
+to an unrelated catalogue performer, the old unconditional
+`ON CONFLICT(id) DO UPDATE` in `_upsert_catalogue_performer` clobbered
+that unrelated performer's name/photo/gender outright, with the original
+performer's own stashbox identity left pointing at now-wrong content.
 `catalogue_removed_performers` (a catalogue performer a human fully
 disabled via stash-sense2-data-gen's review_app -- same raw-id identity as
 the upsert path, see `_remove_catalogue_performer`'s own docstring for why
@@ -211,9 +230,79 @@ def _get_performer_id(conn: sqlite3.Connection, endpoint: str, stashbox_id: str)
     return row[0] if row else None
 
 
+def _next_free_performer_id(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM performers").fetchone()[0]
+
+
+def _relocate_performer(conn: sqlite3.Connection, old_id: int, new_id: int) -> None:
+    """Move performer `old_id`'s row -- and every foreign-key reference to
+    it (`faces`, `performer_urls`, `stashbox_ids`, `aliases`) -- onto
+    `new_id` instead. `new_id` must not already exist. Used whenever an
+    incoming upsert's explicit target id is already occupied by a
+    *different* performer (see module docstring): the occupant gets moved
+    out of the way first, never silently overwritten.
+
+    Inserts a fresh row at `new_id` before repointing children (rather
+    than updating `performers.id` in place) so foreign-key enforcement
+    (`PRAGMA foreign_keys = ON`, set once by `apply_delta_db`) never sees
+    a child row pointing at a parent id that doesn't exist, at any
+    intermediate step.
+    """
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(performers)")]
+    old_row = conn.execute(f"SELECT {', '.join(columns)} FROM performers WHERE id = ?", (old_id,)).fetchone()
+    if old_row is None:
+        return
+    values = dict(zip(columns, old_row))
+    values["id"] = new_id
+    placeholders = ", ".join(f":{c}" for c in columns)
+    conn.execute(f"INSERT INTO performers ({', '.join(columns)}) VALUES ({placeholders})", values)
+    for table in ("faces", "performer_urls", "stashbox_ids", "aliases"):
+        # performer_urls predates catalogue-performer support -- guard the
+        # same way _has_table already guards every other optional-table
+        # read/write in this module, so a very old local db that's never
+        # picked it up doesn't crash here.
+        if _has_table(conn, table):
+            conn.execute(f"UPDATE {table} SET performer_id = ? WHERE performer_id = ?", (new_id, old_id))
+    conn.execute("DELETE FROM performers WHERE id = ?", (old_id,))
+
+
 def _upsert_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> int:
     endpoint, stashbox_id = p["endpoint"], p["stashbox_id"]
-    performer_id = _get_performer_id(conn, endpoint, stashbox_id)
+    local_id = _get_performer_id(conn, endpoint, stashbox_id)
+    # Server-assigned permanent id (stash-sense2-data-gen's export_delta.py) --
+    # None for a delta.db built before this column existed, in which case
+    # this degrades to plain client-side autoincrement exactly as before.
+    correct_id = p["id"] if ("id" in p.keys() and p["id"] is not None) else None
+
+    if correct_id is not None:
+        occupant_is_someone_else = local_id != correct_id and conn.execute(
+            "SELECT 1 FROM performers WHERE id = ?", (correct_id,)
+        ).fetchone() is not None
+        if occupant_is_someone_else:
+            relocate_id = _next_free_performer_id(conn)
+            logger.warning(
+                "Performer id %d (server id for %s:%s) is occupied by a different performer -- relocating occupant to %d",
+                correct_id, endpoint, stashbox_id, relocate_id,
+            )
+            _relocate_performer(conn, correct_id, relocate_id)
+        if local_id is not None and local_id != correct_id:
+            # This client already has this performer, but under a stale
+            # locally-invented id (a pre-fix client autoincrement, or one
+            # that itself collided with something else since) -- migrate
+            # its rows onto the correct id instead of leaving two.
+            logger.warning(
+                "Migrating stashbox performer %s:%s from stale local id %d to correct id %d",
+                endpoint, stashbox_id, local_id, correct_id,
+            )
+            _relocate_performer(conn, local_id, correct_id)
+        performer_id = correct_id
+    else:
+        performer_id = local_id
+
+    exists = performer_id is not None and conn.execute(
+        "SELECT 1 FROM performers WHERE id = ?", (performer_id,)
+    ).fetchone() is not None
+
     images = json.loads(p["images_json"] or "[]")
     fields = dict(
         canonical_name=p["name"], disambiguation=p["disambiguation"], gender=p["gender"],
@@ -233,22 +322,28 @@ def _upsert_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> int:
         ),
     )
 
-    if performer_id is None:
+    if not exists:
+        # `:id` is `performer_id`, which may itself be None (no correct_id
+        # given and this is a brand new performer) -- SQLite treats an
+        # explicit NULL in an INTEGER PRIMARY KEY column the same as
+        # omitting it, auto-assigning the next rowid, so this single INSERT
+        # correctly covers both the explicit-id and the legacy-autoincrement
+        # case.
         cursor = conn.execute(
             """
             INSERT INTO performers (
-                canonical_name, disambiguation, gender, country, ethnicity, birth_date,
+                id, canonical_name, disambiguation, gender, country, ethnicity, birth_date,
                 death_date, height_cm, eye_color, hair_color, career_start_year,
                 career_end_year, image_url, face_count, updated_at, stashdb_updated_at,
                 inferred_gender, inferred_gender_confidence
             ) VALUES (
-                :canonical_name, :disambiguation, :gender, :country, :ethnicity, :birth_date,
+                :id, :canonical_name, :disambiguation, :gender, :country, :ethnicity, :birth_date,
                 :death_date, :height_cm, :eye_color, :hair_color, :career_start_year,
                 :career_end_year, :image_url, 0, datetime('now'), :stashdb_updated_at,
                 :inferred_gender, :inferred_gender_confidence
             )
             """,
-            {**fields, "stashdb_updated_at": p["updated"] if endpoint == "stashdb" else None},
+            {**fields, "id": performer_id, "stashdb_updated_at": p["updated"] if endpoint == "stashdb" else None},
         )
         performer_id = cursor.lastrowid
     else:
@@ -330,8 +425,28 @@ def _upsert_catalogue_performer(conn: sqlite3.Connection, p: sqlite3.Row) -> Non
     performer's universal_id is `f"{source_endpoint}:{performer_id}"`
     (see export_db_to_json.py's make_catalogue_id) -- it has no
     stashbox_ids row to resolve identity through the way stashbox
-    performers do, so the raw id itself IS the portable identity, and
-    only stays portable if this client never invents its own."""
+    performers do, so the raw id itself IS the portable identity.
+
+    Before writing, checks whether this id is already occupied by a real
+    stashbox performer (a `stashbox_ids` row) -- i.e. an id-collision, see
+    module docstring -- and relocates that occupant out of the way via
+    `_relocate_performer` first rather than letting `ON CONFLICT DO
+    UPDATE` silently overwrite its content. A pre-existing row at this id
+    with no stashbox identity is assumed to be this same catalogue
+    performer being re-upserted (the normal, expected case) and is left
+    for the INSERT ... ON CONFLICT below to update in place."""
+    target_id = p["id"]
+    occupant_is_stashbox = conn.execute(
+        "SELECT 1 FROM stashbox_ids WHERE performer_id = ?", (target_id,)
+    ).fetchone() is not None
+    if occupant_is_stashbox:
+        relocate_id = _next_free_performer_id(conn)
+        logger.warning(
+            "Catalogue performer id %d is occupied by a stashbox performer -- relocating occupant to %d",
+            target_id, relocate_id,
+        )
+        _relocate_performer(conn, target_id, relocate_id)
+
     inferred_gender = p["inferred_gender"] if "inferred_gender" in p.keys() else None
     inferred_gender_confidence = (
         p["inferred_gender_confidence"] if "inferred_gender_confidence" in p.keys() else None
