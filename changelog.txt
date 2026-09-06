@@ -1,5 +1,16 @@
 ## 2026-09-06
 
+### 0.23.2
+- Fix: job history's "Finished in" duration was calculated from
+  `created_at` (when the job was queued) instead of `started_at` (when it
+  actually began processing). A job queued behind another
+  resource-conflicting job (e.g. Face Recommendations queued while
+  Refresh Outdated was still running) could sit waiting for hours before
+  starting, and that wait time was being counted as part of how long the
+  job itself took to run. `getCompletionDuration()` now prefers
+  `started_at`, falling back to `created_at` only for the rare case a job
+  completed without ever getting a `started_at` recorded.
+
 ### 0.31.1 (sidecar only)
 - Fix: 0.31.0's id-collision migration only moved a stashbox performer's
   metadata fields off a stale/collided local id, not any face that had

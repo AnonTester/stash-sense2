@@ -490,7 +490,14 @@
   function getCompletionDuration(job) {
     const completed = parseUtcDate(job.completed_at);
     if (!completed) return '';
-    const start = parseUtcDate(job.created_at) || parseUtcDate(job.started_at);
+    // started_at (when the job actually began processing) first, not
+    // created_at (when it was queued) -- a job queued behind another
+    // resource-conflicting job (e.g. Face Recommendations queued while
+    // Refresh Outdated is still running) can sit for hours before it
+    // starts, and that wait time isn't part of how long the job itself
+    // took to run. created_at is only a fallback for the rare case a job
+    // completed without ever getting a started_at recorded.
+    const start = parseUtcDate(job.started_at) || parseUtcDate(job.created_at);
     if (!start) return '';
     const secs = (completed.getTime() - start.getTime()) / 1000;
     return formatExactDuration(secs);
