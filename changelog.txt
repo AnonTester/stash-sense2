@@ -1,5 +1,20 @@
 ## 2026-09-06
 
+### 0.31.2 (sidecar only)
+- Fix: creating a new performer from a catalogue face-match recommendation
+  (e.g. an iafd.com match) failed with a 500 error whenever that source's
+  own photo URL sits behind a server-side fetch Stash itself can't get
+  past -- confirmed live: iafd.com returns `http error 403` to Stash's own
+  image-fetching (no browser UA/Cloudflare-challenge handling there), and
+  the resulting GraphQL error from `performerCreate` was an unhandled
+  exception. `StashClientUnified.create_performer()` now retries once
+  without the `image` field on exactly that failure instead of failing
+  the whole creation -- a missing photo is recoverable by hand later, a
+  failed create isn't. Fixes both call sites that pass a catalogue
+  image_url straight through (recommendations_router.py's
+  _do_create_performer and stashbox_router.py's
+  create_performer_from_catalogue).
+
 ### 0.23.2
 - Fix: job history's "Finished in" duration was calculated from
   `created_at` (when the job was queued) instead of `started_at` (when it

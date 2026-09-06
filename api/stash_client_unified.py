@@ -364,7 +364,18 @@ class StashClientUnified:
         return data["performerUpdate"]
 
     async def create_performer(self, **fields) -> dict:
-        """Create a new performer in Stash."""
+        """Create a new performer in Stash.
+
+        If an `image` field is a URL Stash's own server-side fetch can't
+        reach, retries once without it rather than failing the whole
+        creation -- a missing photo is recoverable (can be added by hand
+        later), a failed create isn't. Confirmed live: a catalogue match's
+        own image_url (e.g. iafd.com, which sits behind Cloudflare) gets
+        passed straight through as `image` by both recommendations_router.py's
+        _do_create_performer and stashbox_router.py's
+        create_performer_from_catalogue -- Stash's performerCreate mutation
+        fetches that URL itself, with no browser UA or Cloudflare-challenge
+        handling, and returns `processing image: http error 403`."""
         query = """
         mutation PerformerCreate($input: PerformerCreateInput!) {
           performerCreate(input: $input) {
@@ -373,7 +384,17 @@ class StashClientUnified:
           }
         }
         """
-        data = await self._execute(query, {"input": fields}, priority=Priority.CRITICAL)
+        try:
+            data = await self._execute(query, {"input": fields}, priority=Priority.CRITICAL)
+        except RuntimeError as exc:
+            if "image" not in fields or "processing image" not in str(exc).lower():
+                raise
+            logger.warning(
+                "performerCreate failed fetching image %r, retrying without it: %s",
+                fields.get("image"), exc,
+            )
+            fallback_fields = {k: v for k, v in fields.items() if k != "image"}
+            data = await self._execute(query, {"input": fallback_fields}, priority=Priority.CRITICAL)
         return data["performerCreate"]
 
     # ==================== Scenes ====================
