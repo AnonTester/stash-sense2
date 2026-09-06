@@ -973,7 +973,7 @@
           </div>
           <div class="ss-match">
             <div class="ss-match-image">
-              ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+              ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
             </div>
             <div class="ss-match-info">
               <h4>${match.name}</h4>
@@ -1043,7 +1043,7 @@
             li.innerHTML = `
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${m.name}</h4>
@@ -1767,7 +1767,7 @@
               </div>
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
@@ -1823,7 +1823,7 @@
                 li.innerHTML = `
                   <div class="ss-match">
                     <div class="ss-match-image">
-                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
@@ -2084,7 +2084,7 @@
               </div>
               <div class="ss-match">
                 <div class="ss-match-image">
-                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                  ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
@@ -2145,7 +2145,7 @@
                 li.innerHTML = `
                   <div class="ss-match">
                     <div class="ss-match-image">
-                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                      ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
@@ -2655,7 +2655,7 @@
             </div>
             <div class="ss-match">
               <div class="ss-match-image">
-                ${performer.image_url ? `<img src="${SS.thumbnailUrl(performer.image_url)}" alt="${performer.name}" loading="lazy" />` : '<div class="ss-no-image">No image</div>'}
+                ${performer.image_url ? `<img src="${SS.thumbnailUrl(performer.image_url)}" alt="${performer.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
               </div>
               <div class="ss-match-info">
                 <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>

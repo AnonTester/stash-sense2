@@ -3901,7 +3901,18 @@ async def create_performer_action(request: CreatePerformerRequest):
             force_create=request.force_create,
         )
     except PerformerIdentityAmbiguous as exc:
-        return {"success": False, "ambiguous": True, "candidates": exc.candidates}
+        # Original match's own preview data (name/photo/source link), so the
+        # frontend's card picker can show what the user was actually trying
+        # to create/link before now -- previously only the bare name reached
+        # it. Flat on the response (not nested), matching accept_scene_face_matches's
+        # own ambiguous-item shape below.
+        return {
+            "success": False, "ambiguous": True, "candidates": exc.candidates,
+            "name": request.stashbox_data.get("name"),
+            "image_url": request.stashbox_data.get("image_url"),
+            "profile_url": request.stashbox_data.get("profile_url") or request.stashbox_data.get("catalogue_url"),
+            "source": request.stashbox_data.get("source"),
+        }
     return {"success": True, "performer": result}
 
 
@@ -4421,10 +4432,19 @@ async def accept_scene_face_matches(request: AcceptSceneFaceMatchesRequest):
             performer_id = await _resolve_scene_face_match_performer_id(stash, rec, selection)
         except PerformerIdentityAmbiguous as exc:
             details = rec.details or {}
+            # Original match's own preview data, same fields
+            # _resolve_scene_face_match_performer_id already built into
+            # stashbox_data above -- so the card picker modal can show what
+            # was actually matched (photo + source link), not just a bare
+            # name, before the user picks an existing performer or creates
+            # a new one.
             ambiguous.append({
                 "recommendation_id": rec.id,
                 "name": details.get("name"),
                 "candidates": exc.candidates,
+                "image_url": details.get("image_url"),
+                "profile_url": details.get("profile_url") or details.get("catalogue_url"),
+                "source": details.get("source"),
             })
             continue
         resolved_ids.append(performer_id)

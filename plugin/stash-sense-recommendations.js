@@ -3267,10 +3267,52 @@
         const heading = document.createElement('h4');
         heading.style.cssText = 'margin:0 0 6px 0;font-size:1rem;';
         heading.textContent = item.name || 'Unknown';
+        itemDiv.appendChild(heading);
+
+        // The originally-matched candidate's own preview (photo + source
+        // link) -- absent for a pathway that never had one to send (see
+        // showAmbiguousPerformerModal's callers), in which case this is a
+        // no-op and only the heading above shows, same as before.
+        if (item.image_url || item.profile_url) {
+          const original = document.createElement('div');
+          original.style.cssText = 'display:flex;gap:10px;align-items:center;margin-bottom:10px;padding:8px;background:rgba(255,255,255,0.05);border-radius:6px;';
+          if (item.image_url) {
+            const img = document.createElement('img');
+            img.src = SS.thumbnailUrl(item.image_url);
+            img.alt = item.name || '';
+            img.loading = 'lazy';
+            img.style.cssText = 'width:48px;height:64px;object-fit:cover;border-radius:4px;flex-shrink:0;';
+            img.onload = function () {
+              if (this.naturalWidth > this.naturalHeight) {
+                this.style.width = '64px';
+                this.style.height = '48px';
+              }
+            };
+            img.onerror = function () { this.style.display = 'none'; };
+            original.appendChild(img);
+          }
+          const textWrap = document.createElement('div');
+          const label = document.createElement('div');
+          label.style.cssText = 'font-size:0.8rem;color:var(--bs-secondary-color, #888);';
+          label.textContent = 'Originally matched';
+          textWrap.appendChild(label);
+          if (item.profile_url) {
+            const link = document.createElement('a');
+            link.href = item.profile_url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.className = 'ss-link';
+            const sourceLabel = item.source ? item.source.charAt(0).toUpperCase() + item.source.slice(1) : 'source';
+            link.textContent = `View on ${sourceLabel}`;
+            textWrap.appendChild(link);
+          }
+          original.appendChild(textWrap);
+          itemDiv.appendChild(original);
+        }
+
         const statusDiv = document.createElement('div');
         statusDiv.style.cssText = 'font-size:0.85rem;color:var(--bs-secondary-color, #888);margin-top:6px;min-height:1.2em;';
         const cardsDiv = document.createElement('div');
-        itemDiv.appendChild(heading);
         itemDiv.appendChild(cardsDiv);
         itemDiv.appendChild(statusDiv);
         itemsWrap.appendChild(itemDiv);
@@ -5285,7 +5327,10 @@
                   createBtn.textContent = 'Create';
                   createBtn.disabled = false;
                   const resolutionMap = await showAmbiguousPerformerModal(
-                    [{ name: perf.name, candidates: result.candidates }], () => 'only',
+                    [{
+                      name: perf.name, candidates: result.candidates,
+                      image_url: result.image_url, profile_url: result.profile_url, source: result.source,
+                    }], () => 'only',
                   );
                   if (!resolutionMap) return; // cancelled -- leave the Create button as-is
                   const choice = resolutionMap.get('only');
@@ -6321,7 +6366,7 @@
               ${preselect ? 'checked' : ''} ${isCandidatePending ? '' : 'disabled'} />
             <div class="ss-sfm-candidate-thumb">
               ${c.image_url
-                ? `<img src="${escapeHtml(SS.thumbnailUrl(c.image_url))}" alt="${escapeHtml(c.name || '')}" loading="lazy" onerror="this.style.display='none'" />`
+                ? `<img src="${escapeHtml(SS.thumbnailUrl(c.image_url))}" alt="${escapeHtml(c.name || '')}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" onerror="this.style.display='none'" />`
                 : '<div class="ss-no-image">No Image</div>'
               }
             </div>

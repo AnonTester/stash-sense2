@@ -251,6 +251,17 @@
   background: var(--bs-body-bg, #1a1a1a);
 }
 
+/* Set by the <img>'s own onload handler once its natural dimensions are
+   known -- a landscape source image (a video frame capture, typically)
+   forced into the portrait box above via object-fit: cover got its sides
+   cropped off. Same box, rotated: swap which side is 130px rather than
+   picking a new size, so both orientations occupy a comparable visual
+   footprint. Shared with .ss-sfm-candidate-thumb's identical case. */
+.ss-match-image.ss-thumb-landscape {
+  width: 130px;
+  height: 100px;
+}
+
 .ss-match-image img {
   width: 100%;
   height: 100%;
@@ -4127,6 +4138,17 @@ a.ss-detail-entity-link:hover {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Set by the <img>'s own onload handler once its natural dimensions are
+   known (see renderCandidate() in stash-sense-recommendations.js) -- a
+   landscape source image (a video frame capture, typically) forced into
+   the portrait box above via object-fit: cover got its sides cropped off.
+   Same box, rotated: swap which side is 130px rather than picking a new
+   size, so both orientations occupy a comparable visual footprint. */
+.ss-sfm-candidate-thumb.ss-thumb-landscape {
+  width: 130px;
+  height: 100px;
 }
 
 .ss-sfm-candidate-thumb img {

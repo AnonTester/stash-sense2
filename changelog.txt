@@ -1,5 +1,22 @@
 ## 2026-09-06
 
+### 0.32.0 (sidecar) / 0.24.0 (plugin)
+- Fix: a match's preview thumbnail (Scene Face Matches candidates, and
+  every Identify-style match card) was fixed to a 100x130 portrait box
+  with object-fit: cover, so a landscape source image (typically a video
+  frame capture) had its sides cropped off instead of being shown intact.
+  The image's own onload handler now detects a landscape aspect ratio and
+  swaps to a 130x100 box -- same footprint, rotated, rather than forcing
+  every orientation into one fixed shape.
+- Feature: the "pick an existing performer or create new" modal (shown
+  when a match's name/alias collides with an existing local performer,
+  with no hard evidence either is actually the same person) only ever
+  showed the bare matched name, giving no way to tell which real person
+  it was actually about before deciding. Now shows that original match's
+  own preview photo and a "View on <source>" link at the top of each item
+  when the calling flow has that data (Scene Face Matches' accept flow and
+  the recommendation review's Create action both do).
+
 ### 0.31.2 (sidecar only)
 - Fix: creating a new performer from a catalogue face-match recommendation
   (e.g. an iafd.com match) failed with a 500 error whenever that source's
