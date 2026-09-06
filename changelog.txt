@@ -1,3 +1,16 @@
+## 2026-09-06
+
+### 0.23.1
+- Fix: accepting/resolving a recommendation from its detail view (Scene
+  Stash-Box Tagger and every other recommendation type) often left it
+  looking unremoved in the pending list on return. The auto-return-to-list
+  helper waited 1.5s and only then read which recommendation to drop from
+  the cached list, by which point a manual Back click (or opening a
+  different recommendation) in that window had already cleared the
+  reference it relied on. It now captures the id up front, so the cached
+  list is always corrected regardless of how the user navigates away in
+  the meantime.
+
 ## 2026-09-05
 
 ### 0.30.0 (sidecar only)

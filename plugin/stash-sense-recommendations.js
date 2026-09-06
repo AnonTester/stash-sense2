@@ -2424,7 +2424,7 @@
         await RecommendationsAPI.mergePerformers(keeperId, sourceIds);
         await RecommendationsAPI.resolve(rec.id, 'merged', { keeper_id: keeperId });
 
-        showSuccessAndReturn(btn, 'Merged!');
+        showSuccessAndReturn(btn, 'Merged!', rec.id);
       } catch (e) {
         btn.textContent = `Failed: ${e.message}`;
         btn.classList.add('ss-btn-error');
@@ -2544,7 +2544,7 @@
               deleted_file_ids: fileIdsToDelete,
             });
 
-            showSuccessAndReturn(btn, 'Deleted!');
+            showSuccessAndReturn(btn, 'Deleted!', rec.id);
           } catch (e) {
             const errMsg = e.message || '';
             // If file already deleted, resolve the recommendation anyway
@@ -2555,7 +2555,7 @@
                   deleted_file_ids: fileIdsToDelete,
                   note: 'Files already deleted',
                 });
-                showSuccessAndReturn(btn, 'Already deleted - resolved');
+                showSuccessAndReturn(btn, 'Already deleted - resolved', rec.id);
                 return;
               } catch (_) { /* fall through to error display */ }
             }
@@ -2935,7 +2935,7 @@
               return;
             }
 
-            showSuccessAndReturn(buttonEl, 'Merged!');
+            showSuccessAndReturn(buttonEl, 'Merged!', rec.id);
           } catch (e) {
             buttonEl.textContent = 'Failed: ' + e.message;
             buttonEl.classList.add('ss-btn-error');
@@ -3041,7 +3041,7 @@
                   selectedRecIds,
                   unselectedRecIds,
                 );
-                showSuccessAndReturn(keepMergeBtn, 'Merged!');
+                showSuccessAndReturn(keepMergeBtn, 'Merged!', rec.id);
               } catch (e) {
                 keepMergeBtn.textContent = 'Failed: ' + e.message;
                 keepMergeBtn.classList.add('ss-btn-error');
@@ -3067,7 +3067,7 @@
                   activeMatches.map(function(match) { return match.recommendation_id; }),
                   true,
                 );
-                showSuccessAndReturn(deleteBtn, 'Deleted!');
+                showSuccessAndReturn(deleteBtn, 'Deleted!', rec.id);
               } catch (e) {
                 deleteBtn.textContent = 'Failed: ' + e.message;
                 deleteBtn.classList.add('ss-btn-error');
@@ -3501,19 +3501,50 @@
   /**
    * Mark a button as successful and navigate back to the recommendation list
    * after a short delay. Replaces the repeated setTimeout + navigate pattern.
+   *
+   * `recId` must be the id of the recommendation this action just resolved,
+   * captured by the caller up front -- not read from `currentState.selectedRec`
+   * inside the timeout callback. The Back button (and opening a different
+   * recommendation) both null out/replace `currentState.selectedRec`
+   * synchronously, and nothing stops the user from doing that manually
+   * during this 1.5s window (there's no button-disable/nav-lock while it
+   * runs). Reading `currentState.selectedRec?.id` late made
+   * removeFromListCache() silently no-op whenever that happened, which is
+   * why "accept" so often looked like it didn't remove the item: the item
+   * stayed resolved server-side but stuck in the cached pending list, until
+   * some unrelated full refetch (e.g. reopening the recommendations tab
+   * from scratch) finally purged it -- sometimes revealing a genuinely new
+   * recommendation that had shown up in the meantime, which read as the old
+   * one being "replaced."
    */
-  function showSuccessAndReturn(buttonEl, successText) {
+  function showSuccessAndReturn(buttonEl, successText, recId) {
     buttonEl.textContent = successText;
     buttonEl.classList.add('ss-btn-success');
+    const targetId = recId ?? currentState.selectedRec?.id;
     setTimeout(() => {
       // The action that got us here (accept/merge/resolve/etc.) already
       // succeeded server-side -- drop this one recommendation from the
       // cached list instead of invalidating it, so returning to the list
-      // is instant and doesn't reorder/reload everything else.
-      removeFromListCache(currentState.selectedRec?.id);
-      currentState.view = 'list';
-      currentState.selectedRec = null;
-      renderCurrentView(document.getElementById('ss-recommendations'));
+      // is instant and doesn't reorder/reload everything else. Do this
+      // unconditionally, regardless of where the user has navigated to
+      // since the action was triggered.
+      removeFromListCache(targetId);
+      if (currentState.selectedRec?.id === targetId) {
+        // Still sitting on this recommendation's own detail view -- auto-
+        // return to the list, as before.
+        currentState.view = 'list';
+        currentState.selectedRec = null;
+        renderCurrentView(document.getElementById('ss-recommendations'));
+      } else if (currentState.view === 'list' && !currentState.selectedRec) {
+        // User already navigated back to the list manually before this
+        // timer fired. The cache has only just been corrected above, so
+        // re-render now or the resolved item keeps showing until some
+        // other action/refetch happens to fix it.
+        renderCurrentView(document.getElementById('ss-recommendations'));
+      }
+      // Otherwise the user moved on to a different recommendation's detail
+      // view (or elsewhere entirely) -- the cache is now correct for next
+      // time, but don't yank them out of what they're currently looking at.
     }, 1500);
   }
 
@@ -3968,7 +3999,7 @@
           applyBtn.disabled = true;
           applyBtn.textContent = upstreamStatus === 'deleted' ? 'Reviewing...' : 'Resolving...';
           await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', {});
-          showSuccessAndReturn(applyBtn, upstreamStatus === 'deleted' ? 'Reviewed' : 'Done!');
+          showSuccessAndReturn(applyBtn, upstreamStatus === 'deleted' ? 'Reviewed' : 'Done!', rec.id);
         } catch (e) {
           applyBtn.textContent = `Failed: ${e.message}`;
           applyBtn.classList.add('ss-btn-error');
@@ -3986,7 +4017,7 @@
           applyBtn.textContent = 'Relinking...';
           await RecommendationsAPI.updatePerformer(performerId, fields);
           await RecommendationsAPI.resolve(rec.id, 'relinked', { stash_ids: fields.stash_ids });
-          showSuccessAndReturn(applyBtn, 'Relinked!');
+          showSuccessAndReturn(applyBtn, 'Relinked!', rec.id);
         } catch (e) {
           errorDiv.innerHTML = `<div>${escapeHtml(e.message)}</div>`;
           errorDiv.style.display = 'block';
@@ -4053,7 +4084,7 @@
             try {
               await RecommendationsAPI.updatePerformer(performerId, fields);
               await RecommendationsAPI.resolve(rec.id, 'applied', { fields, auto_merged: conflictId });
-              showSuccessAndReturn(applyBtn, 'Merged & Applied!');
+              showSuccessAndReturn(applyBtn, 'Merged & Applied!', rec.id);
             } catch (updateErr) {
               errorDiv.innerHTML = `<div>${escapeHtml(updateErr.message)}</div>`;
               errorDiv.style.display = 'block';
@@ -4112,7 +4143,7 @@
               try {
                 await RecommendationsAPI.resolve(rec.id, 'applied', { skipped_name: true, no_other_fields: true });
                 applyBtn.disabled = true;
-                showSuccessAndReturn(applyBtn, 'Resolved (name skipped)');
+                showSuccessAndReturn(applyBtn, 'Resolved (name skipped)', rec.id);
               } catch (resolveErr) {
                 errorDiv.innerHTML = `<div>${escapeHtml(resolveErr.message)}</div>`;
                 errorDiv.style.display = 'block';
@@ -4128,7 +4159,7 @@
             try {
               await RecommendationsAPI.updatePerformer(performerId, safeFields);
               await RecommendationsAPI.resolve(rec.id, 'applied', { fields: safeFields, skipped_name: true });
-              showSuccessAndReturn(applyBtn, 'Applied!');
+              showSuccessAndReturn(applyBtn, 'Applied!', rec.id);
             } catch (updateErr) {
               errorDiv.innerHTML = `<div>${escapeHtml(updateErr.message)}</div>`;
               errorDiv.style.display = 'block';
@@ -4145,7 +4176,7 @@
         const result = await RecommendationsAPI.updatePerformer(performerId, fields);
         await RecommendationsAPI.resolve(rec.id, 'applied', { fields });
 
-        showSuccessAndReturn(applyBtn, result?.auto_merged ? 'Merged & Applied!' : 'Applied!');
+        showSuccessAndReturn(applyBtn, result?.auto_merged ? 'Merged & Applied!' : 'Applied!', rec.id);
       } catch (e) {
         let errorMsg = e.message;
         if (errorMsg.includes('different disambiguation') || errorMsg.includes('cannot be auto-merged')) {
@@ -4432,7 +4463,7 @@
           applyBtn.disabled = true;
           applyBtn.textContent = 'Resolving...';
           await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', {});
-          showSuccessAndReturn(applyBtn, 'Done!');
+          showSuccessAndReturn(applyBtn, 'Done!', rec.id);
         } catch (e) {
           applyBtn.textContent = `Failed: ${e.message}`;
           applyBtn.classList.add('ss-btn-error');
@@ -4448,7 +4479,7 @@
         await RecommendationsAPI.updateTag(tagId, fields);
         await RecommendationsAPI.resolve(rec.id, 'applied', { fields });
 
-        showSuccessAndReturn(applyBtn, 'Applied!');
+        showSuccessAndReturn(applyBtn, 'Applied!', rec.id);
       } catch (e) {
         errorDiv.innerHTML = `<div>${escapeHtml(e.message)}</div>`;
         errorDiv.style.display = 'block';
@@ -4697,7 +4728,7 @@
           applyBtn.disabled = true;
           applyBtn.textContent = 'Resolving...';
           await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', {});
-          showSuccessAndReturn(applyBtn, 'Done!');
+          showSuccessAndReturn(applyBtn, 'Done!', rec.id);
         } catch (e) {
           applyBtn.textContent = `Failed: ${e.message}`;
           applyBtn.classList.add('ss-btn-error');
@@ -4712,7 +4743,7 @@
         await RecommendationsAPI.updateStudio(studioId, fields, details.endpoint);
         await RecommendationsAPI.resolve(rec.id, 'applied', { fields });
 
-        showSuccessAndReturn(applyBtn, 'Applied!');
+        showSuccessAndReturn(applyBtn, 'Applied!', rec.id);
       } catch (e) {
         errorDiv.innerHTML = `<div>${escapeHtml(e.message)}</div>`;
         errorDiv.style.display = 'block';
@@ -5645,7 +5676,7 @@
           applyBtn.disabled = true;
           applyBtn.textContent = 'Resolving...';
           await RecommendationsAPI.resolve(rec.id, 'accepted_no_changes', {});
-          showSuccessAndReturn(applyBtn, 'Done!');
+          showSuccessAndReturn(applyBtn, 'Done!', rec.id);
         } catch (e) {
           const msg = String(e?.message || e || '');
           const stale = /recommendation not found|recommendation removed because referenced scene no longer exists/i.test(msg);
@@ -5669,7 +5700,7 @@
         await RecommendationsAPI.updateScene(sceneId, fields, performerIds, tagIds, studioId);
         await RecommendationsAPI.resolve(rec.id, 'applied', { fields });
 
-        showSuccessAndReturn(applyBtn, 'Applied!');
+        showSuccessAndReturn(applyBtn, 'Applied!', rec.id);
       } catch (e) {
         const msg = String(e?.message || e || '');
         const stale = /scene .*not found|removed stale upstream scene recommendation|recommendation removed because referenced scene no longer exists|recommendation not found/i.test(msg);
@@ -6139,7 +6170,7 @@
         await RecommendationsAPI.acceptFingerprintMatch(
           rec.id, d.local_scene_id, d.endpoint, d.stashbox_scene_id
         );
-        showSuccessAndReturn(acceptBtn, 'Accepted!');
+        showSuccessAndReturn(acceptBtn, 'Accepted!', rec.id);
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;
         acceptBtn.classList.add('ss-btn-error');
@@ -6154,7 +6185,7 @@
       dismissBtn.textContent = 'Dismissing...';
       try {
         await RecommendationsAPI.dismiss(rec.id);
-        showSuccessAndReturn(dismissBtn, 'Dismissed!');
+        showSuccessAndReturn(dismissBtn, 'Dismissed!', rec.id);
       } catch (e) {
         dismissBtn.textContent = `Failed: ${e.message}`;
         dismissBtn.classList.add('ss-btn-error');
@@ -6496,7 +6527,7 @@
           showToast(result.detail || 'The matched performer no longer exists in Stash.', 'warning', 6000);
           return;
         }
-        showSuccessAndReturn(acceptBtn, 'Accepted!');
+        showSuccessAndReturn(acceptBtn, 'Accepted!', rec.id);
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;
         acceptBtn.classList.add('ss-btn-error');
@@ -6513,7 +6544,7 @@
           rejectBtn.textContent = 'Rejecting...';
           try {
             await RecommendationsAPI.rejectAllSceneFaceMatches(sceneId);
-            showSuccessAndReturn(rejectBtn, 'Rejected!');
+            showSuccessAndReturn(rejectBtn, 'Rejected!', rec.id);
           } catch (e) {
             rejectBtn.textContent = `Failed: ${e.message}`;
             rejectBtn.classList.add('ss-btn-error');
