@@ -325,15 +325,18 @@ class FaceRecognizer:
                 populated on it by detect_faces())
             config: Matching configuration (uses defaults if not provided)
             embedding: Pre-computed FaceEmbedding (skips read-back if provided)
-            image: The full (not cropped) image `face` was detected in --
-                optional; when provided, this query face's own gender gets
-                predicted here and used for matching.py's soft gender-
-                mismatch penalty. Omitting it just skips that penalty for
-                this call (existing callers that don't pass it are
-                unaffected) -- callers that have it in scope (every caller
-                does, right after their own detect_faces() call) should
-                pass it through so the penalty actually has a query-side
-                signal to compare against.
+            image: Fallback full (not cropped) frame to use for gender/age
+                prediction, only when `face.source_image` isn't already
+                populated (e.g. a DetectedFace reconstructed from a cache
+                row with no image at all). `face.source_image` -- the
+                exact frame detect_faces() actually detected `face`
+                against, correctly rotated if a roll correction fired --
+                is always preferred when present; passing a caller-held
+                `image` here is silently WRONG whenever detection rotated
+                internally (face.bbox's coordinates are in that rotated
+                frame, not this one), which is exactly why this now
+                defers to face.source_image first. Omitting both just
+                skips the gender-mismatch penalty for this call.
 
         Returns:
             Tuple of (matches, matching_result, embedding)
@@ -346,8 +349,9 @@ class FaceRecognizer:
             embedding = self.generator.get_embedding(face)
 
         query_gender = query_gender_confidence = None
-        if image is not None:
-            gender_age = self.generator.predict_gender_age(face, image)
+        effective_image = face.source_image if face.source_image is not None else image
+        if effective_image is not None:
+            gender_age = self.generator.predict_gender_age(face, effective_image)
             if gender_age:
                 query_gender, query_gender_confidence, _ = gender_age
 

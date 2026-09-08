@@ -170,6 +170,18 @@ class DetectedFace:
     bbox: dict  # {x, y, w, h}
     confidence: float
     embedding: np.ndarray  # 512-dim, already computed by buffalo_l's detect+embed call
+    # The FULL frame this face was actually detected against -- the same
+    # array _detect_faces_raw() was called with, whatever that was: the
+    # original image, or (whenever detect_faces()'s roll-correction loop
+    # kept a rotated attempt) that attempt's own rotated array.
+    # predict_gender_age() requires exactly this array (see its own
+    # docstring) -- always pass face.source_image there, never a
+    # separately-held local `image` variable, since that's silently wrong
+    # whenever a rotation correction fired. Optional/defaults to None so
+    # existing reconstruct-from-cache call sites (e.g.
+    # identification_router.py's cached-match replay, which has no image
+    # at all) keep working unchanged.
+    source_image: Optional[np.ndarray] = None
     landmarks: Optional[np.ndarray] = None  # 5-point facial landmarks
     yaw: Optional[float] = None    # Estimated yaw in degrees (-90 to +90)
 
@@ -320,8 +332,19 @@ class FaceEmbeddingGenerator:
 
     def predict_gender_age(self, face: "DetectedFace", image: np.ndarray) -> Optional[tuple[str, float, int]]:
         """Predict (gender, gender_confidence, estimated_age) for one
-        already-detected face, reusing the same full `image` (not the
-        cropped `face.image`) `detect_faces()` was called on.
+        already-detected face, reusing the same full frame (not the
+        cropped `face.image`) `detect_faces()` actually detected `face`
+        against -- always pass `face.source_image` here, never a
+        separately-held `image` local variable. Those two are NOT
+        interchangeable: whenever detect_faces()'s roll-correction loop
+        kept a rotated attempt, `face.bbox`'s x/y/w/h are coordinates in
+        that ROTATED frame, not in whatever array the caller originally
+        passed to detect_faces() -- passing the wrong one silently crops
+        the wrong region and produces a wrong gender/age prediction (which
+        matching.py's soft gender-mismatch penalty then measures the query
+        against), with no error to catch it. `face.source_image` is
+        exactly the array _detect_faces_raw() used for this specific face,
+        no reconstruction or guessing needed.
 
         Replicates `insightface.model_zoo.attribute.Attribute.get()`'s own
         bbox-centered crop and preprocessing exactly (same
@@ -441,17 +464,30 @@ class FaceEmbeddingGenerator:
         oriented stored embedding on unequal footing).
 
         Scoped to the whole image, not per-face: roll is measured off the
-        single largest-area candidate. Each iteration rotates the CURRENT
-        image (not always the original -- the second attempt corrects the
-        first attempt's own residual, and so on) and re-detects from
-        scratch; the loop stops the moment a re-detection's own measured
-        roll comes back under ROLL_RESIDUAL_OK_DEG, at which point every
-        face from that final pass replaces the original results wholesale.
-        Any face returned this way carries `bbox["rotation_applied"]` (the
-        TOTAL degrees applied across every accepted attempt, 0.0 if no
-        correction was needed/kept). Exhausting the attempt budget without
-        converging, or an attempt that makes the face undetectable
-        outright, both fall back to the pristine original detection.
+        single largest-area candidate. Each iteration re-derives its
+        attempt by rotating the ORIGINAL image by the FULL cumulative
+        angle so far -- never a previous attempt's own (already resampled)
+        output -- and re-detects from scratch; the loop stops the moment a
+        re-detection's own measured roll comes back under
+        ROLL_RESIDUAL_OK_DEG, at which point every face from that final
+        pass replaces the original results wholesale. Rotating from the
+        original every time is deliberate: composing two rotations of a
+        shared original by angles theta1 then theta2 reproduces the exact
+        same final content orientation as one rotation by theta1+theta2 (a
+        rotation's content mapping is additive), so re-deriving from the
+        original avoids compounding PIL's own resampling/interpolation
+        blur across attempts -- a real, measurable degradation of the
+        actual stored/matched EMBEDDING for any multi-iteration
+        correction, not just a cosmetic display issue (confirmed live in
+        data-gen's own copy of this same fix, 2026-09-08: a naive single-
+        shot reconstruction of a genuine multi-iteration correction came
+        back at only ~0.94-0.95 cosine similarity to the old loop's own
+        result for the identical face). Any face returned this way carries
+        `bbox["rotation_applied"]` (the TOTAL degrees applied across every
+        accepted attempt, 0.0 if no correction was needed/kept).
+        Exhausting the attempt budget without converging, or an attempt
+        that makes the face undetectable outright, both fall back to the
+        pristine original detection.
 
         Args:
             image: RGB image as numpy array
@@ -469,19 +505,20 @@ class FaceEmbeddingGenerator:
         if roll is None or abs(roll) < ROLL_CORRECTION_THRESHOLD_DEG:
             return faces
 
-        current_image = image
         current_roll = roll
         cumulative_rotation = 0.0
 
         for _ in range(MAX_ROLL_CORRECTION_ATTEMPTS):
             correction = -current_roll
-            rotated_image = _rotate_image_array(current_image, correction)
+            cumulative_rotation += correction
+            # Always the ORIGINAL image, rotated by the full angle
+            # accumulated so far -- see this method's own docstring for
+            # why, never `_rotate_image_array(rotated_image, correction)`
+            # against a previous attempt's own output.
+            rotated_image = _rotate_image_array(image, cumulative_rotation)
             rotated_faces = self._detect_faces_raw(rotated_image, min_confidence)
             if not rotated_faces:
                 break  # this attempt made the face undetectable -- stop, fall back below
-
-            cumulative_rotation += correction
-            current_image = rotated_image
 
             rotated_primary = max(rotated_faces, key=lambda f: f.bbox["w"] * f.bbox["h"])
             residual_roll = _face_roll_degrees(rotated_primary.landmarks)
@@ -557,6 +594,7 @@ class FaceEmbeddingGenerator:
                 },
                 confidence=conf,
                 embedding=np.asarray(face.normed_embedding, dtype=np.float32),
+                source_image=image,
                 landmarks=kps,
                 yaw=yaw_estimate,
             ))

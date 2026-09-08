@@ -1,5 +1,25 @@
 ## 2026-09-08
 
+### 0.32.2 (sidecar)
+- Fix: a query face needing in-plane rotation correction (FaceEmbeddingGenerator.detect_faces()'s
+  roll-correction pass) got its gender/age predicted against the wrong,
+  unrotated frame -- predict_gender_age() never had access to the actual
+  rotated array detection ran against, so recognize_face_v2()'s soft
+  gender-mismatch penalty was comparing against a wrong query-side gender
+  for any tilted query photo. DetectedFace now carries source_image, the
+  exact frame it was actually detected against, and recognize_face_v2()
+  prefers it over its caller-supplied image.
+- Fix: detect_faces()'s roll-correction loop rotated each retry's already-
+  rotated output instead of the original image, compounding resampling
+  blur across attempts and measurably degrading the stored/matched
+  embedding itself for any correction needing more than one iteration
+  (confirmed ~0.94-0.95 cosine similarity to a correctly single-resampled
+  detection of the same face, not just a display-only difference). Now
+  always rotates the original by the running cumulative angle. Neither
+  fix invalidates or requires regenerating any already-cached scene
+  fingerprint -- both only affect detection/prediction quality on the
+  next fresh scan of a given scene.
+
 ### 0.32.1 (sidecar) / 0.24.1 (plugin)
 - Fix: accepting a Scene Stash-Box Tagger match still sometimes left a
   recommendation for the same local scene stuck showing as pending in the
