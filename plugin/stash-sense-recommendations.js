@@ -6212,9 +6212,18 @@
       acceptBtn.disabled = true;
       acceptBtn.textContent = 'Accepting...';
       try {
-        await RecommendationsAPI.acceptFingerprintMatch(
+        const result = await RecommendationsAPI.acceptFingerprintMatch(
           rec.id, d.local_scene_id, d.endpoint, d.stashbox_scene_id
         );
+        // Accepting one match auto-dismisses any other pending
+        // scene_fingerprint_match candidates for the same local scene
+        // server-side (see accept_fingerprint_match's own comment) --
+        // those siblings never went through removeFromListCache/
+        // showSuccessAndReturn themselves, so without this they'd keep
+        // showing as pending in the cached list (and be clickable into a
+        // detail view that now confusingly reports them "dismissed") until
+        // some unrelated full refetch caught up.
+        (result?.auto_dismissed_rec_ids || []).forEach(removeFromListCache);
         showSuccessAndReturn(acceptBtn, 'Accepted!', rec.id);
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;

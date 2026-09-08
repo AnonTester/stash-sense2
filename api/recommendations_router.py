@@ -4222,13 +4222,21 @@ class AcceptFingerprintMatchRequest(BaseModel):
 
 async def _accept_fingerprint_match(
     stash, db, rec_id: int, scene_id: str, endpoint: str, stash_id: str,
-):
-    """Accept a fingerprint match: add stash_id to local scene, resolve rec."""
+) -> list[int]:
+    """Accept a fingerprint match: add stash_id to local scene, resolve rec.
+
+    Returns the ids of any *other* pending scene_fingerprint_match
+    recommendations for the same local scene that got auto-dismissed as a
+    side effect (see dismiss_pending_scene_fingerprint_for_scene) -- a
+    caller that maintains its own cache of pending recommendations needs
+    these too, not just rec_id, or those siblings keep showing as pending
+    until an unrelated full refetch happens to catch up.
+    """
     rec = db.get_recommendation(rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recommendation not found")
     if rec.status != "pending":
-        return
+        return []
 
     scene = await stash.get_scene_by_id(scene_id)
     existing_stash_ids = scene.get("stash_ids") or []
@@ -4247,27 +4255,35 @@ async def _accept_fingerprint_match(
     # Accepting one match for a local scene should dismiss all other pending
     # matches for that same scene (across endpoints).
     scene_id_str = str(scene_id)
-    db.dismiss_pending_scene_fingerprint_for_scene(
+    return db.dismiss_pending_scene_fingerprint_for_scene(
         scene_id=scene_id_str,
         exclude_rec_id=rec_id,
         reason=f"Auto-dismissed after accepting scene fingerprint match for local scene {scene_id_str}",
     )
 
 
-@router.post("/actions/accept-fingerprint-match", response_model=SuccessResponse)
+class AcceptFingerprintMatchResponse(BaseModel):
+    success: bool
+    # Other pending scene_fingerprint_match recommendation ids for the same
+    # local scene that were auto-dismissed as a side effect of this accept
+    # -- see _accept_fingerprint_match's own docstring.
+    auto_dismissed_rec_ids: list[int] = []
+
+
+@router.post("/actions/accept-fingerprint-match", response_model=AcceptFingerprintMatchResponse)
 async def accept_fingerprint_match(request: AcceptFingerprintMatchRequest):
     """Accept a scene fingerprint match — links the stash_id to the local scene."""
     logger.debug("Action: accept-fingerprint-match rec_id=%s scene_id=%s stash_id=%s", request.recommendation_id, request.scene_id, request.stash_id)
     stash = get_stash_client()
     db = get_rec_db()
-    await _accept_fingerprint_match(
+    auto_dismissed_rec_ids = await _accept_fingerprint_match(
         stash, db,
         rec_id=request.recommendation_id,
         scene_id=request.scene_id,
         endpoint=request.endpoint,
         stash_id=request.stash_id,
     )
-    return {"success": True}
+    return {"success": True, "auto_dismissed_rec_ids": auto_dismissed_rec_ids}
 
 
 class AcceptAllFingerprintMatchesRequest(BaseModel):

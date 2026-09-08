@@ -1066,12 +1066,16 @@ class RecommendationsDB:
         scene_id: str,
         reason: Optional[str] = None,
         exclude_rec_id: Optional[int] = None,
-    ) -> int:
+    ) -> list[int]:
         """
         Dismiss pending scene_fingerprint_match recommendations for one local scene.
 
         Matches by target_id prefix: "<scene_id>|...".
-        Returns number of recommendations dismissed.
+        Returns the ids of the recommendations dismissed -- the caller needs
+        these (not just a count) to tell an API client which *other*
+        recommendations silently changed status as a side effect of this
+        call, so a client-side list cache can drop them too instead of
+        going on showing them as pending until some unrelated full refetch.
         """
         scene_prefix = f"{str(scene_id)}|%"
 
@@ -1091,7 +1095,7 @@ class RecommendationsDB:
 
             rows = conn.execute(query, params).fetchall()
             if not rows:
-                return 0
+                return []
 
             rec_ids = [row["id"] for row in rows]
             conn.execute(
@@ -1109,7 +1113,7 @@ class RecommendationsDB:
                 except sqlite3.IntegrityError:
                     pass
 
-            return len(rec_ids)
+            return rec_ids
 
     def dismiss_pending_scene_face_match_for_scene(
         self,

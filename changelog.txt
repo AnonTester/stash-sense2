@@ -1,3 +1,18 @@
+## 2026-09-08
+
+### 0.32.1 (sidecar) / 0.24.1 (plugin)
+- Fix: accepting a Scene Stash-Box Tagger match still sometimes left a
+  recommendation for the same local scene stuck showing as pending in the
+  list, and opening it displayed "dismissed" -- not the just-accepted
+  match itself misbehaving, but a *sibling* candidate for the same scene.
+  Accepting one stash-box match for a scene auto-dismisses every other
+  pending candidate for that scene server-side (by design, to avoid
+  duplicate work), but the API response and the plugin's own list-cache
+  cleanup (0.23.1) only accounted for the one recommendation actually
+  accepted, not any siblings dismissed as a side effect. The accept
+  endpoint now also returns those auto-dismissed ids, and the plugin
+  purges every one of them from its cached list too.
+
 ## 2026-09-06
 
 ### 0.32.0 (sidecar) / 0.24.0 (plugin)

@@ -309,9 +309,9 @@ class TestAcceptAction:
         mock_db = MagicMock()
         mock_db.get_recommendation.return_value = accepted_rec
         mock_db.resolve_recommendation.return_value = True
-        mock_db.dismiss_pending_scene_fingerprint_for_scene.return_value = 1
+        mock_db.dismiss_pending_scene_fingerprint_for_scene.return_value = [2]
 
-        await _accept_fingerprint_match(
+        auto_dismissed_rec_ids = await _accept_fingerprint_match(
             stash=mock_stash,
             db=mock_db,
             rec_id=1,
@@ -326,6 +326,12 @@ class TestAcceptAction:
         assert dismiss_call[1]["scene_id"] == "42"
         assert dismiss_call[1]["exclude_rec_id"] == 1
         assert "Auto-dismissed after accepting scene fingerprint match" in dismiss_call[1]["reason"]
+
+        # Callers (the API response, in turn the plugin's own list cache)
+        # need the ids of any siblings that got silently dismissed as a
+        # side effect, not just a count -- see accept_fingerprint_match's
+        # own AcceptFingerprintMatchResponse.auto_dismissed_rec_ids.
+        assert auto_dismissed_rec_ids == [2]
 
 
 class TestAcceptAllAction:
