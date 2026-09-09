@@ -1,3 +1,22 @@
+## 2026-09-09
+
+### 0.33.0 (sidecar)
+- Improvement: `faces`/`catalogue_faces` delta rows are now applied
+  upsert-safe (update an existing embedding_index's fields/vector in
+  place, not just insert a new one) -- required because stash-sense2-
+  data-gen's export_delta.py now computes deltas as a real diff of
+  baseline vs. output, so a row can legitimately represent an already-
+  published face whose gender/age or embedding vector was corrected
+  server-side, not only a brand-new face. An older sidecar's blind
+  insert-only apply would have raised applying such a delta; requires
+  this version or newer to apply one -- an older, unpatched sidecar
+  correctly falls back to a full-zip download instead (min-sidecar-
+  version gating, no crash).
+- The `face_field_updates` delta table/apply path (gender/age/
+  image_sha256 backfilled onto an existing face) is removed -- superseded
+  by the same upsert-safe face handling above, which now covers this
+  case (and the vector-change case it never could) uniformly.
+
 ## 2026-09-08
 
 ### 0.32.2 (sidecar)

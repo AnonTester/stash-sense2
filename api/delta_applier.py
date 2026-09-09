@@ -10,7 +10,7 @@ drop. Because removals are precomputed server-side, applying a delta here
 is purely mechanical replay — no "diff the image list" business logic
 needed client-side, that already happened when the delta was built.
 
-Five independent parts, all applied by `apply_delta_db` below: the
+Four independent parts, all applied by `apply_delta_db` below: the
 `performers`/`faces`/`removed_faces` tables above (stashbox-sourced,
 identity is `(endpoint, stashbox_id)` via the `stashbox_ids` table --
 this is still the primary resolution path, but a delta.db built after
@@ -27,16 +27,27 @@ performer's id is permanent), `catalogue_removed_performers` (a catalogue
 performer a human fully disabled via stash-sense2-data-gen's review_app --
 same raw-id identity as the upsert path, see `_remove_catalogue_performer`'s
 own docstring for why their faces are normally already gone by the time
-this runs), `face_field_updates` (gender/age/image_sha256 backfilled
-server-side onto a face that already shipped in an earlier release --
-identity is `embedding_index`, applied as a plain field UPDATE with no
-INSERT/identity-resolution involved), and `face_owner_repair` (one-off,
-only present in a full-identity-resync repair delta -- see that table's
-own comment in export_delta.py's DELTA_SCHEMA and `apply_delta_db`'s own
-comment on it below). All five of these table groups are strictly
-additive and may not exist in an older delta.db -- `_has_table` guards
-every read of them, so applying an older delta through this code is
-simply a no-op for whichever part it predates, not an error.
+this runs), and `face_owner_repair` (one-off, only present in a
+full-identity-resync repair delta -- see that table's own comment in
+export_delta.py's DELTA_SCHEMA and `apply_delta_db`'s own comment on it
+below). All four of these table groups are strictly additive and may not
+exist in an older delta.db -- `_has_table` guards every read of them, so
+applying an older delta through this code is simply a no-op for whichever
+part it predates, not an error.
+
+`faces`/`catalogue_faces` rows are upsert-safe (`_upsert_face` below), not
+insert-only: since export_delta.py's 2026-09-09 rework computes the delta
+as a real diff of baseline vs. output, a row can legitimately represent an
+EXISTING embedding_index whose fields or vector changed, not only a
+brand-new face -- including a vector-only change (an already-published
+face's embedding silently corrected server-side), which no earlier
+mechanism (a timestamp-filtered `face_field_updates` table, removed the
+same day) could ever represent at all. A pre-2026-09 client's blind
+`index.add()` + `INSERT INTO faces` would raise on the first such row; this
+is why that fix bumped `MIN_SIDECAR_VERSION` on the data-gen side -- an
+older, unpatched sidecar correctly falls back to a full-zip download
+instead of crashing partway through applying a delta it can't safely
+handle.
 
 Both id-bearing paths above (`_upsert_performer`'s migration branch and
 `_upsert_catalogue_performer`) share one collision guard
@@ -132,14 +143,15 @@ BACKED_UP_FILES = ("performers.db", "face_embeddings.usearch", "faces.json", "pe
 # Mirrors stash-sense2-data-gen's build/schema.py::BACKFILLABLE_FACE_FIELDS
 # exactly (separate repo, can't share the constant directly -- keep the
 # two in sync by hand when a field is added on the generator side). Used
-# both to migrate an old local performers.db that predates a given field
-# (_ensure_columns) and to apply face_field_updates rows generically
-# below. Actual application is tolerant of version skew either way: it
-# only ever touches the intersection of this dict's keys and whatever
-# columns a specific delta.db's face_field_updates table actually has,
-# so an older client applying a delta with a newer field (or a newer
-# client applying an older delta lacking one) both degrade gracefully
-# instead of erroring on an unrecognized column.
+# to migrate an old local performers.db that predates a given field
+# (_ensure_columns, below) so `_upsert_face` always has somewhere to write
+# gender/gender_confidence/estimated_age/image_sha256. `_upsert_face`
+# itself tolerates a delta.db built before one of these columns existed
+# via `_face_field(row, name)`'s `in row.keys()` check, writing NULL
+# rather than erroring on a missing key -- no longer routed through this
+# dict directly (the face_field_updates table/apply path it used to drive
+# was removed 2026-09-09 along with the timestamp-based delta mechanism
+# it belonged to).
 BACKFILLABLE_FACE_FIELDS = {
     "gender": "TEXT", "gender_confidence": "REAL",
     "estimated_age": "INTEGER", "image_sha256": "TEXT",
@@ -522,6 +534,55 @@ def _remove_catalogue_performer(conn: sqlite3.Connection, index: Index, performe
     conn.execute("DELETE FROM performers WHERE id = ?", (performer_id,))
 
 
+def _upsert_face(conn: sqlite3.Connection, index: Index, fields: dict) -> bool:
+    """Insert or update one face row + its usearch vector, keyed by
+    embedding_index. Returns True for a brand-new face, False for an
+    existing one just updated in place.
+
+    Required upsert-safety fix for stash-sense2-data-gen's post-2026-09-09
+    export_delta.py (see its own module docstring): that rework computes
+    the delta as a real diff of baseline vs. output, so a `faces`/
+    `catalogue_faces` row can now legitimately represent an EXISTING
+    embedding_index whose fields or vector changed, not only a brand-new
+    face -- the previous blind `index.add()` + `INSERT INTO faces` here
+    would raise (usearch duplicate id / SQLite UNIQUE constraint on
+    embedding_index) the first time that happened. `fields` must have:
+    performer_id, embedding_index, image_url, source_endpoint,
+    quality_score, yaw, gender, gender_confidence, estimated_age,
+    image_sha256, embedding (raw float32[512] bytes)."""
+    eidx = fields["embedding_index"]
+    vec = np.frombuffer(fields["embedding"], dtype=np.float32)
+    exists = conn.execute("SELECT 1 FROM faces WHERE embedding_index = ?", (eidx,)).fetchone() is not None
+
+    # usearch has no in-place "replace" -- remove-then-add is the same
+    # pattern stash-sense2-data-gen's own repair scripts use for this.
+    if eidx in index:
+        index.remove(eidx)
+    index.add(eidx, vec)
+
+    row_fields = {k: fields[k] for k in (
+        "performer_id", "image_url", "source_endpoint", "quality_score", "yaw",
+        "gender", "gender_confidence", "estimated_age", "image_sha256",
+    )}
+    if exists:
+        set_clause = ", ".join(f"{k} = :{k}" for k in row_fields)
+        conn.execute(
+            f"UPDATE faces SET {set_clause} WHERE embedding_index = :embedding_index",
+            {**row_fields, "embedding_index": eidx},
+        )
+        return False
+    conn.execute(
+        """
+        INSERT INTO faces (performer_id, embedding_index, image_url, source_endpoint,
+                            quality_score, yaw, gender, gender_confidence, estimated_age, image_sha256)
+        VALUES (:performer_id, :embedding_index, :image_url, :source_endpoint,
+                :quality_score, :yaw, :gender, :gender_confidence, :estimated_age, :image_sha256)
+        """,
+        {**row_fields, "embedding_index": eidx},
+    )
+    return True
+
+
 def apply_delta_db(
     delta_db_path: Path, data_dir: Path, progress_cb: Optional[Callable[[int], None]] = None,
 ) -> dict[str, int]:
@@ -559,15 +620,12 @@ def apply_delta_db(
 
     catalogue_tables_present = _has_table(delta_conn, "catalogue_performers")
     catalogue_removals_present = _has_table(delta_conn, "catalogue_removed_performers")
-    field_updates_present = _has_table(delta_conn, "face_field_updates")
     owner_repairs_present = _has_table(delta_conn, "face_owner_repair")
     progress_tables = ["performers", "faces", "removed_faces"]
     if catalogue_tables_present:
         progress_tables += ["catalogue_performers", "catalogue_performer_urls", "catalogue_faces"]
     if catalogue_removals_present:
         progress_tables += ["catalogue_removed_performers"]
-    if field_updates_present:
-        progress_tables += ["face_field_updates"]
     if owner_repairs_present:
         progress_tables += ["face_owner_repair"]
     total_rows = sum(delta_conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in progress_tables)
@@ -579,8 +637,15 @@ def apply_delta_db(
         if progress_cb and total_rows and processed % _PROGRESS_TICK_ROWS == 0:
             progress_cb(min(99, int(100 * processed / total_rows)))
 
+    def _face_field(row: sqlite3.Row, name: str):
+        # Tolerates an older delta.db built before gender/gender_confidence/
+        # estimated_age/image_sha256 were added to the faces/catalogue_faces
+        # tables (2026-09-09's diff-based export rework) -- simply writes
+        # NULL for those columns rather than erroring on a missing key.
+        return row[name] if name in row.keys() else None
+
     touched_performers: set[int] = set()
-    upserted = removed = faces_added = faces_removed = 0
+    upserted = removed = faces_added = faces_updated = faces_removed = 0
 
     for p in delta_conn.execute("SELECT * FROM performers"):
         if p["action"] == "removed":
@@ -600,19 +665,19 @@ def apply_delta_db(
             logger.warning("Delta face for unknown performer %s:%s — skipping", f["endpoint"], f["stashbox_id"])
             _tick()
             continue
-        vec = np.frombuffer(f["embedding"], dtype=np.float32)
-        index.add(f["embedding_index"], vec)
-        conn.execute(
-            """
-            INSERT INTO faces (performer_id, embedding_index, image_url,
-                                source_endpoint, quality_score, yaw)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (performer_id, f["embedding_index"], f["image_url"],
-             f["endpoint"], f["quality_score"], f["yaw"]),
-        )
+        is_new = _upsert_face(conn, index, {
+            "performer_id": performer_id, "embedding_index": f["embedding_index"],
+            "image_url": f["image_url"], "source_endpoint": f["endpoint"],
+            "quality_score": f["quality_score"], "yaw": f["yaw"],
+            "gender": _face_field(f, "gender"), "gender_confidence": _face_field(f, "gender_confidence"),
+            "estimated_age": _face_field(f, "estimated_age"), "image_sha256": _face_field(f, "image_sha256"),
+            "embedding": f["embedding"],
+        })
         touched_performers.add(performer_id)
-        faces_added += 1
+        if is_new:
+            faces_added += 1
+        else:
+            faces_updated += 1
         _tick()
 
     for r in delta_conn.execute("SELECT * FROM removed_faces"):
@@ -630,7 +695,7 @@ def apply_delta_db(
     # see _has_table's docstring and stash-sense2-data-gen's
     # build/export_delta.py for why these are separate, additive tables
     # rather than folded into the loops above.
-    catalogue_upserted = catalogue_faces_added = 0
+    catalogue_upserted = catalogue_faces_added = catalogue_faces_updated = 0
     if catalogue_tables_present:
         for p in delta_conn.execute("SELECT * FROM catalogue_performers"):
             _upsert_catalogue_performer(conn, p)
@@ -643,19 +708,19 @@ def apply_delta_db(
             _tick()
 
         for f in delta_conn.execute("SELECT * FROM catalogue_faces"):
-            vec = np.frombuffer(f["embedding"], dtype=np.float32)
-            index.add(f["embedding_index"], vec)
-            conn.execute(
-                """
-                INSERT INTO faces (performer_id, embedding_index, image_url,
-                                    source_endpoint, quality_score, yaw)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (f["performer_id"], f["embedding_index"], f["image_url"],
-                 f["source_endpoint"], f["quality_score"], f["yaw"]),
-            )
+            is_new = _upsert_face(conn, index, {
+                "performer_id": f["performer_id"], "embedding_index": f["embedding_index"],
+                "image_url": f["image_url"], "source_endpoint": f["source_endpoint"],
+                "quality_score": f["quality_score"], "yaw": f["yaw"],
+                "gender": _face_field(f, "gender"), "gender_confidence": _face_field(f, "gender_confidence"),
+                "estimated_age": _face_field(f, "estimated_age"), "image_sha256": _face_field(f, "image_sha256"),
+                "embedding": f["embedding"],
+            })
             touched_performers.add(f["performer_id"])
-            catalogue_faces_added += 1
+            if is_new:
+                catalogue_faces_added += 1
+            else:
+                catalogue_faces_updated += 1
             _tick()
 
     # Fully-disabled catalogue performers (see _remove_catalogue_performer's
@@ -668,36 +733,6 @@ def apply_delta_db(
             _remove_catalogue_performer(conn, index, row["id"])
             catalogue_performers_removed += 1
             _tick()
-
-    # Field-only updates to faces that already existed before this delta
-    # (e.g. gender/age inference or image_sha256 backfilled server-side
-    # after the face's own release) -- see stash-sense2-data-gen's
-    # build/export_delta.py module docstring. A plain UPDATE by
-    # embedding_index, no identity resolution or performer touch needed:
-    # unlike new/removed faces, this never changes face_count.
-    #
-    # `applicable_fields` is the intersection of what this client knows
-    # about (BACKFILLABLE_FACE_FIELDS above) and what this specific
-    # delta.db's face_field_updates table actually has -- tolerates
-    # version skew both directions: a delta built with a newer field this
-    # client predates just never gets that column touched, and an older
-    # delta missing a field this client already knows about simply never
-    # writes it either. Still ticks through every row even when nothing's
-    # applicable, so progress accounting stays correct.
-    field_updates_applied = 0
-    if field_updates_present:
-        delta_field_columns = {row[1] for row in delta_conn.execute("PRAGMA table_info(face_field_updates)")}
-        applicable_fields = [f for f in BACKFILLABLE_FACE_FIELDS if f in delta_field_columns]
-        if applicable_fields:
-            set_clause = ", ".join(f"{f} = ?" for f in applicable_fields)
-            for u in delta_conn.execute("SELECT * FROM face_field_updates"):
-                values = tuple(u[f] for f in applicable_fields) + (u["embedding_index"],)
-                conn.execute(f"UPDATE faces SET {set_clause} WHERE embedding_index = ?", values)
-                field_updates_applied += 1
-                _tick()
-        else:
-            for _ in delta_conn.execute("SELECT embedding_index FROM face_field_updates"):
-                _tick()
 
     # One-off (only present in a full-identity-resync repair delta -- see
     # stash-sense2-data-gen's export_delta.py DELTA_SCHEMA comment on
@@ -731,11 +766,10 @@ def apply_delta_db(
 
     return {
         "performers_upserted": upserted, "performers_removed": removed,
-        "faces_added": faces_added, "faces_removed": faces_removed,
+        "faces_added": faces_added, "faces_updated": faces_updated, "faces_removed": faces_removed,
         "catalogue_performers_upserted": catalogue_upserted,
-        "catalogue_faces_added": catalogue_faces_added,
+        "catalogue_faces_added": catalogue_faces_added, "catalogue_faces_updated": catalogue_faces_updated,
         "catalogue_performers_removed": catalogue_performers_removed,
-        "face_field_updates_applied": field_updates_applied,
         "face_owner_repairs_applied": owner_repairs_applied,
     }
 
@@ -818,9 +852,11 @@ async def apply_delta_chain(
     work_dir = data_dir / f"delta_work_{int(time.time())}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    totals = {"performers_upserted": 0, "performers_removed": 0, "faces_added": 0, "faces_removed": 0,
-              "catalogue_performers_upserted": 0, "catalogue_faces_added": 0,
-              "catalogue_performers_removed": 0, "face_field_updates_applied": 0,
+    totals = {"performers_upserted": 0, "performers_removed": 0,
+              "faces_added": 0, "faces_updated": 0, "faces_removed": 0,
+              "catalogue_performers_upserted": 0,
+              "catalogue_faces_added": 0, "catalogue_faces_updated": 0,
+              "catalogue_performers_removed": 0,
               "face_owner_repairs_applied": 0}
 
     try:
