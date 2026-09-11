@@ -1039,7 +1039,20 @@
 
     const select = document.createElement('select');
     select.className = 'ss-pagination-select';
-    for (let i = 0; i < totalPages; i++) {
+    // Windowed to +-15 around the current page (max 31 <option>s), not
+    // every page -- a large scene/performer library can page into the
+    // thousands, and dumping that many <option> elements into the DOM on
+    // every popover build is real, pointless work (mirrors the same fix
+    // applied to stash-sense2-data-gen's own review_app pagination,
+    // 2026-09-11, which hit this for real at 11,752 pages). The editable
+    // number input below still reaches any page directly, so nothing is
+    // actually unreachable -- and unlike that other fix, goToPage()/
+    // commitInput() here already close over the real `totalPages` param
+    // directly rather than ever re-deriving it by counting these
+    // <option>s, so there's no second place that needed correcting.
+    const windowStart = currentPage - 15 > 0 ? currentPage - 15 : 0;
+    const windowEnd = currentPage + 16 < totalPages ? currentPage + 16 : totalPages;
+    for (let i = windowStart; i < windowEnd; i++) {
       const opt = document.createElement('option');
       opt.value = String(i);
       opt.textContent = `Page ${i + 1}`;
