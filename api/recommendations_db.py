@@ -875,7 +875,18 @@ class RecommendationsDB:
                 ") DESC, created_at DESC, id DESC LIMIT ? OFFSET ?"
             )
         else:
-            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            # id DESC tiebreak matters here, not just cosmetically: this
+            # branch backs _load_all_recommendations' OFFSET-paginated full-
+            # tab fetch (scene_face_match's grouping, among others), and
+            # created_at has only 1-second resolution (datetime('now')) --
+            # a batch analyzer run inserts many rows within the same
+            # second, so without a unique secondary key, tied rows have no
+            # guaranteed stable order across separate queries. That let two
+            # consecutive full-tab fetches (e.g. before/after an unrelated
+            # accept/dismiss elsewhere) hand back a different row for the
+            # same OFFSET window, which surfaced as pending cards appearing
+            # to shuffle or swap between renders.
+            query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
 
         with self._connection() as conn:

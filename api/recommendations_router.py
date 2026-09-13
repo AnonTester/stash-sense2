@@ -878,23 +878,39 @@ def _build_scene_face_match_group_for_recommendation(
     if not scene_id:
         return rec
 
-    grouped_recs = _group_scene_face_match_recommendations(
-        _load_all_recommendations(
-            db,
-            status=rec.status,
-            type="scene_face_match",
-            target_type=rec.target_type,
+    # `rec` was loaded by the group's synthetic representative id
+    # (_group_scene_face_match_recommendations' top_rec, picked purely by
+    # confidence among whichever status bucket was being listed at build
+    # time) -- its own status is not necessarily the scene's real overall
+    # status. That representative row can itself get individually
+    # dismissed (the per-candidate Dismiss button) while sibling
+    # candidates for the same scene are still pending; grouping by
+    # rec.status verbatim in that case reported the whole scene as
+    # "dismissed" and dropped its still-pending candidates entirely, since
+    # they live in a different status bucket than rec.status now says
+    # (confirmed live: dismissing the higher-confidence of two candidates
+    # left the other one, still pending, invisible on reopen). A scene
+    # with any pending candidate at all is still pending, full stop --
+    # only fall back to rec.status's own bucket for a scene that's
+    # genuinely fully resolved/dismissed.
+    def _find_group(status: str) -> Optional[Recommendation]:
+        grouped_recs = _group_scene_face_match_recommendations(
+            _load_all_recommendations(
+                db, status=status, type="scene_face_match", target_type=rec.target_type,
+            )
         )
-    )
-    match = None
-    for grouped_rec in grouped_recs:
-        if _extract_scene_face_match_scene_id(grouped_rec) == scene_id:
-            match = grouped_rec
-            break
+        for grouped_rec in grouped_recs:
+            if _extract_scene_face_match_scene_id(grouped_rec) == scene_id:
+                return grouped_rec
+        return None
+
+    match = _find_group("pending")
+    if match is None and rec.status != "pending":
+        match = _find_group(rec.status)
     if match is None:
         return rec
 
-    if rec.status == "pending":
+    if match.status == "pending":
         dismissed_group = _dismissed_scene_face_match_group(db, scene_id, rec.target_type)
         match.details["dismissed_candidates"] = dismissed_group["candidates"]
         match.details["dismissed_persons"] = dismissed_group["persons"]

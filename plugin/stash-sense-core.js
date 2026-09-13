@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.24.2';
+  const PLUGIN_VERSION = '0.25.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -40,7 +40,7 @@
   // three new /recommendations/actions/*-scene-face-matches* endpoints, and
   // PerformerMatchResponse.top_timestamps_sec -- none of which exist on an
   // older sidecar.
-  const MIN_SIDECAR_VERSION = '0.24.0';
+  const MIN_SIDECAR_VERSION = '0.34.0';
 
   // Default settings
   const DEFAULTS = {
@@ -274,6 +274,25 @@
   /** Returns { current, required, outdated } from the last checkHealth() call, or null if unknown/unavailable. */
   function getSidecarVersionInfo() {
     return sidecarVersionInfo;
+  }
+
+  /**
+   * Full sidecar + plugin changelog history, on demand -- unlike
+   * checkHealth()'s own sidecarVersionInfo.changelog/pluginVersionInfo.
+   * changelog (only "what's new since my version," empty once you're
+   * already on the latest), this always has content to show. Returns
+   * { sidecar: [...], plugin: [...] } or null on failure.
+   */
+  async function fetchChangelog() {
+    try {
+      const settings = await getSettings();
+      const result = await runPluginOperation('release_changelog', { sidecar_url: settings.sidecarUrl });
+      if (result.error) return null;
+      return { sidecar: result.sidecar || [], plugin: result.plugin || [] };
+    } catch (e) {
+      console.error(`[${PLUGIN_NAME}] Failed to fetch changelog:`, e);
+      return null;
+    }
   }
 
   // ==================== Stash GraphQL Helpers ====================
@@ -808,6 +827,7 @@
     getSidecarVersionInfo,
     getPluginVersionInfo,
     compareVersions,
+    fetchChangelog,
 
     // Stash GraphQL
     stashQuery,

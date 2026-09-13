@@ -31,13 +31,12 @@
       const pluginInfo = SS.getPluginVersionInfo();
       if (status === true && versionInfo && versionInfo.outdated) return 'ss-outdated';
       if (status === true && pluginInfo && pluginInfo.tooOld) return 'ss-outdated';
-      // Non-required "a newer release exists" -- distinct, lower-alarm styling
-      // from the red required-update ss-outdated class (mirrors the existing
-      // .ss-db-stat-local vs .ss-db-stat-warning distinction elsewhere in this
-      // plugin: FYI vs action-needed).
-      if (status === true && ((versionInfo && versionInfo.updateAvailable) || (pluginInfo && pluginInfo.updateAvailable))) {
-        return 'ss-update-available';
-      }
+      // Non-required "a newer release exists" used to recolor this same
+      // dot blue (ss-update-available) -- removed: indistinguishable at a
+      // glance from "something's wrong" despite meaning "connected fine,
+      // just optionally updatable" (confirmed confusing in practice
+      // 2026-09-13). The header's own changelog button is now how a user
+      // checks this instead of a passive dot recolor.
       if (status === true) return 'ss-connected';
       if (status === false) return 'ss-disconnected';
       return '';
@@ -2414,23 +2413,22 @@
         document.querySelectorAll(`.ss-identify-btn[data-ss-plugin="${SS.PLUGIN_ID}"]`).forEach(btn => {
           const icon = btn.querySelector('.ss-btn-icon');
           if (!icon) return;
-          icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated', 'ss-update-available');
+          icon.classList.remove('ss-connected', 'ss-disconnected', 'ss-outdated');
           if (outdated) {
             // Connected, but either side is below the other's required
             // floor -- distinct from a plain "disconnected" so it's clear
             // the fix is a version mismatch, not connectivity.
             icon.classList.add('ss-outdated');
             btn.title = statusTitle(btn.title);
-          } else if (updateAvailable) {
-            // Connected and both sides meet their required floors, but a
-            // newer (non-required) release exists for one of them --
-            // lower-alarm styling than ss-outdated, FYI rather than
-            // action-needed.
-            icon.classList.add('ss-update-available');
-            btn.title = statusTitle(btn.title);
           } else if (connected === true) {
+            // Connected and both sides meet their required floors -- always
+            // green, even when updateAvailable (no separate color for that
+            // anymore, see statusIconClass()'s own comment on why the blue
+            // ss-update-available dot was removed); the tooltip still
+            // mentions a newer release when one exists, just without
+            // recoloring the dot over it.
             icon.classList.add('ss-connected');
-            if (btn.dataset.defaultTitle) btn.title = btn.dataset.defaultTitle;
+            btn.title = updateAvailable ? statusTitle(btn.title) : (btn.dataset.defaultTitle || btn.title);
           } else if (connected === false) {
             icon.classList.add('ss-disconnected');
             btn.title = statusTitle(btn.title);

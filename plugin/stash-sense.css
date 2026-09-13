@@ -52,12 +52,12 @@
   background: #fd7e14;
 }
 
-/* Connected, both sides meet their required floor, but a newer (optional)
-   release exists -- lower-alarm blue, distinct from the orange/red
-   required-attention states above. */
-.ss-btn-icon.ss-update-available::after {
-  background: #0d6efd;
-}
+/* ss-update-available (blue) removed 2026-09-13 -- confusingly
+   indistinguishable from "something's wrong" at a glance despite meaning
+   "connected fine, just optionally updatable". The dot stays plain green
+   (ss-connected) in that case now; see stash-sense.js's own
+   statusIconClass()/updateButtonStatus() for the still-present tooltip
+   text and the new header changelog button. */
 
 /* Floating button (fallback) */
 .ss-floating-btn {
@@ -941,6 +941,13 @@
 
 .ss-version-mismatch {
   color: #dc3545;
+  font-weight: 600;
+}
+
+/* Header's per-component "a newer (non-required) release exists" text --
+   see stash-sense-recommendations.js's updateStatusArea() own comment. */
+.ss-update-available-text {
+  color: #0d6efd;
   font-weight: 600;
 }
 

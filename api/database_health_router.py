@@ -156,7 +156,15 @@ async def health_check(plugin_version: Optional[str] = None):
         status="healthy",
         database_loaded=True,
         performer_count=len(_recognizer.performers),
-        face_count=len(_recognizer.faces),
+        # len(_recognizer.index), not len(_recognizer.faces): faces.json is
+        # a sparse array positionally indexed by usearch vector id (so the
+        # sidecar can look a matched id straight up), padded with None for
+        # every id a historical deletion has ever retired -- its length is
+        # the vector-id address-space size, not a real face count, and
+        # only grows over the dataset's life. The loaded usearch index
+        # itself tracks real occupied entries (len() drops on remove()),
+        # which is what "how many faces are in the database" should mean.
+        face_count=len(_recognizer.index),
         version=_version,
         face_recognition_loading=face_recognition_loading,
         **release,
@@ -181,6 +189,19 @@ async def ffmpeg_health():
     }
 
 
+@router.get("/release/changelog")
+async def release_changelog():
+    """Full sidecar + plugin changelog history, most recent first --
+    unlike /health's own sidecar_changelog/plugin_changelog fields (which
+    are only ever "what's new since MY version," empty for anyone already
+    on the latest), this is for a user-triggered "show me the changelog"
+    button that has to work even when there's no pending update at all."""
+    return {
+        "sidecar": release_info.full_changelog("sidecar"),
+        "plugin": release_info.full_changelog("plugin"),
+    }
+
+
 @router.get("/database/info", response_model=DatabaseInfo)
 async def database_info():
     """Get information about the loaded database.
@@ -191,7 +212,7 @@ async def database_info():
     # Use live counts from recognizer if loaded, otherwise fall back to manifest
     if _recognizer is not None:
         performer_count = len(_recognizer.performers)
-        face_count = len(_recognizer.faces)
+        face_count = len(_recognizer.index)  # see /health's own comment on why not len(_recognizer.faces)
     else:
         performer_count = _db_manifest.get("performer_count", 0)
         face_count = _db_manifest.get("face_count", 0)

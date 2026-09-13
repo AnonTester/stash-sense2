@@ -594,17 +594,87 @@
         const sHtml = sVer ? `<span class="ss-version-mismatch">${sVer}</span>` : '';
         versionHtml = [pHtml, sHtml].filter(Boolean).join(' <span class="ss-status-sep">-</span> ');
       } else {
-        versionHtml = `<span>${[pVer, sVer].filter(Boolean).join(' - ')}</span>`;
+        // Non-required "a newer release exists" for either side -- reuses
+        // the same cached version info checkHealth() already computes for
+        // the Identify button's own tooltip (stash-sense.js's
+        // statusTitle()), rather than re-deriving it here. Per-component
+        // (sidecar/plugin can each be updatable independently), lower-alarm
+        // blue text -- distinct from ss-version-mismatch's red, and (unlike
+        // the removed button dot this replaces) always paired with a label
+        // so it can't be misread as a connectivity problem.
+        const sidecarInfo = SS.getSidecarVersionInfo();
+        const pluginInfo = SS.getPluginVersionInfo();
+        const sidecarUpdatable = sidecarInfo && sidecarInfo.updateAvailable;
+        const pluginUpdatable = pluginInfo && pluginInfo.updateAvailable;
+
+        const pHtml = pVer ? (pluginUpdatable
+          ? `<span class="ss-update-available-text" title="A newer plugin release is available (v${pluginInfo.latestVersion})">${pVer} &uarr;</span>`
+          : `<span>${pVer}</span>`) : '';
+        const sHtml = sVer ? (sidecarUpdatable
+          ? `<span class="ss-update-available-text" title="A newer sidecar release is available (v${sidecarInfo.latestVersion})">${sVer} &uarr;</span>`
+          : `<span>${sVer}</span>`) : '';
+        versionHtml = [pHtml, sHtml].filter(Boolean).join(' <span class="ss-status-sep">-</span> ');
       }
     }
 
     statusArea.className = `ss-app-header-right ${connected ? 'connected' : 'disconnected'}`;
     statusArea.innerHTML = `
       ${versionHtml}
+      <button type="button" id="ss-changelog-btn" title="View changelog" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.7;padding:0 4px;font-size:0.85rem;line-height:1;">&#128220;</button>
       <span class="ss-status-dot"></span>
       <span class="ss-status-label">${connected ? 'Connected' : 'Disconnected'}</span>
       ${sidecarStatus?.error ? `<span class="ss-status-error">${sidecarStatus.error}</span>` : ''}
     `;
+    // Re-bound on every call (innerHTML above just replaced the element) --
+    // works regardless of connection state or whether an update is
+    // available, unlike checkHealth()'s own changelog fields (see
+    // fetchChangelog()'s own docstring) which are empty once you're
+    // already on the latest release.
+    statusArea.querySelector('#ss-changelog-btn')?.addEventListener('click', showChangelogModal);
+  }
+
+  async function showChangelogModal() {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+
+    const modal = document.createElement('div');
+    modal.style.cssText = 'background:#2a2a2a;border:1px solid #444;border-radius:10px;padding:1.5rem;'
+      + 'max-width:520px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);color:#fff;';
+    modal.innerHTML = '<div class="ss-loading-inline"><div class="ss-spinner"></div></div>'
+      + '<p style="text-align:center;margin-top:0.5rem;">Loading changelog...</p>';
+    overlay.appendChild(modal);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+
+    const data = await SS.fetchChangelog();
+
+    const renderEntries = (entries) => {
+      if (!entries || !entries.length) {
+        return '<p style="font-size:0.85rem;opacity:0.6;">No changelog entries found.</p>';
+      }
+      return entries.map(e => `
+        <div style="margin-bottom:10px;">
+          <div style="font-weight:600;font-size:0.85rem;">v${SS.escapeHtml(e.version)}${e.date ? ` <span style="font-weight:400;opacity:0.6;">(${SS.escapeHtml(e.date)})</span>` : ''}</div>
+          <ul style="margin:4px 0 0 0;padding-left:18px;font-size:0.85rem;opacity:0.85;">
+            ${(e.bullets || []).map(b => `<li>${SS.escapeHtml(b)}</li>`).join('')}
+          </ul>
+        </div>
+      `).join('');
+    };
+
+    modal.innerHTML = `
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px;">
+        <h3 style="margin:0;font-size:18px;">${SS.PLUGIN_NAME}: Changelog</h3>
+        <button id="ss-changelog-close" style="background:none;border:none;font-size:22px;color:#888;cursor:pointer;padding:0;line-height:1;" aria-label="Close">&times;</button>
+      </div>
+      ${data ? `
+        <h4 style="margin:14px 0 4px 0;font-size:0.9rem;opacity:0.8;">Sidecar (current: v${SS.escapeHtml(SS.getSidecarVersionInfo()?.current || '?')})</h4>
+        ${renderEntries(data.sidecar)}
+        <h4 style="margin:14px 0 4px 0;font-size:0.9rem;opacity:0.8;">Plugin (current: v${SS.PLUGIN_VERSION})</h4>
+        ${renderEntries(data.plugin)}
+      ` : '<p style="font-size:0.85rem;opacity:0.7;">Could not load changelog -- is the sidecar reachable?</p>'}
+    `;
+    modal.querySelector('#ss-changelog-close').addEventListener('click', () => overlay.remove());
   }
 
   async function renderDashboard(mainContainer, content) {
@@ -1984,6 +2054,58 @@
     if (idx === -1) return;
     cache.recommendations.splice(idx, 1);
     cache.total = Math.max(0, cache.total - 1);
+  }
+
+  // Per-candidate dismiss/undismiss inside a scene_face_match detail view
+  // (the "Dismiss"/"Undismiss" toggle on one person's one candidate) never
+  // goes through showSuccessAndReturn -- the user stays on the detail view
+  // to keep acting on other candidates -- so nothing patches the cached
+  // list card for that scene. A plain Back button afterwards then
+  // re-rendered the list from the stale cached card: still listing a name
+  // that was just dismissed (or missing one that was just restored), and
+  // never dropping the card even when every candidate on it had ended up
+  // dismissed (which should read the same as a Reject All). Mirrors what a
+  // fresh grouped fetch would actually contain: a dismissed candidate
+  // doesn't linger in the pending group at all, it moves to a separate
+  // dismissed-status group entirely (see _group_scene_face_match_
+  // recommendations server-side), so here too the candidate is spliced out
+  // (or back in) rather than just having a status flag flipped in place.
+  function patchListCacheForCandidateDismissal(groupRecId, candidateRecId, dismissing, personsSnapshot) {
+    const cache = currentState.listCache;
+    if (!cache) return;
+    const group = cache.recommendations.find(r => r.id === groupRecId);
+    if (!group) return;
+    const details = group.details || (group.details = {});
+    const candidates = details.candidates || (details.candidates = []);
+
+    if (dismissing) {
+      const idx = candidates.findIndex(c => c.recommendation_id === candidateRecId);
+      if (idx !== -1) candidates.splice(idx, 1);
+    } else if (!candidates.some(c => c.recommendation_id === candidateRecId)) {
+      // Undismiss: re-add the candidate's own data if it isn't already
+      // present -- taken from the detail view's own in-memory person list
+      // (personsSnapshot), which still has it regardless of dismiss state.
+      for (const person of (personsSnapshot || [])) {
+        const found = (person.candidates || []).find(c => c.recommendation_id === candidateRecId);
+        if (found) { candidates.push({ ...found, status: 'pending' }); break; }
+      }
+    }
+
+    if (candidates.length === 0) {
+      // No pending candidates left anywhere in the scene -- same end state
+      // as Reject All, so the card must disappear the same way.
+      removeFromListCache(groupRecId);
+      return;
+    }
+
+    const byPerson = new Map();
+    for (const c of candidates) {
+      const pid = c.person_id ?? 0;
+      if (!byPerson.has(pid)) byPerson.set(pid, { person_id: pid, frame_count: c.frame_count, candidates: [] });
+      byPerson.get(pid).candidates.push(c);
+    }
+    details.persons = Array.from(byPerson.keys()).sort((a, b) => a - b).map(pid => byPerson.get(pid));
+    details.candidate_count = candidates.length;
   }
 
   // Bulk actions (Accept All / Dismiss All) change an unknown, unbounded
@@ -6507,6 +6629,7 @@
           }
           btn.textContent = dismissing ? 'Undismiss' : 'Dismiss';
           dismissedCount += dismissing ? 1 : -1;
+          patchListCacheForCandidateDismissal(rec.id, recId, dismissing, persons);
           const toggleBtn = container.querySelector('#ss-sfm-toggle-dismissed-btn');
           if (toggleBtn) {
             const showing = !container.querySelector('#ss-sfm-dismissed-section')?.hidden;
@@ -6541,6 +6664,7 @@
         btn.textContent = 'Undismissing...';
         try {
           await RecommendationsAPI.undismissSceneFaceMatch(recId);
+          patchListCacheForCandidateDismissal(rec.id, recId, false, dismissedPersons);
           showToast('Match restored -- reloading...', 'info');
           // A full re-fetch is simplest and correct: undismissing can move
           // a candidate back into the pending person list (possibly a

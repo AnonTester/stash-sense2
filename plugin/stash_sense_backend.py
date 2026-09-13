@@ -81,6 +81,8 @@ def main():
         result = sidecar_get(sidecar_url, f"/identify/scene/{scene_id}/progress", timeout=10)
     elif mode == "database_info":
         result = database_info(sidecar_url)
+    elif mode == "release_changelog":
+        result = release_changelog(sidecar_url)
     elif mode == "db_check_update":
         # force=True only for the "Refresh" button's own explicit request --
         # the default (routine page render) must use the sidecar's own
@@ -434,6 +436,20 @@ def database_info(sidecar_url):
         if response.ok:
             return response.json()
         return {"error": f"Failed to get database info: HTTP {response.status_code}"}
+    except requests.RequestException as e:
+        return {"error": f"Request failed: {e}"}
+
+
+def release_changelog(sidecar_url):
+    """Full sidecar + plugin changelog history, for the header's
+    user-triggered changelog button -- see release_info.py's own
+    full_changelog() docstring for why /health's changelog fields alone
+    can't serve this (they're empty once you're already on the latest)."""
+    try:
+        response = requests.get(f"{sidecar_url}/release/changelog", timeout=10)
+        if response.ok:
+            return response.json()
+        return {"error": f"Failed to get changelog: HTTP {response.status_code}"}
     except requests.RequestException as e:
         return {"error": f"Request failed: {e}"}
 

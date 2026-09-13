@@ -149,6 +149,18 @@ def changelog_since(component: str, since_version: Optional[str]) -> list[dict]:
     return entries
 
 
+def full_changelog(component: str) -> list[dict]:
+    """Every changelog.txt entry ever recorded for `component`, most
+    recent first, regardless of what's currently installed -- for a
+    user-triggered "show me the changelog" action, as opposed to
+    changelog_since()'s "what's new since my version" (which is
+    necessarily empty for anyone already on the latest release, so can't
+    serve this). "0" always compares less than any real version string,
+    so this reuses changelog_since()'s own filtering/parsing unchanged
+    rather than duplicating it."""
+    return changelog_since(component, "0")
+
+
 class ReleaseInfoCache:
     """In-memory cache refreshed by the background loop below; `/health`
     reads it synchronously via get_info(). One instance, module-level

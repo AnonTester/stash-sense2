@@ -133,7 +133,10 @@ class FaceRecognizer:
                 for uid in group:
                     self.performer_link_index[uid] = [other for other in group if other != uid]
 
-        print(f"Loaded {len(self.faces)} faces, {len(self.performers)} performers, "
+        # len(self.index), not len(self.faces): see database_health_router.py's
+        # own /health comment for why the latter is an inflated address-space
+        # size, not a real face count.
+        print(f"Loaded {len(self.index)} faces, {len(self.performers)} performers, "
               f"{len(self.performer_link_index)} performers in a linked group")
 
         # Optionally load the local performer index -- built from this

@@ -1,3 +1,68 @@
+## 2026-09-13
+
+### 0.34.0 (sidecar)
+- Feature: `GET /release/changelog` -- full sidecar+plugin changelog
+  history, most recent first, regardless of what's currently installed.
+  `/health`'s own `sidecar_changelog`/`plugin_changelog` fields only ever
+  carry "what's new since my version," which is empty for anyone already
+  on the latest release -- this exists specifically to serve the plugin's
+  new user-triggered changelog button (see the plugin's own 0.25.0 entry
+  below), which needs something to show even with no pending update.
+- Fix: `/health` and `/database/info` reported `face_count` as
+  `len(_recognizer.faces)` -- `faces.json`'s own sparse array, positionally
+  indexed by usearch vector id so the sidecar can look a matched id
+  straight up, padded with `null` for every id a historical deletion has
+  ever retired. Its length is the vector-id address-space size, not a real
+  face count, and only grows over the dataset's life (a ~193k-face gap
+  confirmed on one real deployment). Both endpoints now report
+  `len(_recognizer.index)` instead -- the loaded usearch index's real,
+  currently-occupied entry count.
+- Fix: `get_recommendations`'s default sort (used to page through, among
+  others, scene_face_match's underlying candidate rows before they're
+  regrouped into scene cards) ordered by `created_at` alone. That column
+  only has 1-second resolution, and a batch analyzer run inserts many rows
+  within the same second, so ties had no guaranteed stable order across
+  separate queries -- two consecutive full-tab fetches could hand back a
+  different row for the same page, which showed up as pending Face
+  Recommendations cards appearing to shuffle or swap after an unrelated
+  accept/dismiss. Added an `id DESC` tiebreak, matching every other branch
+  of this same query.
+- Fix: opening a Face Recommendations scene whose group-representative
+  candidate (`_group_scene_face_match_recommendations`'s top_rec, the id
+  the detail view is addressed by) had itself been individually dismissed
+  showed the whole scene as "dismissed" with its still-pending candidates
+  missing entirely -- `_build_scene_face_match_group_for_recommendation`
+  grouped by that one row's own status instead of checking whether the
+  scene still had any pending candidate at all (confirmed live: dismissing
+  the higher-confidence of two candidates for a scene made the other,
+  still-pending one vanish on reopen). Now always checks the pending
+  bucket for the scene first and only falls back to the representative
+  row's own status if nothing pending remains there.
+
+### 0.25.0 (plugin)
+- Feature: a changelog button (the small document icon) in the dashboard
+  header, between the sidecar/plugin version string and the connection
+  dot -- opens the full sidecar+plugin changelog history on demand via the
+  sidecar's new `/release/changelog` endpoint. Now requires sidecar
+  0.34.0+ (`MIN_SIDECAR_VERSION` bumped accordingly).
+- Improvement: the Identify button's status dot no longer turns blue for
+  "a newer (non-required) release exists" -- confirmed confusing in
+  practice, indistinguishable at a glance from "something's wrong" despite
+  meaning "connected fine, just optionally updatable." The dot stays plain
+  green in that case now (the hover tooltip still mentions the newer
+  version). Replaced with a clearer, per-component indicator in the
+  dashboard header instead: the sidecar and/or plugin version text turns
+  blue with an up-arrow independently, only for whichever side actually
+  has a newer non-required release available.
+- Fix: dismissing (or undismissing) one candidate on a Face Recommendations
+  scene's detail view never updated that scene's cached list card, since
+  that action doesn't return to the list the way accept/reject-all do. A
+  plain Back button afterwards then showed the card with its old candidate
+  names/count, and never dropped the card even once every candidate on it
+  had ended up dismissed (which should behave the same as Reject All). The
+  cached card is now patched in place on every per-candidate dismiss/
+  undismiss.
+
 ## 2026-09-11
 
 ### 0.24.2 (plugin)
