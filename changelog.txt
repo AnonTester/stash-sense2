@@ -1,3 +1,14 @@
+## 2026-09-14
+
+### 0.26.0 (plugin)
+- Feature: the dashboard header's changelog button now opens a 3-tab
+  view instead of one long combined list -- "What's New" (the 2 most
+  recent release dates across both sidecar and plugin, each broken into
+  its own sidecar/plugin sub-sections), plus separate "Sidecar" and
+  "Plugin" tabs for the full history. All client-side reslicing of the
+  same `/release/changelog` data the single-list version already fetched
+  -- no new sidecar endpoint needed.
+
 ## 2026-09-13
 
 ### 0.34.0 (sidecar)

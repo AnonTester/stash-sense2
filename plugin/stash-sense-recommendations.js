@@ -648,6 +648,18 @@
 
     const data = await SS.fetchChangelog();
 
+    if (!data) {
+      modal.innerHTML = `
+        <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px;">
+          <h3 style="margin:0;font-size:18px;">${SS.PLUGIN_NAME}: Changelog</h3>
+          <button id="ss-changelog-close" style="background:none;border:none;font-size:22px;color:#888;cursor:pointer;padding:0;line-height:1;" aria-label="Close">&times;</button>
+        </div>
+        <p style="font-size:0.85rem;opacity:0.7;">Could not load changelog -- is the sidecar reachable?</p>
+      `;
+      modal.querySelector('#ss-changelog-close').addEventListener('click', () => overlay.remove());
+      return;
+    }
+
     const renderEntries = (entries) => {
       if (!entries || !entries.length) {
         return '<p style="font-size:0.85rem;opacity:0.6;">No changelog entries found.</p>';
@@ -662,19 +674,63 @@
       `).join('');
     };
 
+    // "What's New": the last 2 distinct release DATES seen across either
+    // track (not the last 2 entries -- a single date can carry both a
+    // sidecar and a plugin bump, or several of either), each showing its
+    // own sidecar/plugin sub-sections. Purely a client-side reslice of
+    // the same full-history data the other two tabs already have -- no
+    // separate endpoint needed.
+    const allDates = [...new Set([...data.sidecar, ...data.plugin].map(e => e.date).filter(Boolean))]
+      .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+    const recentDates = allDates.slice(0, 2);
+    const whatsNewHtml = recentDates.length ? recentDates.map(date => {
+      const sidecarForDate = data.sidecar.filter(e => e.date === date);
+      const pluginForDate = data.plugin.filter(e => e.date === date);
+      return `
+        <div style="margin-bottom:20px;">
+          <div style="font-weight:700;font-size:0.9rem;margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid #444;">${SS.escapeHtml(date)}</div>
+          ${sidecarForDate.length ? `<div style="font-size:0.75rem;font-weight:600;opacity:0.6;letter-spacing:0.05em;margin:0 0 4px;">SIDECAR</div>${renderEntries(sidecarForDate)}` : ''}
+          ${pluginForDate.length ? `<div style="font-size:0.75rem;font-weight:600;opacity:0.6;letter-spacing:0.05em;margin:8px 0 4px;">PLUGIN</div>${renderEntries(pluginForDate)}` : ''}
+        </div>
+      `;
+    }).join('') : '<p style="font-size:0.85rem;opacity:0.6;">No recent changes found.</p>';
+
+    const tabContent = {
+      whatsnew: whatsNewHtml,
+      sidecar: renderEntries(data.sidecar),
+      plugin: renderEntries(data.plugin),
+    };
+    const tabLabels = {
+      whatsnew: "What's New",
+      sidecar: `Sidecar (v${SS.escapeHtml(SS.getSidecarVersionInfo()?.current || '?')})`,
+      plugin: `Plugin (v${SS.PLUGIN_VERSION})`,
+    };
+
+    const tabButtonStyle = (active) => 'background:none;border:none;cursor:pointer;padding:8px 4px;'
+      + `font-size:0.85rem;color:${active ? '#fff' : '#888'};font-weight:${active ? '600' : '400'};`
+      + `border-bottom:2px solid ${active ? '#0d6efd' : 'transparent'};margin-bottom:-1px;`;
+
     modal.innerHTML = `
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:10px;">
         <h3 style="margin:0;font-size:18px;">${SS.PLUGIN_NAME}: Changelog</h3>
         <button id="ss-changelog-close" style="background:none;border:none;font-size:22px;color:#888;cursor:pointer;padding:0;line-height:1;" aria-label="Close">&times;</button>
       </div>
-      ${data ? `
-        <h4 style="margin:14px 0 4px 0;font-size:0.9rem;opacity:0.8;">Sidecar (current: v${SS.escapeHtml(SS.getSidecarVersionInfo()?.current || '?')})</h4>
-        ${renderEntries(data.sidecar)}
-        <h4 style="margin:14px 0 4px 0;font-size:0.9rem;opacity:0.8;">Plugin (current: v${SS.PLUGIN_VERSION})</h4>
-        ${renderEntries(data.plugin)}
-      ` : '<p style="font-size:0.85rem;opacity:0.7;">Could not load changelog -- is the sidecar reachable?</p>'}
+      <div style="display:flex;gap:18px;margin-bottom:14px;border-bottom:1px solid #444;">
+        ${Object.keys(tabLabels).map((key, i) => `<button class="ss-changelog-tab" data-tab="${key}" style="${tabButtonStyle(i === 0)}">${tabLabels[key]}</button>`).join('')}
+      </div>
+      <div id="ss-changelog-tab-content">${tabContent.whatsnew}</div>
     `;
     modal.querySelector('#ss-changelog-close').addEventListener('click', () => overlay.remove());
+
+    const contentEl = modal.querySelector('#ss-changelog-tab-content');
+    modal.querySelectorAll('.ss-changelog-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        modal.querySelectorAll('.ss-changelog-tab').forEach((b) => {
+          b.style.cssText = tabButtonStyle(b === btn);
+        });
+        contentEl.innerHTML = tabContent[btn.dataset.tab];
+      });
+    });
   }
 
   async function renderDashboard(mainContainer, content) {
