@@ -639,7 +639,7 @@
 
     const modal = document.createElement('div');
     modal.style.cssText = 'background:#2a2a2a;border:1px solid #444;border-radius:10px;padding:1.5rem;'
-      + 'max-width:520px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);color:#fff;';
+      + 'max-width:840px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.4);color:#fff;';
     modal.innerHTML = '<div class="ss-loading-inline"><div class="ss-spinner"></div></div>'
       + '<p style="text-align:center;margin-top:0.5rem;">Loading changelog...</p>';
     overlay.appendChild(modal);

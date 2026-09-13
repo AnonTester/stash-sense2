@@ -10,10 +10,18 @@ import database_health_router as dh_mod
 
 @pytest.fixture
 def mock_recognizer():
-    """Create a mock recognizer with performers and faces."""
+    """Create a mock recognizer with performers, faces, and a usearch index.
+
+    `index` (not `faces`) is what the router's face_count now reads --
+    faces.json's own sparse, address-space-sized array isn't a real face
+    count (see database_health_router.py's own /health comment), so
+    face_count is derived from the loaded usearch index's real entry
+    count instead. A plain list (not Mock()) so len() behaves like the
+    real usearch Index object does."""
     recognizer = Mock()
     recognizer.performers = {f"perf_{i}": Mock() for i in range(100)}
     recognizer.faces = {f"face_{i}": Mock() for i in range(500)}
+    recognizer.index = list(range(500))
     return recognizer
 
 

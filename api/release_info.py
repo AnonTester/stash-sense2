@@ -70,7 +70,38 @@ _CHANGELOG_CANDIDATES = (
     Path(__file__).resolve().parent.parent / "changelog.txt",
 )
 _CHANGELOG_PATH = next((p for p in _CHANGELOG_CANDIDATES if p.exists()), _CHANGELOG_CANDIDATES[0])
-_VERSION_HEADER_RE = re.compile(r"^### (\d+(?:\.\d+)*) \((sidecar|plugin) only\)\s*$")
+# "only" is optional: the changelog's own convention dropped that word
+# starting 2026-09-09 (0.33.0 onward), but this regex wasn't updated to
+# match -- confirmed live 2026-09-13, every entry from that date forward
+# was silently invisible to changelog_since()/full_changelog() (the
+# per-entry version_match check simply never fired, so those bullets got
+# merged into whichever earlier, still-matching entry happened to be
+# "current" at the time, then discarded on the next successful match or
+# date-header reset -- not a missing-data problem, a five-month-old
+# parsing gap this module's own history had never actually been read
+# through end-to-end before). Both spellings now match.
+_VERSION_HEADER_RE = re.compile(r"^### (\d+(?:\.\d+)*) \((sidecar|plugin)(?: only)?\)\s*$")
+# A single header covering both components with two different version
+# numbers at once (e.g. "### 0.32.1 (sidecar) / 0.24.1 (plugin)") -- an
+# older convention (0.32.1/0.14.7 era and earlier) for when a change
+# landed in both the same day, sharing one bullet list. Checked before
+# _VERSION_HEADER_RE (which would otherwise just fail to match the whole
+# line, trailing content and all, and silently drop it).
+_COMBINED_VERSION_HEADER_RE = re.compile(
+    r"^### (\d+(?:\.\d+)*) \(sidecar(?: only)?\) / (\d+(?:\.\d+)*) \(plugin(?: only)?\)\s*$"
+)
+# The oldest era, before sidecar/plugin were versioned separately at all:
+# a bare "### X.Y.Z" with no parenthetical whatsoever -- one version
+# number for the whole, still-undifferentiated project. Attributed to
+# BOTH tracks under that same version number (never dropped) -- this is
+# the actual historical fact for that era, not a guess. Checked last:
+# a handful of *later*, already-split-era entries were also left
+# mistakenly untagged (e.g. changelog.txt's own 0.23.1/0.23.2, confirmed
+# by the user to be plugin-only) -- those get a real "(plugin only)" tag
+# added directly to changelog.txt instead of relying on this fallback,
+# specifically because the fallback's "both tracks" assumption would be
+# wrong for them.
+_UNIFIED_VERSION_HEADER_RE = re.compile(r"^### (\d+(?:\.\d+)*)\s*$")
 _DATE_HEADER_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2})\s*$")
 _INDEX_ENTRY_ID_RE = re.compile(r"^-\s*id:\s*(.+?)\s*$")
 _INDEX_ENTRY_VERSION_RE = re.compile(r"^\s*version:\s*(.+?)\s*$")
@@ -114,31 +145,50 @@ def changelog_since(component: str, since_version: Optional[str]) -> list[dict]:
     newer than `since_version`, as [{"version", "date", "bullets"}, ...].
     Returns [] if changelog.txt isn't present (e.g. an older image built
     before Dockerfile* started COPYing it in) or `since_version` is None
-    (caller has nothing to diff against)."""
+    (caller has nothing to diff against).
+
+    A header can name more than one (version, component) target sharing
+    the same bullet list -- the combined "X (sidecar) / Y (plugin)" form,
+    or a bare pre-split header applying its one version to both tracks at
+    once (see _UNIFIED_VERSION_HEADER_RE) -- so `current_targets` is a
+    list, not a single (version, component) pair."""
     if since_version is None or not _CHANGELOG_PATH.exists():
         return []
 
     entries: list[dict] = []
     current_date: Optional[str] = None
-    current_version: Optional[str] = None
-    current_component: Optional[str] = None
+    current_targets: list[tuple[str, str]] = []
     current_bullets: list[str] = []
 
     def _flush():
-        if (current_version and current_component == component
-                and compare_versions(current_version, since_version) > 0):
-            entries.append({"version": current_version, "date": current_date, "bullets": current_bullets})
+        for version, comp in current_targets:
+            if comp == component and compare_versions(version, since_version) > 0:
+                entries.append({"version": version, "date": current_date, "bullets": list(current_bullets)})
 
     for line in _CHANGELOG_PATH.read_text().splitlines():
         date_match = _DATE_HEADER_RE.match(line)
         if date_match:
             _flush()
-            current_date, current_version, current_component, current_bullets = date_match.group(1), None, None, []
+            current_date, current_targets, current_bullets = date_match.group(1), [], []
+            continue
+        combined_match = _COMBINED_VERSION_HEADER_RE.match(line)
+        if combined_match:
+            _flush()
+            current_targets = [(combined_match.group(1), "sidecar"), (combined_match.group(2), "plugin")]
+            current_bullets = []
             continue
         version_match = _VERSION_HEADER_RE.match(line)
         if version_match:
             _flush()
-            current_version, current_component, current_bullets = version_match.group(1), version_match.group(2), []
+            current_targets = [(version_match.group(1), version_match.group(2))]
+            current_bullets = []
+            continue
+        unified_match = _UNIFIED_VERSION_HEADER_RE.match(line)
+        if unified_match:
+            _flush()
+            v = unified_match.group(1)
+            current_targets = [(v, "sidecar"), (v, "plugin")]
+            current_bullets = []
             continue
         stripped = line.strip()
         if stripped.startswith("- "):

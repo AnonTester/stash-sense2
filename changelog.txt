@@ -160,7 +160,7 @@
   _do_create_performer and stashbox_router.py's
   create_performer_from_catalogue).
 
-### 0.23.2
+### 0.23.2 (plugin only)
 - Fix: job history's "Finished in" duration was calculated from
   `created_at` (when the job was queued) instead of `started_at` (when it
   actually began processing). A job queued behind another
@@ -207,7 +207,7 @@
   release's delta re-sends every currently-known stashbox performer's
   identity once so affected installs converge onto correct ids.
 
-### 0.23.1
+### 0.23.1 (plugin only)
 - Fix: accepting/resolving a recommendation from its detail view (Scene
   Stash-Box Tagger and every other recommendation type) often left it
   looking unremoved in the pending list on return. The auto-return-to-list
@@ -2617,9 +2617,6 @@
   face recognition.
 - Feature: Show details and photos of other matches in face search results
   for comparison.
-
-## 2026-05-16 (earlier)
-
 - Fix: Showing upstream tag changes when they are the same locally (false
   positives eliminated).
 - Feature: Force upstream scene change re-scan on manual trigger; adjusted
@@ -2649,8 +2646,5 @@
   results.
 - Improvement: Adjust progress update of upstream changes and fix stash-box
   tagger job state handling.
-
-## 2026-05-14 (earlier)
-
 - Feature: Scene preview, cover, local scene link and stashbox link added to
   stash-box tagger details view.
