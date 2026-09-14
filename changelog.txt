@@ -1,5 +1,12 @@
 ## 2026-09-14
 
+### 0.26.1 (plugin)
+- Fix: face-match/candidate suggestion thumbnails (scene identify results,
+  Face Recommendations candidates, and the performer-candidate picker
+  cards) were center-cropping tall portrait source photos, cutting the
+  subject's head off when the photo was noticeably taller than the
+  thumbnail box. Anchored the crop to the top of the image instead.
+
 ### 0.26.0 (plugin)
 - Feature: the dashboard header's changelog button now opens a 3-tab
   view instead of one long combined list -- "What's New" (the 2 most

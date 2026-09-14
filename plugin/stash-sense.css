@@ -262,10 +262,17 @@
   height: 100px;
 }
 
+/* object-position: top, not the object-fit default center -- these are
+   face photos, and a source image much taller than this box (a full-body
+   shot cropped to a headshot-ish box) has its subject's face near the top,
+   not the vertical middle. Center-cropping such an image cuts the head off
+   instead of the legs. Shared with .ss-sfm-candidate-thumb's identical
+   case. */
 .ss-match-image img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: top;
 }
 
 .ss-no-image {
@@ -738,6 +745,8 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* see .ss-match-image img's comment -- keep the face, not the middle */
+  object-position: top;
   display: block;
 }
 
@@ -4158,10 +4167,12 @@ a.ss-detail-entity-link:hover {
   height: 100px;
 }
 
+/* object-position: top -- see .ss-match-image img's identical comment. */
 .ss-sfm-candidate-thumb img {
   width: 100%;
   height: 100%;
   object-fit: cover;
+  object-position: top;
 }
 
 .ss-sfm-candidate-name {
