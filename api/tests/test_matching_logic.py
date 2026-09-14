@@ -715,6 +715,72 @@ class TestCollapseLinkedCandidates:
         assert collapsed[0].universal_id == "stashdb.org:uuid-3"
 
 
+class TestCollapseLinkedCandidatesWithLocalResolution:
+    """Regression coverage for the "Sylwia/Zdenka" report: a local-index
+    candidate linked to a StashDB entry that's ALSO in a
+    performer_link_index group with a catalogue candidate must collapse
+    to ONE surviving candidate, not two -- confirmed live, this "other
+    possible matches" list kept showing a linked group's losing member
+    as if it were a separate, unrelated person."""
+
+    def _match(self, universal_id, distance, name="P"):
+        return CandidateMatch(face_index=1, universal_id=universal_id, name=name, combined_distance=distance)
+
+    def test_local_candidate_collapses_with_its_linked_group(self):
+        matches = [
+            self._match("local:2846", distance=0.10, name="Sylwia"),
+            self._match("pornbox:232515", distance=0.50, name="Zdenka"),
+        ]
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "e317d8ea-uuid"}}
+
+        collapsed = collapse_linked_candidates(
+            matches, link_index, ["stashdb.org"], local_performers_mapping=local_mapping,
+        )
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "local:2846"
+
+    def test_without_local_performers_mapping_stays_unmerged(self):
+        # Same inputs, but the caller didn't pass local_performers_mapping
+        # -- can't resolve "local:2846" to its linked stashdb id at all,
+        # so it's correctly treated as unrelated to the pornbox candidate.
+        matches = [
+            self._match("local:2846", distance=0.10, name="Sylwia"),
+            self._match("pornbox:232515", distance=0.50, name="Zdenka"),
+        ]
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org"])
+
+        assert len(collapsed) == 2
+
+    def test_unlinked_local_candidate_untouched(self):
+        matches = [
+            self._match("local:2846", distance=0.10, name="Sylwia"),
+            self._match("pornbox:232515", distance=0.50, name="Zdenka"),
+        ]
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+        # Not actually stash_id-linked -- stashdb_id falls back to the
+        # bare local id, recognizer.py's own "unlinked" convention.
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "2846"}}
+
+        collapsed = collapse_linked_candidates(
+            matches, link_index, ["stashdb.org"], local_performers_mapping=local_mapping,
+        )
+
+        assert len(collapsed) == 2
+
+
 class TestMatchFaceLinkedCandidates:
     def test_match_face_collapses_linked_group_via_endpoint_priority(self):
         index = _mock_index(keys=[0, 1], distances=[0.10, 0.45])
@@ -728,6 +794,48 @@ class TestMatchFaceLinkedCandidates:
         )
 
         assert [m.universal_id for m in result.matches] == ["stashdb.org:uuid-1"]
+
+    def test_match_face_collapses_local_candidate_with_its_linked_catalogue_group(self):
+        # End-to-end "Sylwia/Zdenka" reproduction: a local-index candidate
+        # linked to a StashDB entry that's ALSO in a performer_link_index
+        # group with a main-index catalogue candidate -- must collapse to
+        # one candidate, not survive as two separate "possible matches".
+        main_index = _mock_index(keys=[0], distances=[0.50])
+        local_index = _mock_index(keys=[2846], distances=[0.10])
+        faces = ["pornbox:232515"]
+        performers = {"pornbox:232515": {"name": "Zdenka"}}
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "e317d8ea-uuid"}}
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), main_index, faces, performers,
+            local_index=local_index, local_performers_mapping=local_mapping,
+            performer_link_index=link_index, endpoint_priority_domains=["stashdb.org"],
+        )
+
+        assert [m.universal_id for m in result.matches] == ["local:2846"]
+
+    def test_match_face_local_link_falls_back_to_distance_without_priority(self):
+        main_index = _mock_index(keys=[0], distances=[0.10])
+        local_index = _mock_index(keys=[2846], distances=[0.50])
+        faces = ["pornbox:232515"]
+        performers = {"pornbox:232515": {"name": "Zdenka"}}
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "e317d8ea-uuid"}}
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), main_index, faces, performers,
+            local_index=local_index, local_performers_mapping=local_mapping,
+            performer_link_index=link_index, endpoint_priority_domains=[],
+        )
+
+        assert [m.universal_id for m in result.matches] == ["pornbox:232515"]
 
     def test_match_face_without_performer_link_index_is_unaffected(self):
         index = _mock_index(keys=[0, 1], distances=[0.10, 0.45])
@@ -800,3 +908,68 @@ class TestMatchFace:
         )
 
         assert [m.universal_id for m in result.matches] == ["stashdb.org:uuid-1"]
+
+
+class TestMatchFaceCollapseRespectsMaxDistance:
+    """Regression coverage for the real live incident this session's
+    match_face() reorder introduced: a linked local candidate whose
+    LOCAL_MATCH_BOOST-adjusted distance is still OUTSIDE max_distance
+    must never win collapse_linked_candidates' endpoint-priority pick
+    over a genuinely in-threshold linked catalogue candidate -- doing so
+    discards the valid candidate for an invalid one that then also gets
+    cut by the final max_distance filter, losing the match entirely.
+    Confirmed against the real reported scene: a valid pornbox candidate
+    at distance 0.495 (within the 0.5 threshold) was discarded in favor
+    of a linked local candidate at a boosted 0.511 -- itself then
+    filtered out -- taking a 26-frame "Sylwia" cluster down to 4 and
+    dropping her out of the scene's top-ranked match entirely."""
+
+    def test_out_of_threshold_local_priority_winner_does_not_swallow_a_valid_candidate(self):
+        # Main index: a valid pornbox candidate, distance 0.495 (in threshold).
+        main_index = _mock_index(keys=[0], distances=[0.495])
+        # Local index: raw distance 0.62 -> boosted 0.62*0.85=0.527 (LOCAL_MATCH_BOOST),
+        # OUTSIDE the 0.5 threshold, but linked to a stashdb.org entry that
+        # would otherwise win endpoint priority over pornbox.
+        local_index = _mock_index(keys=[2846], distances=[0.62])
+        faces = ["pornbox:232515"]
+        performers = {"pornbox:232515": {"name": "Zdenka"}}
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "e317d8ea-uuid"}}
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), main_index, faces, performers,
+            local_index=local_index, local_performers_mapping=local_mapping,
+            performer_link_index=link_index, endpoint_priority_domains=["stashdb.org"],
+            config=MatchingConfig(max_distance=0.5),
+        )
+
+        # The valid pornbox candidate must survive -- not silently lost
+        # because an out-of-threshold local candidate "won" priority
+        # first and was then filtered out, taking pornbox down with it.
+        assert [m.universal_id for m in result.matches] == ["pornbox:232515"]
+
+    def test_in_threshold_local_priority_winner_still_wins_normally(self):
+        # Same setup, but the local candidate's boosted distance is now
+        # comfortably within threshold -- priority collapse should behave
+        # exactly as before (local/stashdb wins over pornbox).
+        main_index = _mock_index(keys=[0], distances=[0.495])
+        local_index = _mock_index(keys=[2846], distances=[0.10])  # boosted: 0.085
+        faces = ["pornbox:232515"]
+        performers = {"pornbox:232515": {"name": "Zdenka"}}
+        local_mapping = {"2846": {"name": "Sylwia", "stashdb_id": "e317d8ea-uuid"}}
+        link_index = {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), main_index, faces, performers,
+            local_index=local_index, local_performers_mapping=local_mapping,
+            performer_link_index=link_index, endpoint_priority_domains=["stashdb.org"],
+            config=MatchingConfig(max_distance=0.5),
+        )
+
+        assert [m.universal_id for m in result.matches] == ["local:2846"]

@@ -416,9 +416,31 @@ def merge_local_candidates(
     return merged
 
 
+def _resolve_local_link_uid(uid: str, local_performers_mapping: Optional[dict[str, dict]]) -> str:
+    """A local-index candidate's own `universal_id` stays "local:<id>"
+    even when that local performer has been stash_id-linked to a real
+    StashDB entry (local_performer_index.py's own sync tracks this in
+    `local_performers_mapping[<id>]["stashdb_id"]`). For GROUPING
+    purposes only -- never changes what gets displayed -- resolve it to
+    the linked "stashdb.org:<uuid>" id instead, so collapse_linked_
+    candidates recognizes it as part of a performer_link_index group that
+    only ever lists real dataset ids, never "local:" ones. Mirrors
+    stash-sense2-data-gen's own scene_matcher.py _resolve_local_link,
+    same problem one level up (a single face's own candidate list here,
+    cross-frame/cross-cluster tallying there)."""
+    if not uid or not uid.startswith("local:") or not local_performers_mapping:
+        return uid
+    local_id = uid.split(":", 1)[1]
+    stashdb_id = (local_performers_mapping.get(local_id) or {}).get("stashdb_id")
+    if stashdb_id and stashdb_id != local_id:
+        return f"{_STASHDB_ENDPOINT_SHORT_NAME}:{stashdb_id}"
+    return uid
+
+
 def collapse_linked_candidates(
     matches: list[CandidateMatch], performer_link_index: dict[str, list[str]],
     endpoint_priority_domains: list[str],
+    local_performers_mapping: Optional[dict[str, dict]] = None,
 ) -> list[CandidateMatch]:
     """Collapses multiple CandidateMatch entries in `matches` that
     represent the SAME real person, per stash-sense2-data-gen's own
@@ -447,25 +469,53 @@ def collapse_linked_candidates(
 
     `performer_link_index` empty (no dataset support yet, or nothing
     linked) is a no-op returning `matches` unchanged -- same "optional,
-    absent means skip" tolerance as face_yaw."""
+    absent means skip" tolerance as face_yaw.
+
+    `local_performers_mapping`, when given, resolves a local-index
+    candidate to its linked stashdb.org id (_resolve_local_link_uid) for
+    GROUP LOOKUP purposes only -- so a local candidate that's itself
+    linked to a StashDB entry which is ALSO in a performer_link_index
+    group (e.g. with a pornbox record) is recognized as belonging to that
+    group, instead of surviving alongside its own linked group's other
+    member as if the two were unrelated candidates. Confirmed live:
+    without this, match_face()'s caller-side ordering (merge_local_
+    candidates must run BEFORE this function now, precisely so a local
+    candidate is even present here to resolve in the first place) still
+    left a linked local candidate and a linked catalogue candidate both
+    surviving as separate "possible matches" for the same real person."""
     if not performer_link_index:
         return matches
 
-    by_uid = {c.universal_id: c for c in matches}
+    # Keyed by each candidate's EFFECTIVE (resolved) identity throughout --
+    # a local candidate contributes under its linked stashdb.org key here,
+    # not its literal "local:<id>" universal_id, so a performer_link_index
+    # group listing that stashdb.org id (never a "local:" one -- the
+    # dataset that produces performer_link_index has no concept of this
+    # sidecar's own local Stash performers) finds it as present. Mixing
+    # raw and resolved keys in this lookup was the actual bug the first
+    # version of this fix shipped with: checking `other in <raw-keyed
+    # dict>` for a group member id that only ever exists in resolved form
+    # never matched, silently leaving the local candidate ungrouped.
+    by_resolved: dict[str, CandidateMatch] = {
+        _resolve_local_link_uid(c.universal_id, local_performers_mapping): c for c in matches
+    }
     seen: set[str] = set()
     result: list[CandidateMatch] = []
 
-    def endpoint_rank(uid: str) -> int:
-        domain = _extract_endpoint_domain(uid)
+    def endpoint_rank(resolved_uid: str) -> int:
+        domain = _extract_endpoint_domain(resolved_uid)
         if domain in endpoint_priority_domains:
             return endpoint_priority_domains.index(domain)
         return len(endpoint_priority_domains)  # no configured stashbox endpoint -- lowest priority
 
     for candidate in matches:
-        uid = candidate.universal_id
-        if uid in seen:
+        resolved_uid = _resolve_local_link_uid(candidate.universal_id, local_performers_mapping)
+        if resolved_uid in seen:
             continue
-        present_group = [uid] + [other for other in performer_link_index.get(uid, []) if other in by_uid]
+        present_group = [resolved_uid] + [
+            other for other in performer_link_index.get(resolved_uid, [])
+            if other in by_resolved and other != resolved_uid
+        ]
         seen.update(present_group)
         if len(present_group) == 1:
             result.append(candidate)
@@ -475,8 +525,8 @@ def collapse_linked_candidates(
         if endpoint_rank(ranked[0]) < len(endpoint_priority_domains):
             winner_uid = ranked[0]
         else:
-            winner_uid = min(present_group, key=lambda u: by_uid[u].combined_distance)
-        result.append(by_uid[winner_uid])
+            winner_uid = min(present_group, key=lambda u: by_resolved[u].combined_distance)
+        result.append(by_resolved[winner_uid])
 
     return result
 
@@ -544,12 +594,14 @@ def match_face(
         face_yaw=face_yaw,
     )
 
-    if performer_link_index:
-        result.matches = collapse_linked_candidates(
-            result.matches, performer_link_index, endpoint_priority_domains or [],
-        )
-
     # Optionally merge in local-performer-index matches (see fuse_local_results).
+    # Runs BEFORE collapse_linked_candidates below now (fixed 2026-09-14) --
+    # see that function's own docstring for why the old order (collapse
+    # first, merge local candidates in afterward) could leave a local
+    # candidate and its own linked catalogue duplicate both surviving as
+    # separate "possible matches" for the same real person: collapse had
+    # already picked a winner from the main-index-only candidates before
+    # the local candidate even existed to be compared against it.
     # A handful of local performers is common (especially right after the
     # first sync), so index.search()'s k can exceed the index size -- guard
     # with try/except rather than requiring every caller to pre-check size.
@@ -557,11 +609,40 @@ def match_face(
         try:
             local_query_result = query_index(embedding, local_index, config)
             local_candidates = fuse_local_results(local_query_result, local_performers_mapping, config)
-            merged = merge_local_candidates(result.matches, local_candidates, local_performers_mapping, performers)
-            merged.sort(key=lambda c: c.combined_distance)
-            result.matches = [c for c in merged if c.combined_distance <= config.max_distance][:config.max_results]
+            result.matches = merge_local_candidates(result.matches, local_candidates, local_performers_mapping, performers)
         except Exception as e:
             logger.warning(f"Local performer index query failed, skipping local matches: {e}")
+
+    # Filter to max_distance BEFORE collapse, not just at the very end --
+    # fuse_local_results' LOCAL_MATCH_BOOST can still leave a local
+    # candidate's own combined_distance above max_distance even after the
+    # boost (a weak match is still weak). Confirmed live 2026-09-14: with
+    # this filter only applied at the end (as it was immediately after
+    # the collapse/merge reorder above), collapse_linked_candidates could
+    # pick that out-of-threshold local candidate as the group's
+    # endpoint-priority "winner" over a genuinely in-threshold linked
+    # catalogue candidate -- discarding the valid candidate for an
+    # invalid one that then ALSO got filtered out by the final max_distance
+    # cut, losing the match entirely. Confirmed against the real reported
+    # scene: frame 57 had a valid pornbox candidate (distance 0.495, well
+    # within the 0.5 threshold) discarded in favor of a linked local
+    # candidate at a boosted 0.511 -- itself then filtered out -- taking a
+    # 26-frame "Sylwia" cluster down to 4 and dropping her out of the
+    # scene's top-ranked match entirely.
+    result.matches = [c for c in result.matches if c.combined_distance <= config.max_distance]
+
+    if performer_link_index:
+        result.matches = collapse_linked_candidates(
+            result.matches, performer_link_index, endpoint_priority_domains or [],
+            local_performers_mapping=local_performers_mapping,
+        )
+
+    # Re-sort/truncate to max_results -- merge_local_candidates/
+    # collapse_linked_candidates above can both change membership (add
+    # local candidates; remove collapsed losers), and the max_distance
+    # filter already ran above, so this is just sort+truncate now.
+    result.matches.sort(key=lambda c: c.combined_distance)
+    result.matches = result.matches[:config.max_results]
 
     return result
 

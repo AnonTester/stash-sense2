@@ -10,7 +10,7 @@ sys.modules['recognizer'] = Mock()
 import numpy as np
 import pytest
 
-from scene_matcher import _cosine_distance, merge_clusters_by_match, hybrid_matching
+from scene_matcher import _cosine_distance, merge_clusters_by_match, hybrid_matching, clustered_frequency_matching
 
 
 class TestCosineDistance:
@@ -489,3 +489,273 @@ class TestHybridMatchingLocalIndexStashdbLink:
         )
 
         assert len(persons) == 2
+
+
+class TestLocalLinkChainedWithDataGenLink:
+    """Regression coverage for the "Sylwia/Zdenka" report: a local-index
+    match linked to a StashDB entry (local_performer_index's own signal)
+    that ALSO belongs to a stash-sense2-data-gen performer_link_index
+    group with a catalogue (pornbox) record -- the two link mechanisms
+    chained together, not just each in isolation. Confirmed live: this
+    combination merged into one person, but display picked whichever of
+    the local/pornbox candidates scored better on a given run, because
+    _pick_priority_match ranked the local candidate by its literal
+    "local" endpoint (never a configured priority domain) instead of its
+    true linked stashdb.org endpoint -- so the winner was effectively
+    decided by raw score, not priority, flipping unpredictably."""
+
+    def _sylwia_local_and_zdenka_pornbox(self, local_score=0.10, pornbox_score=0.50):
+        # Scores deliberately swapped between the two tests below -- the
+        # point is priority must win regardless of which one scores
+        # better.
+        match_local = _make_match(
+            "e317d8ea-uuid", local_score, universal_id="local:2846", local_performer_id="2846",
+        )
+        match_local.name = "Sylwia"
+        match_pornbox = _make_match("232515", pornbox_score, universal_id="pornbox:232515")
+        match_pornbox.name = "Zdenka"
+        result_a = _embedded_result([match_local], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([match_pornbox], [0.0, 1.0, 0.0])
+        return [(0, result_a), (1, result_b)]
+
+    def _link_index(self):
+        return {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+    def test_merges_into_one_person_regardless_of_which_scores_better(self):
+        recognizer = SimpleNamespace(performer_link_index=self._link_index())
+
+        persons = hybrid_matching(
+            self._sylwia_local_and_zdenka_pornbox(), recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].frame_count == 2
+
+    def test_stashdb_linked_local_wins_even_when_pornbox_scores_better(self):
+        recognizer = SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+        # pornbox scores much better (lower distance) than the local
+        # candidate here -- priority must still win.
+        clusters = self._sylwia_local_and_zdenka_pornbox(local_score=0.50, pornbox_score=0.10)
+
+        persons = hybrid_matching(
+            clusters, recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Sylwia"
+
+    def test_falls_back_to_best_score_without_a_priority_list(self):
+        recognizer = SimpleNamespace(performer_link_index=self._link_index())
+        clusters = self._sylwia_local_and_zdenka_pornbox(local_score=0.50, pornbox_score=0.10)
+
+        persons = hybrid_matching(
+            clusters, recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Zdenka"
+
+
+class TestMergeClustersDominantIdentity:
+    """Regression coverage for merge_clusters_by_match's dominant-identity
+    grouping (fixed 2026-09-14, replacing a same-day transitive
+    union-find version that shipped and then had to be reverted --
+    confirmed live to over-merge). Each cluster's own aggregate winner
+    (best weighted min-distance-plus-frame-bonus score across ITS OWN
+    frames, same ranking aggregate_matches itself uses) decides which
+    group it joins -- not any single incidental frame-level candidate
+    anywhere in it, and never transitively through a third cluster."""
+
+    def test_merges_when_dominant_identities_agree(self):
+        # Cluster A's own best-weighted identity is the linked
+        # "stashdb.org:perf-1"; cluster B's is "pornbox:perf-2". Linked
+        # -> must merge (this is the ORIGINAL "Elma/Sonya Chrystal" bug
+        # this whole feature exists to fix).
+        match_a = _make_match("perf-1", 0.20, universal_id="stashdb.org:perf-1")
+        match_a.name = "Elma"
+        match_b = _make_match("perf-2", 0.25, universal_id="pornbox:perf-2")
+        match_b.name = "Sonya Chrystal"
+
+        clusters = [[(0, _make_result([match_a]))], [(1, _make_result([match_b]))]]
+        link_index = {
+            "stashdb.org:perf-1": ["pornbox:perf-2"],
+            "pornbox:perf-2": ["stashdb.org:perf-1"],
+        }
+
+        merged = merge_clusters_by_match(clusters, performer_link_index=link_index)
+
+        assert len(merged) == 1
+        assert len(merged[0]) == 2
+
+    def test_does_not_merge_on_a_weak_non_dominant_frame_alone(self):
+        # Regression guard for the actual live incident: cluster A's own
+        # best-scoring frame is a strong, unrelated match; a single OTHER,
+        # much weaker frame in the SAME cluster happens to match a linked
+        # identity cluster B is keyed on. Cluster A's own DOMINANT vote
+        # is still the unrelated performer (one strong frame outweighs
+        # one weak one) -- must NOT merge into cluster B's group. Confirmed
+        # live: an earlier "compare every frame, merge on ANY shared
+        # identity" version of this function let cluster A act as a
+        # bridge, silently absorbing it into an unrelated cluster and
+        # inflating a correct 4-frame person into a wrong 26-frame blob
+        # mixing in half a dozen other real people.
+        match_a_best = _make_match("other-id", 0.05, universal_id="stashdb.org:other-id")
+        match_a_best.name = "Unrelated Performer"
+        match_a_weak = _make_match("perf-1", 0.45, universal_id="stashdb.org:perf-1")
+        match_a_weak.name = "Elma"
+        result_a1 = _make_result([match_a_best])
+        result_a2 = _make_result([match_a_weak])
+
+        match_b = _make_match("perf-2", 0.20, universal_id="pornbox:perf-2")
+        match_b.name = "Sonya Chrystal"
+        result_b = _make_result([match_b])
+
+        clusters = [[(0, result_a1), (1, result_a2)], [(2, result_b)]]
+        link_index = {
+            "stashdb.org:perf-1": ["pornbox:perf-2"],
+            "pornbox:perf-2": ["stashdb.org:perf-1"],
+        }
+
+        merged = merge_clusters_by_match(clusters, performer_link_index=link_index)
+
+        assert len(merged) == 2
+        sizes = sorted(len(c) for c in merged)
+        assert sizes == [1, 2]
+
+    def test_does_not_transitively_bridge_through_a_third_cluster(self):
+        # A's dominant identity is X. B is a mixed cluster whose OWN
+        # dominant identity is Y (Y's frame scores much better than X's
+        # weaker one in the same cluster), not X. C's dominant identity
+        # is Y. A must NOT get pulled into the B/C group just because B
+        # happens to also contain one weak frame matching X somewhere --
+        # A and C share nothing, and B's own vote is for Y, not X.
+        match_a = _make_match("x", 0.10, universal_id="stashdb.org:x")
+        match_a.name = "X Performer"
+
+        match_b_weak_x = _make_match("x", 0.45, universal_id="stashdb.org:x")
+        match_b_weak_x.name = "X Performer"
+        match_b_strong_y = _make_match("y", 0.10, universal_id="pornbox:y")
+        match_b_strong_y.name = "Y Performer"
+
+        match_c = _make_match("y", 0.15, universal_id="pornbox:y")
+        match_c.name = "Y Performer"
+
+        clusters = [
+            [(0, _make_result([match_a]))],
+            [(1, _make_result([match_b_weak_x])), (2, _make_result([match_b_strong_y]))],
+            [(3, _make_result([match_c]))],
+        ]
+
+        merged = merge_clusters_by_match(clusters)
+
+        assert len(merged) == 2
+        sizes = sorted(len(c) for c in merged)
+        assert sizes == [1, 3]  # A alone; B+C merged (both keyed on Y)
+
+    def test_cluster_with_no_matches_has_no_dominant_identity(self):
+        result_no_match = _make_result([])
+        match = _make_match("perf-1", 0.2)
+        result_with_match = _make_result([match])
+
+        merged = merge_clusters_by_match([[(0, result_no_match)], [(1, result_with_match)]])
+
+        assert len(merged) == 2
+
+
+class TestClusteredFrequencyMatchingLinkedCandidates:
+    """Regression coverage for the scene player's OWN default matching_mode
+    ("frequency" -> clustered_frequency_matching, NOT hybrid_matching --
+    confirmed live 2026-09-14 as the actual gap behind a real report: the
+    "Re-identify"/"Identify Full Video" buttons never pass an explicit
+    matching_mode, so every earlier fix aimed at hybrid_matching's own
+    linked-candidate handling had zero effect on what those buttons
+    actually show). A linked local candidate and its own linked catalogue
+    duplicate, within the same merged cluster, must collapse to one
+    candidate -- not show the loser as a spurious "other possible match"
+    (all_matches[1:]) for a person the winner already represents."""
+
+    def _sylwia_and_zdenka_same_cluster(self, local_score=0.10, pornbox_score=0.50):
+        match_local = _make_match(
+            "e317d8ea-uuid", local_score, universal_id="local:2846", local_performer_id="2846",
+        )
+        match_local.name = "Sylwia"
+        match_pornbox = _make_match("232515", pornbox_score, universal_id="pornbox:232515")
+        match_pornbox.name = "Zdenka"
+        result_a = _embedded_result([match_local], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([match_pornbox], [0.0, 1.0, 0.0])
+        return [(0, result_a), (1, result_b)]
+
+    def _link_index(self):
+        return {
+            "stashdb.org:e317d8ea-uuid": ["pornbox:232515"],
+            "pornbox:232515": ["stashdb.org:e317d8ea-uuid"],
+        }
+
+    def test_linked_duplicate_does_not_appear_as_an_other_possible_match(self):
+        recognizer = SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+
+        persons = clustered_frequency_matching(
+            self._sylwia_and_zdenka_same_cluster(), recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Sylwia"
+        # The whole point: Zdenka must NOT show up as an alternate --
+        # she's the same real person as the winner, already represented.
+        assert [m.name for m in persons[0].all_matches] == ["Sylwia"]
+
+    def test_priority_winner_chosen_even_when_catalogue_scores_better(self):
+        recognizer = SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+        clusters = self._sylwia_and_zdenka_same_cluster(local_score=0.45, pornbox_score=0.10)
+
+        persons = clustered_frequency_matching(
+            clusters, recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Sylwia"
+        assert [m.name for m in persons[0].all_matches] == ["Sylwia"]
+
+    def test_unrelated_performer_still_shows_as_an_alternate(self):
+        # Sanity check the fix didn't disable "other possible matches"
+        # entirely -- a genuinely different (unlinked) performer sharing
+        # the same cluster must still show up as an alternate.
+        match_a = _make_match("perf-1", 0.10, universal_id="stashdb.org:perf-1")
+        match_a.name = "Elma"
+        match_b = _make_match("perf-2", 0.20, universal_id="stashdb.org:perf-2")
+        match_b.name = "Unrelated Performer"
+        result = _embedded_result([match_a, match_b], [1.0, 0.0, 0.0])
+        recognizer = SimpleNamespace(performer_link_index={}, _endpoint_priority_domains=lambda: [])
+
+        persons = clustered_frequency_matching(
+            [(0, result)], recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        names = [m.name for m in persons[0].all_matches]
+        assert names[0] == "Elma"
+        assert "Unrelated Performer" in names

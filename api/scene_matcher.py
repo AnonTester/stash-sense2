@@ -57,22 +57,11 @@ def _canonical_identity(
     """Full canonical identity key for a match-shaped object (a raw
     PerformerMatch, or a PerformerMatchResponse -- both carry
     universal_id-equivalent fields), resolving TWO separate "this is
-    actually the same real person" signals before applying _link_key:
-
-    1. local_performer_index's own local-performer-linked-to-StashDB
-       link. A local-index match's `universal_id` stays "local:<id>", but
-       recognizer.py already resolves its `stashdb_id` field to the real
-       linked stashdb.org uuid when that local performer has been
-       stash_id-linked (see recognizer.py's PerformerMatch construction,
-       category == "local" branch) -- matching.py's merge_local_candidates()
-       already treats this as one person within a single face's own
-       candidate list; this mirrors that here, for the cross-frame/
-       cross-cluster tallying below. Detected by stashdb_id disagreeing
-       with local_performer_id (an *unlinked* local match's stashdb_id
-       just falls back to its own local id, per recognizer.py).
-    2. stash-sense2-data-gen's own performer_link_index (_link_key),
-       applied on top -- a stash_id-linked local performer could ALSO
-       belong to a data-gen link group that never saw the local record.
+    actually the same real person" signals: local_performer_index's own
+    local-performer-linked-to-StashDB link (_resolve_local_link), then
+    stash-sense2-data-gen's own performer_link_index on top (_link_key)
+    -- a stash_id-linked local performer could ALSO belong to a data-gen
+    link group that never saw the local record.
 
     Without this, a local-index match and the main index's own StashDB
     entry for the exact same real person (same stashdb_id) show up as two
@@ -80,6 +69,30 @@ def _canonical_identity(
     "Marley Brinx" via the local index (universal_id "local:2519") and via
     stashdb.org directly (universal_id "stashdb.org:23d3aa04-...", same
     stashdb_id) never merged.
+    """
+    return _link_key(_resolve_local_link(match_like), performer_link_index)
+
+
+def _resolve_local_link(match_like) -> Optional[str]:
+    """A local-index match's `universal_id` stays "local:<id>", but
+    recognizer.py already resolves its `stashdb_id` field to the real
+    linked stashdb.org uuid when that local performer has been
+    stash_id-linked (see recognizer.py's PerformerMatch construction,
+    category == "local" branch) -- matching.py's merge_local_candidates()
+    already treats this as one person within a single face's own
+    candidate list. Returns the resolved "stashdb.org:<uuid>" id for a
+    linked local match, or `universal_id` unchanged otherwise (including
+    for an *unlinked* local match, whose stashdb_id just falls back to
+    its own local id, per recognizer.py -- detected by stashdb_id
+    disagreeing with local_performer_id).
+
+    Used both for grouping (_canonical_identity, so a local match and the
+    main index's own entry for the same real person collapse into one
+    identity) and for display-priority ranking (_endpoint_rank/
+    _pick_priority_match, so that linked local match is correctly judged
+    by its real stashdb.org endpoint rather than the "local" pseudo-
+    endpoint, which never matches a configured priority domain and would
+    otherwise leave the winner decided by raw match score alone).
     """
     uid = getattr(match_like, "universal_id", None)
     if uid is None:
@@ -91,9 +104,8 @@ def _canonical_identity(
         uid and uid.startswith("local:") and local_performer_id and stashdb_id
         and str(stashdb_id) != str(local_performer_id)
     ):
-        uid = f"{_STASHDB_ENDPOINT_SHORT_NAME}:{stashdb_id}"
-
-    return _link_key(uid, performer_link_index)
+        return f"{_STASHDB_ENDPOINT_SHORT_NAME}:{stashdb_id}"
+    return uid
 
 
 def _endpoint_rank(universal_id: Optional[str], endpoint_priority_domains: list[str]) -> int:
@@ -119,12 +131,18 @@ def _pick_priority_match(
     priority order over a marginally better match score -- e.g. a linked
     group's stashdb.org member should win over its pornbox member even if
     a given frame happened to score the pornbox photo a hair closer.
-    Falls back to best (lowest) combined_score only when NONE of the
-    candidates has a configured priority endpoint at all."""
+    Ranks each candidate by its EFFECTIVE endpoint (_resolve_local_link),
+    not its literal universal_id -- a local-index match linked to a
+    stashdb.org entry must be judged as stashdb.org here too, or it ties
+    with an unconfigured catalogue source (both fall back to "no
+    configured priority") and the winner ends up decided by raw match
+    score alone, which flips unpredictably run to run. Falls back to best
+    (lowest) combined_score only when NONE of the candidates resolves to
+    a configured priority endpoint at all."""
     if len(matches) == 1:
         return matches[0]
-    ranked = sorted(matches, key=lambda m: _endpoint_rank(m.universal_id, endpoint_priority_domains))
-    if _endpoint_rank(ranked[0].universal_id, endpoint_priority_domains) < len(endpoint_priority_domains):
+    ranked = sorted(matches, key=lambda m: _endpoint_rank(_resolve_local_link(m), endpoint_priority_domains))
+    if _endpoint_rank(_resolve_local_link(ranked[0]), endpoint_priority_domains) < len(endpoint_priority_domains):
         return ranked[0]
     return min(matches, key=lambda m: m.combined_score)
 
@@ -235,59 +253,74 @@ def merge_clusters_by_match(
     they're probably the same person and should be merged. Also merges
     across two clusters whose respective top matches are DIFFERENT
     database records that are nonetheless linked as the same real person
-    (see _link_key) -- otherwise a real person catalogued under two
-    records (e.g. a name change, or a second site's own profile) whose
-    embeddings happen to sit slightly closer to one record in some frames
-    and the other record in other frames gets split into two separate
-    face clusters/"persons" instead of merged into one.
+    (see _canonical_identity) -- otherwise a real person catalogued under
+    two records (e.g. a name change, or a second site's own profile)
+    whose embeddings happen to sit slightly closer to one record in some
+    frames and the other record in other frames gets split into two
+    separate face clusters/"persons" instead of merged into one.
+
+    Each cluster's own DOMINANT identity decides merging -- the canonical
+    identity with the best weighted (min-distance + frame-count-bonus)
+    score across THAT cluster's own frames alone, same ranking philosophy
+    aggregate_matches itself uses. Two clusters merge only when their own
+    dominant identities agree (a plain group-by, not transitive
+    union-find across every frame-level candidate seen anywhere).
+
+    A prior version of this function (2026-09-14) unioned clusters that
+    shared ANY canonical identity across ANY single frame, transitively.
+    Confirmed live this over-merges badly: cluster_faces_by_person's own
+    greedy clustering already produces a messy raw cluster in a crowded
+    scene (many different real people, each contributing one frame whose
+    own weak top-1 candidate happens to be some other performer entirely)
+    -- and if even ONE of those frames' weak top-1 pick matched a
+    genuinely-linked identity another cluster was keyed on, that whole
+    messy cluster got pulled in as a "bridge", silently absorbing
+    unrelated people into one blob (confirmed: a real person's own
+    cluster grew from a correct 4 frames to an incorrect 26-frame blob
+    mixing in "Harley Quinn", "Anna Huse", "Daisy Lee", and half a dozen
+    other unrelated performers, none of whom were actually the linked
+    real person). This is the exact same class of bug stash-sense2-data-
+    gen's own build/link_duplicate_performers.py already hit and
+    deliberately fixed once before (see that project's
+    _build_name_clusters docstring -- a single bridging alias performer
+    collapsing half its dataset into one cluster via transitive
+    union-find). Dominant-identity grouping avoids it the same way that
+    fix did: a cluster's OWN aggregate vote decides its identity, not any
+    single incidental frame-level candidate anywhere in it.
     """
     if len(clusters) <= 1:
         return clusters
 
-    # Get best match for each cluster
-    cluster_best_match: list[tuple[str, float]] = []
-    for cluster in clusters:
-        # Find best match across all faces in cluster
-        best_match_id = None
-        best_score = float("inf")
-
+    def dominant_identity(cluster: list[tuple[int, RecognitionResult]]) -> Optional[str]:
+        scores: dict[str, list[float]] = defaultdict(list)
         for _, result in cluster:
-            if result.matches:
-                top_match = result.matches[0]
-                if top_match.combined_score < best_score:
-                    best_score = top_match.combined_score
-                    best_match_id = _canonical_identity(top_match, performer_link_index)
+            if not result.matches:
+                continue
+            key = _canonical_identity(result.matches[0], performer_link_index)
+            if key:
+                scores[key].append(result.matches[0].combined_score)
+        if not scores:
+            return None
+        # Same min-distance-plus-frame-bonus ranking aggregate_matches
+        # itself uses, so the cluster-level "winner" here agrees with
+        # what aggregate_matches would independently pick for this same
+        # cluster's own frames.
+        def weighted_score(key: str) -> float:
+            appearances = scores[key]
+            confidence = max(0.0, 1.0 - min(appearances))
+            return confidence * (1 + 0.1 * (len(appearances) - 1))
+        return max(scores, key=weighted_score)
 
-        cluster_best_match.append((best_match_id, best_score))
+    groups: dict[str, list[tuple[int, RecognitionResult]]] = defaultdict(list)
+    unidentified: list[list[tuple[int, RecognitionResult]]] = []
+    for cluster in clusters:
+        identity = dominant_identity(cluster)
+        if identity is None:
+            unidentified.append(cluster)
+        else:
+            groups[identity].extend(cluster)
 
-    # Group clusters by their best match
-    match_to_clusters: dict[str, list[int]] = defaultdict(list)
-    for i, (match_id, _) in enumerate(cluster_best_match):
-        if match_id:
-            match_to_clusters[match_id].append(i)
-
-    # Merge clusters with same best match
-    merged_indices: set[int] = set()
-    merged_clusters: list[list[tuple[int, RecognitionResult]]] = []
-
-    for match_id, cluster_indices in match_to_clusters.items():
-        if len(cluster_indices) > 1:
-            # Merge all these clusters
-            merged = []
-            for idx in cluster_indices:
-                merged.extend(clusters[idx])
-                merged_indices.add(idx)
-            merged_clusters.append(merged)
-        elif cluster_indices[0] not in merged_indices:
-            merged_clusters.append(clusters[cluster_indices[0]])
-            merged_indices.add(cluster_indices[0])
-
-    # Add clusters that had no matches
-    for i, cluster in enumerate(clusters):
-        if i not in merged_indices:
-            merged_clusters.append(cluster)
-
-    return merged_clusters
+    return list(groups.values()) + unidentified
 
 
 def aggregate_matches(
@@ -571,6 +604,21 @@ def clustered_frequency_matching(
 
     The result is one PersonResult per face cluster, with alternative matches
     for each cluster shown as all_matches.
+
+    This is the scene player's own default matching_mode (identification_
+    router.py's SceneIdentifyRequest.matching_mode default is "frequency",
+    which dispatches HERE, not to hybrid_matching -- confirmed live 2026-
+    09-14 as a real gap: the scene player's "Re-identify"/"Identify Full
+    Video" buttons never pass an explicit matching_mode, so every fix
+    aimed at hybrid_matching's own linked-candidate handling had no effect
+    on what that UI actually shows). Tallies each cluster's own candidates
+    by canonical linked-group identity (_canonical_identity), not raw
+    stashdb_id, and picks the display winner via endpoint priority
+    (_pick_priority_match) -- same treatment aggregate_matches/
+    frequency_based_matching/hybrid_matching already got, applied here too
+    so a linked duplicate (e.g. a local-index match and its own linked
+    pornbox record) doesn't show up as a spurious "other possible match"
+    for a person the winner already represents.
     """
     # Lazy import to avoid circular dependency
     if _match_to_response is None:
@@ -583,15 +631,17 @@ def clustered_frequency_matching(
         return []
 
     tagged_ids = set(scene_performer_stashdb_ids or [])
+    performer_link_index = getattr(recognizer, "performer_link_index", None) or {}
+    endpoint_priority_domains = (
+        recognizer._endpoint_priority_domains() if hasattr(recognizer, "_endpoint_priority_domains") else []
+    )
 
     # Step 1: Cluster faces by embedding similarity
     clusters = cluster_faces_by_person(
         all_results, recognizer, distance_threshold=cluster_threshold
     )
     # Merge clusters that have the same (or linked) best match
-    clusters = merge_clusters_by_match(
-        clusters, performer_link_index=getattr(recognizer, "performer_link_index", None) or {},
-    )
+    clusters = merge_clusters_by_match(clusters, performer_link_index=performer_link_index)
 
     print(f"[clustered_freq] {len(all_results)} face detections -> {len(clusters)} person clusters")
 
@@ -606,13 +656,20 @@ def clustered_frequency_matching(
         cluster_size = len(cluster)
         unique_frames = len(set(frame_idx for frame_idx, _ in cluster))
 
-        # Collect all matches from faces in this cluster
+        # Collect all matches from faces in this cluster, keyed by each
+        # match's canonical linked-group identity (see _canonical_identity)
+        # rather than raw stashdb_id -- otherwise a linked local/catalogue
+        # duplicate (e.g. a local-index match and its own linked pornbox
+        # record) tallies as two separate candidates within the same
+        # cluster, and the loser shows up as a spurious "other possible
+        # match" for a person the winner already correctly represents.
         performer_matches: dict[str, list[tuple[float, PerformerMatch, int]]] = defaultdict(list)
 
         for frame_idx, result in cluster:
             for match in result.matches:
                 if match.combined_score <= max_distance:
-                    performer_matches[match.stashdb_id].append(
+                    key = _canonical_identity(match, performer_link_index)
+                    performer_matches[key].append(
                         (match.combined_score, match, frame_idx)
                     )
 
@@ -628,7 +685,7 @@ def clustered_frequency_matching(
 
         # Score each performer within this cluster
         candidates = []
-        for stashdb_id, matches in performer_matches.items():
+        for link_key, matches in performer_matches.items():
             distances = [m[0] for m in matches]
             min_distance = min(distances)
             match_unique_frames = len(set(m[2] for m in matches))
@@ -640,21 +697,28 @@ def clustered_frequency_matching(
             frame_bonus = 0.1 * (match_unique_frames - 1)
             weighted_score = confidence * (1 + frame_bonus)
 
+            # For display, prefer the endpoint-priority winner among this
+            # identity's own linked candidates (e.g. stashdb.org over
+            # pornbox for the same real person) -- falls back to best
+            # (lowest) distance when none has a configured priority
+            # endpoint. See _pick_priority_match.
+            raw_matches = [m[1] for m in matches]
+            best_match = _pick_priority_match(raw_matches, endpoint_priority_domains)
+            is_tagged = any(m.stashdb_id in tagged_ids for m in raw_matches)
+
             # Apply small boost for already-tagged performers
-            if stashdb_id in tagged_ids:
+            if is_tagged:
                 weighted_score += tagged_boost
 
-            best_match = min(matches, key=lambda m: m[0])[1]
-
             candidates.append({
-                "stashdb_id": stashdb_id,
+                "stashdb_id": link_key,
                 "appearances": len(matches),
                 "unique_frames": match_unique_frames,
                 "min_distance": min_distance,
                 "avg_distance": float(np.mean(distances)),
                 "weighted_score": weighted_score,
                 "best_match": best_match,
-                "is_tagged": stashdb_id in tagged_ids,
+                "is_tagged": is_tagged,
             })
 
         # Sort by weighted score (higher is better)
