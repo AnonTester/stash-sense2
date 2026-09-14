@@ -6532,9 +6532,23 @@
       }
       const localLink = `<a href="/performers/${encodeURIComponent(c.local_performer_id)}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>`;
       const hasStashDbLink = c.stashdb_id && c.stashdb_id !== c.local_performer_id;
-      if (!hasStashDbLink) return localLink;
-      const stashDbUrl = `https://stashdb.org/performers/${c.stashdb_id}`;
-      return `<a href="${escapeHtml(stashDbUrl)}" target="_blank" rel="noopener" class="ss-link">View on stashdb.org</a> ${localLink}`;
+      const links = [localLink];
+      if (hasStashDbLink) {
+        const stashDbUrl = `https://stashdb.org/performers/${c.stashdb_id}`;
+        links.unshift(`<a href="${escapeHtml(stashDbUrl)}" target="_blank" rel="noopener" class="ss-link">View on stashdb.org</a>`);
+      }
+      // A local performer with no real StashDB link can still carry a
+      // catalogue source's profile URL (e.g. added from javdatabase.com) --
+      // same "View on <domain>" treatment as a catalogue-only match, see
+      // stash-sense.js's _matchLinksHtml (same convention, kept in sync).
+      if (c.profile_url) {
+        let label = 'View on source';
+        try {
+          label = `View on ${new URL(c.profile_url).hostname.replace(/^www\./, '')}`;
+        } catch (e) { /* keep generic label */ }
+        links.unshift(`<a href="${escapeHtml(c.profile_url)}" target="_blank" rel="noopener" class="ss-link">${escapeHtml(label)}</a>`);
+      }
+      return links.join(' ');
     }
 
     // forDismissedSection: renders the "show dismissed" panel's cards

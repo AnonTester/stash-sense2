@@ -1,5 +1,10 @@
 ## 2026-09-14
 
+### 0.34.6 (sidecar) / 0.26.2 (plugin)
+- Fix: a local performer added from a catalogue-only source (e.g.
+  javdatabase.com) only showed "View local performer" on a match card,
+  never a "View on <site>" link, unlike a StashDB-linked local performer.
+
 ### 0.34.5 (sidecar)
 - Fix: linked performer records (data-gen link groups, and local performers
   linked to a StashDB entry) showed as duplicate/split entries instead of

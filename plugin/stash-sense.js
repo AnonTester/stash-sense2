@@ -879,11 +879,22 @@
         }
         const localLink = `<a href="${this._localPerformerUrl(match.local_performer_id)}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>`;
         const hasStashDbLink = match.stashdb_id && match.stashdb_id !== match.local_performer_id;
-        if (!hasStashDbLink) {
-          return localLink;
+        const links = [localLink];
+        if (hasStashDbLink) {
+          const stashDbUrl = this._stashboxPerformerUrl('stashdb.org', match.stashdb_id);
+          links.unshift(`<a href="${stashDbUrl}" target="_blank" rel="noopener" class="ss-link">View on stashdb.org</a>`);
         }
-        const stashDbUrl = this._stashboxPerformerUrl('stashdb.org', match.stashdb_id);
-        return `<a href="${stashDbUrl}" target="_blank" rel="noopener" class="ss-link">View on stashdb.org</a> ${localLink}`;
+        // A local performer with no real StashDB link can still carry a
+        // catalogue source's profile URL (e.g. added from javdatabase.com)
+        // -- same "View on <domain>" treatment as a catalogue-only match.
+        if (match.profile_url) {
+          let label = 'View on source';
+          try {
+            label = `View on ${new URL(match.profile_url).hostname.replace(/^www\./, '')}`;
+          } catch (e) { /* keep generic label */ }
+          links.unshift(`<a href="${match.profile_url}" target="_blank" rel="noopener" class="ss-link">${label}</a>`);
+        }
+        return links.join(' ');
       },
 
       // Resolve a match to its local Stash performer, if any is already in

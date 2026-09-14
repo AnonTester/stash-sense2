@@ -32,6 +32,25 @@ DETECTION_POOL_SIZE = 3
 DET_SIZE_STRIDE = 32
 
 
+def _local_match_profile_url(local_info: dict) -> Optional[str]:
+    """A local-index match's own catalogue profile URL, for display
+    alongside its "View local performer" link.
+
+    A local performer with no real StashDB link (e.g. added from a
+    catalogue-only source like javdatabase.com) can still carry that
+    source's profile URL in their own Stash `urls` field (see
+    local_performer_index.py's upsert()) -- this surfaces it as a second
+    "View on <site>" link, the same corroborating-signal treatment a real
+    stashdb_id link already gets. Skips stashdb.org itself since that case
+    is already covered by the stashdb_id branch and would otherwise show
+    as a redundant/unverified duplicate."""
+    return next(
+        (u for u in (local_info.get("urls") or [])
+         if u and "stashdb.org" not in u.lower()),
+        None,
+    )
+
+
 @dataclass
 class PerformerMatch:
     """A potential performer match."""
@@ -422,6 +441,7 @@ class FaceRecognizer:
                 country = None
                 image_url = local_info.get("image_url")
                 local_performer_id = id_part
+                profile_url = _local_match_profile_url(local_info)
             elif category == "catalogue":
                 # Non-stash-box source (e.g. seekfans) -- id_part is the
                 # internal database performer id, not a StashDB uuid, and
