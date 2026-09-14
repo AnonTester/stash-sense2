@@ -188,23 +188,52 @@ class FaceRecognizer:
         return self.performers.get(universal_id, {})
 
     def _endpoint_priority_domains(self) -> list[str]:
-        """Current user-configured stash-box endpoint priority order
-        (Settings > ... > Endpoint priority), as a list of domains (e.g.
-        ["stashdb.org", "theporndb.net", ...]) matching a universal_id's
-        own endpoint prefix -- for matching.py's
-        collapse_linked_candidates() to pick a "main" entry from a linked
-        group. Re-read on every call rather than cached: this is a cheap
-        local read (no network call), and the setting can change at any
-        time via Settings, so it should take effect on the very next
-        match, not after a restart. get_rec_db is imported lazily here
-        (not at module top-level) to avoid a circular import with
-        recommendations_router.py, which -- via its analyzers -- can end
-        up importing this module."""
+        """Current effective stash-box endpoint priority order (Settings >
+        ... > Endpoint priority), as a list of domains (e.g. ["stashdb.org",
+        "theporndb.net", ...]) matching a universal_id's own endpoint
+        prefix -- for matching.py's collapse_linked_candidates() and
+        scene_matcher.py's own linked-group display pick to prefer a "main"
+        entry from a linked group. Re-read on every call rather than
+        cached: this is a cheap local read (no network call), and the
+        setting can change at any time via Settings, so it should take
+        effect on the very next match, not after a restart. get_rec_db is
+        imported lazily here (not at module top-level) to avoid a circular
+        import with recommendations_router.py, which -- via its analyzers
+        -- can end up importing this module.
+
+        `db.get_endpoint_priorities()` alone only returns endpoints the
+        user has *explicitly* reordered/saved via the Endpoint Priority UI
+        -- empty for anyone who never opened that specific panel, even
+        with real stash-box connections configured. Every configured,
+        non-disabled connection not in that explicit list is still
+        appended here (in the connection manager's own default order),
+        mirroring GET /settings/endpoint-priorities' own display fallback
+        -- otherwise an ordinary setup with e.g. only StashDB connected
+        silently fell back to raw match score for every linked group with
+        no stashbox member (any stashbox endpoint is still a real,
+        meaningful priority signal over a catalogue source like pornbox/
+        iafd, configured order among stashbox endpoints or not). Confirmed
+        live: a fresh deployment with stash-box connections but no saved
+        endpoint-priority order showed a linked group's pornbox entry
+        instead of its stashdb.org entry for exactly this reason."""
         try:
             from recommendations_router import get_rec_db
-            connections_by_endpoint = {c["endpoint"]: c for c in get_connection_manager().get_connections()}
-            priority_order = get_rec_db().get_endpoint_priorities()
-            return [connections_by_endpoint[ep]["domain"] for ep in priority_order if ep in connections_by_endpoint]
+            connections = get_connection_manager().get_connections()
+            connections_by_endpoint = {c["endpoint"]: c for c in connections}
+            db = get_rec_db()
+            priority_order = db.get_endpoint_priorities()
+            disabled = set(db.get_disabled_endpoints())
+
+            domains: list[str] = []
+            seen: set[str] = set()
+            for ep in priority_order:
+                if ep in connections_by_endpoint and ep not in disabled:
+                    domains.append(connections_by_endpoint[ep]["domain"])
+                    seen.add(ep)
+            for ep, conn in connections_by_endpoint.items():
+                if ep not in seen and ep not in disabled:
+                    domains.append(conn["domain"])
+            return domains
         except Exception as e:
             print(f"Could not resolve endpoint priority order (linked-candidate collapse will fall back to "
                   f"match score for any group with no stashbox member): {e}")

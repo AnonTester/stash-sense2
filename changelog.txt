@@ -1,5 +1,61 @@
 ## 2026-09-14
 
+### 0.34.4 (sidecar)
+- Fix: a local-index match (this Stash instance's own performer, matched
+  via local_performer_index.py) and the main database's own StashDB entry
+  for that exact same real person still showed up as two separate
+  "persons" in Face Recommendations/Face Identification, each with their
+  own lower frame count and confidence -- distinct from the 0.34.1/0.34.2
+  linked-group fix, which only covered stash-sense2-data-gen's own
+  cross-catalogue performer_links.json groups. matching.py's
+  merge_local_candidates() already merges this specific case (a local
+  performer stash_id-linked to StashDB) within a single face's own
+  candidate list; scene_matcher.py's cross-frame/cross-cluster tallying
+  never had the same treatment. All four tallying points that already
+  knew about performer_link_index now also resolve a local match's own
+  linked stashdb_id first, so it collapses onto the main index's entry
+  before the endpoint-priority pick (0.34.2/0.34.3) decides which one to
+  display -- confirmed live: "Marley Brinx" via the local index and via
+  stashdb.org directly never merged before this.
+
+### 0.34.3 (sidecar)
+- Fix: 0.34.2's endpoint-priority preference for a linked group's display
+  candidate had no effect on a deployment that had never explicitly saved
+  a custom order via the separate Endpoint Priority reordering UI --
+  `recognizer.py`'s `_endpoint_priority_domains()` only ever returned that
+  explicitly-saved list, empty on an ordinary setup that just connected
+  stash-box endpoints and left the default order alone, silently falling
+  back to raw match score for every linked group (this also affected the
+  pre-existing single-face candidate collapse in matching.py, not just
+  the new scene-level pick). Now mirrors GET /settings/endpoint-priorities'
+  own display fallback: any configured, non-disabled connection missing
+  from the explicit list is still appended in its default connection
+  order, so a plain "just connected StashDB" setup already prefers it
+  over a catalogue source like pornbox for a linked group.
+
+### 0.34.2 (sidecar)
+- Fix: when a merged linked group (see 0.34.1 below) had more than one
+  candidate record present in a scene, whichever one scored a marginally
+  closer match in some frame won display -- e.g. a pornbox record could
+  outrank the same person's stashdb.org record. Now prefers the user's
+  configured stash-box endpoint priority order (Settings > ... > Endpoint
+  priority) first, the same rule matching.py's collapse_linked_candidates
+  already applies to a single face's own candidate list, falling back to
+  match score only when no candidate in the group has a configured
+  priority endpoint at all.
+
+### 0.34.1 (sidecar)
+- Fix: two face clusters in the same scene that each matched a different
+  (but stash-sense2-data-gen-linked, i.e. same real person catalogued
+  under two records) performer showed up as two separate low-frame-count
+  "persons" in Face Recommendations/Face Identification instead of one.
+  matching.py's collapse_linked_candidates already handled this for a
+  single face's own ranked candidates; scene_matcher.py's cross-frame/
+  cross-cluster tallying (frequency_based_matching, aggregate_matches,
+  merge_clusters_by_match, and hybrid_matching's own combine step) never
+  had the same treatment and grouped by raw stashdb_id alone. All four
+  now canonicalize through the performer_link_index first.
+
 ### 0.26.1 (plugin)
 - Fix: face-match/candidate suggestion thumbnails (scene identify results,
   Face Recommendations candidates, and the performer-candidate picker
