@@ -36,32 +36,20 @@ class MatchingConfig:
     max_results: int = 10
     max_distance: float = 0.8  # Maximum distance to return
 
-    # Gender mismatch soft penalty (see _effective_gender/apply_gender_penalty
-    # below). Deliberately a confidence multiplier, not an exclusion filter --
-    # a wrong hard filter would silently hide a correct match whenever either
-    # side's gender signal is wrong (a real risk for a model-inferred value,
-    # and even a real source value can be stale/miscategorized). Only kicks
-    # in when *both* sides clear GENDER_CONFIDENCE_FLOOR and actually
-    # disagree; either side unknown or low-confidence leaves the candidate
-    # untouched.
-    gender_confidence_floor: float = 0.65
-    gender_mismatch_penalty: float = 0.5
-
     # Steep-angle soft penalty. buffalo_l's per-face yaw estimate (see
     # stash-sense2-data-gen's embed/embeddings.py) is a rough heuristic,
     # not a calibrated pose estimator, and a face crop shot from a steep
     # angle carries less reliable identity information than a frontal
     # one -- confirmed live: a performer whose only reference images were
     # both >30 degrees off-frontal kept surfacing as a false-positive
-    # match across unrelated queries. Deliberately a soft multiplier
-    # (like the gender penalty above), not a hard exclusion -- yaw is a
-    # rough estimate, and a genuinely steep-angle match can still be
-    # correct. Scales linearly from 1.0 (no penalty) at
-    # yaw_penalty_threshold up to yaw_penalty_at_90 at a full 90-degree
-    # profile. Applied per-candidate-face (the specific matched vector's
-    # own yaw), not per-performer -- a performer can have both great
-    # frontal shots and steep-angle ones, so this can't be collapsed to
-    # one number the way inferred_gender is.
+    # match across unrelated queries. Deliberately a soft multiplier,
+    # not a hard exclusion -- yaw is a rough estimate, and a genuinely
+    # steep-angle match can still be correct. Scales linearly from 1.0
+    # (no penalty) at yaw_penalty_threshold up to yaw_penalty_at_90 at a
+    # full 90-degree profile. Applied per-candidate-face (the specific
+    # matched vector's own yaw), not per-performer -- a performer can
+    # have both great frontal shots and steep-angle ones, so this can't
+    # be collapsed to one number per performer.
     yaw_penalty_threshold: float = 45.0
     yaw_penalty_at_90: float = 0.5
 
@@ -115,64 +103,6 @@ def query_index(
     return IndexQueryResult(neighbors=matches.keys, distances=matches.distances)
 
 
-# stash-box's own gender vocabulary has 6 values (FEMALE/MALE/INTERSEX/
-# NON_BINARY/TRANSGENDER_FEMALE/TRANSGENDER_MALE), but buffalo_l's genderage
-# model only ever outputs a binary MALE/FEMALE -- there is no model output
-# to meaningfully compare NON_BINARY/INTERSEX against, so those are treated
-# as unknown for this purpose only (never rewritten, just not used as a
-# mismatch signal). TRANSGENDER_FEMALE/TRANSGENDER_MALE are mapped to their
-# closest presentation bucket -- a judgment call, easy to change later.
-_GENDER_COMPARISON_BUCKET = {
-    "FEMALE": "FEMALE",
-    "MALE": "MALE",
-    "TRANSGENDER_FEMALE": "FEMALE",
-    "TRANSGENDER_MALE": "MALE",
-}
-
-
-def _effective_gender(info: dict, config: MatchingConfig) -> Optional[str]:
-    """A candidate's gender for mismatch-penalty comparison purposes only:
-    the real, stash-box-sourced `gender` when known (any confidence -- it's
-    a real fact, not a model guess), else the buffalo_l-derived
-    `inferred_gender` but only when its own aggregate confidence clears
-    `gender_confidence_floor` (a low-confidence inferred value is weak
-    evidence, not worth penalizing a candidate over). Returns None
-    (untouched by the penalty) for NON_BINARY/INTERSEX or anything absent."""
-    gender = info.get("gender")
-    if gender:
-        return _GENDER_COMPARISON_BUCKET.get(gender)
-    inferred = info.get("inferred_gender")
-    inferred_confidence = info.get("inferred_gender_confidence") or 0.0
-    if inferred and inferred_confidence >= config.gender_confidence_floor:
-        return _GENDER_COMPARISON_BUCKET.get(inferred)
-    return None
-
-
-def _apply_gender_penalty(
-    candidate: CandidateMatch, info: dict, config: MatchingConfig,
-    query_gender: Optional[str], query_gender_confidence: Optional[float],
-) -> None:
-    """Multiplies `candidate.confidence` down (never excludes) when the
-    query face's own predicted gender and this candidate's effective
-    gender are both confidently known and disagree -- see MatchingConfig's
-    own comment for why this is a soft penalty, not a hard filter.
-
-    Also pushes `combined_distance` back out to match (`1 - confidence`,
-    the same relationship `build_matches` establishes it with) -- every
-    downstream step (per-idx/per-uid dedup, sorting, `max_distance`
-    threshold filtering) ranks and filters by `combined_distance`, not
-    `confidence`, so leaving it untouched would make this penalty affect
-    only the displayed number, not which candidates actually win or
-    survive the cut. That would defeat the point of a mismatch *penalty*."""
-    if not query_gender or (query_gender_confidence or 0.0) < config.gender_confidence_floor:
-        return
-    query_bucket = _GENDER_COMPARISON_BUCKET.get(query_gender)
-    candidate_bucket = _effective_gender(info, config)
-    if query_bucket and candidate_bucket and query_bucket != candidate_bucket:
-        candidate.confidence *= config.gender_mismatch_penalty
-        candidate.combined_distance = 1.0 - candidate.confidence
-
-
 def _apply_yaw_penalty(candidate: CandidateMatch, face_yaw: list, config: MatchingConfig) -> None:
     """Multiplies `candidate.confidence` down (never excludes) when the
     specific reference face that matched was shot at a steep angle --
@@ -180,9 +110,9 @@ def _apply_yaw_penalty(candidate: CandidateMatch, face_yaw: list, config: Matchi
     aggregated across the performer. See MatchingConfig's own comment for
     the rationale and the linear-scaling formula.
 
-    Also pushes `combined_distance` back out to match, same reasoning as
-    `_apply_gender_penalty` -- every downstream ranking/filtering step
-    reads `combined_distance`, not `confidence`."""
+    Also pushes `combined_distance` back out to match -- every
+    downstream ranking/filtering step reads `combined_distance`, not
+    `confidence`."""
     if not face_yaw or candidate.face_index >= len(face_yaw):
         return
     yaw = face_yaw[candidate.face_index]
@@ -203,17 +133,10 @@ def build_matches(
     faces_mapping: list[str],  # index -> universal_id
     performers: dict[str, dict],  # universal_id -> performer info
     config: MatchingConfig = DEFAULT_CONFIG,
-    query_gender: Optional[str] = None,
-    query_gender_confidence: Optional[float] = None,
     face_yaw: Optional[list] = None,  # index -> yaw degrees, or None
 ) -> MatchingResult:
     """Build sorted, threshold-filtered CandidateMatch objects from one
     index query's results.
-
-    `query_gender`/`query_gender_confidence`: the query face's own
-    buffalo_l-predicted gender (see recognizer.py's caller), used only for
-    the soft mismatch penalty below -- optional, and a no-op when omitted
-    (existing callers that don't pass them are unaffected).
 
     `face_yaw`: index -> yaw degrees (same shape as faces_mapping), for
     the steep-angle soft penalty -- optional, and a no-op when omitted or
@@ -237,7 +160,6 @@ def build_matches(
             distance=float(dist), combined_distance=float(dist), rank=rank + 1,
         )
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
-        _apply_gender_penalty(candidate, info, config, query_gender, query_gender_confidence)
         _apply_yaw_penalty(candidate, face_yaw, config)
         # Defensive: keep only the closer entry if the ANN index ever
         # returns the same idx twice within one query's neighbor list
@@ -543,8 +465,6 @@ def match_face(
     config: MatchingConfig = DEFAULT_CONFIG,
     local_index: Optional[Index] = None,
     local_performers_mapping: Optional[dict[str, dict]] = None,
-    query_gender: Optional[str] = None,
-    query_gender_confidence: Optional[float] = None,
     face_yaw: Optional[list] = None,
     performer_link_index: Optional[dict[str, list[str]]] = None,
     endpoint_priority_domains: Optional[list[str]] = None,
@@ -565,10 +485,6 @@ def match_face(
         local_performers_mapping: str(performer_id) -> {name, stashdb_id,
             image_url, ...} for the local index. Required alongside
             local_index above for local matching to run.
-        query_gender: This query face's own buffalo_l-predicted gender
-            ("MALE"/"FEMALE"), if available -- see recognizer.py's caller.
-            Optional; omitting it just skips the gender mismatch penalty.
-        query_gender_confidence: Confidence (0-1) for `query_gender`.
         face_yaw: index -> yaw degrees for the main index (see
             build_matches's own docstring). Optional; omitting it skips
             the steep-angle penalty. Not applicable to local-index
@@ -590,7 +506,6 @@ def match_face(
     query_result = query_index(embedding, index, config)
     result = build_matches(
         query_result, faces_mapping, performers, config,
-        query_gender=query_gender, query_gender_confidence=query_gender_confidence,
         face_yaw=face_yaw,
     )
 

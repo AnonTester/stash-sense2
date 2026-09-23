@@ -290,7 +290,7 @@ def _run_pass(
                     # Unpack defensively -- recognize_face_v2's return arity has
                     # drifted between checkouts (2-tuple vs 3-tuple with a raw
                     # embedding appended); only `matches` (first element) is used here.
-                    matches = recognizer.recognize_face_v2(face, match_config, image=s.image)[0]
+                    matches = recognizer.recognize_face_v2(face, match_config)[0]
                     outcome.match_ms = (time.perf_counter() - t1) * 1000
                     if matches:
                         top1 = matches[0]

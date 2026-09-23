@@ -366,7 +366,6 @@ class FaceRecognizer:
         face: DetectedFace,
         config: MatchingConfig = None,
         embedding: "FaceEmbedding | None" = None,
-        image: "np.ndarray | None" = None,
     ) -> tuple[list[PerformerMatch], MatchingResult]:
         """
         Recognize a face against the database.
@@ -376,18 +375,6 @@ class FaceRecognizer:
                 populated on it by detect_faces())
             config: Matching configuration (uses defaults if not provided)
             embedding: Pre-computed FaceEmbedding (skips read-back if provided)
-            image: Fallback full (not cropped) frame to use for gender/age
-                prediction, only when `face.source_image` isn't already
-                populated (e.g. a DetectedFace reconstructed from a cache
-                row with no image at all). `face.source_image` -- the
-                exact frame detect_faces() actually detected `face`
-                against, correctly rotated if a roll correction fired --
-                is always preferred when present; passing a caller-held
-                `image` here is silently WRONG whenever detection rotated
-                internally (face.bbox's coordinates are in that rotated
-                frame, not this one), which is exactly why this now
-                defers to face.source_image first. Omitting both just
-                skips the gender-mismatch penalty for this call.
 
         Returns:
             Tuple of (matches, matching_result, embedding)
@@ -399,13 +386,6 @@ class FaceRecognizer:
         if embedding is None:
             embedding = self.generator.get_embedding(face)
 
-        query_gender = query_gender_confidence = None
-        effective_image = face.source_image if face.source_image is not None else image
-        if effective_image is not None:
-            gender_age = self.generator.predict_gender_age(face, effective_image)
-            if gender_age:
-                query_gender, query_gender_confidence, _ = gender_age
-
         local_index = self.local_performer_index
         result = match_face(
             embedding=embedding.embedding,
@@ -415,8 +395,6 @@ class FaceRecognizer:
             config=config,
             local_index=local_index.index if local_index else None,
             local_performers_mapping=local_index.mapping if local_index else None,
-            query_gender=query_gender,
-            query_gender_confidence=query_gender_confidence,
             face_yaw=self.face_yaw,
             performer_link_index=self.performer_link_index,
             endpoint_priority_domains=self._endpoint_priority_domains(),
@@ -519,7 +497,7 @@ class FaceRecognizer:
         # Match each face using pre-computed embeddings
         results = []
         for face, emb in zip(faces, embeddings):
-            matches, _, _ = self.recognize_face_v2(face, config, embedding=emb, image=image)
+            matches, _, _ = self.recognize_face_v2(face, config, embedding=emb)
             results.append(RecognitionResult(face=face, matches=matches, embedding=emb))
 
         return results

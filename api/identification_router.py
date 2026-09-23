@@ -921,7 +921,7 @@ async def _process_sprite_frames(
     extra_results: list[tuple[int, RecognitionResult]] = []
     cache_rows: list[dict] = []
     for i, ((timestamp, face, tile_image), embedding) in enumerate(zip(detected, embeddings)):
-        matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=tile_image)
+        matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
         sprite_frame_index = -2 - i
         extra_results.append((sprite_frame_index, RecognitionResult(face=face, matches=matches, embedding=embedding)))
         cache_rows.append({
@@ -1280,7 +1280,7 @@ async def _identify_scene_compute(
 
     for (frame_idx, face, frame_image), embedding in zip(detected_faces, embeddings):
         t_rec = time.time()
-        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding, image=frame_image)
+        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
         t_recognize_total += time.time() - t_rec
 
         result = RecognitionResult(face=face, matches=matches, embedding=embedding)
@@ -1339,7 +1339,7 @@ async def _identify_scene_compute(
                         # above) -- no GPU call, no lock needed.
                         ss_embeddings = _recognizer.generator.get_embeddings_batch(ss_faces)
                         for face, emb in zip(ss_faces, ss_embeddings):
-                            matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb, image=screenshot_image)
+                            matches, _, _ = _recognizer.recognize_face_v2(face, match_config, embedding=emb)
                             result = RecognitionResult(face=face, matches=matches, embedding=emb)
                             all_results.append((-1, result))
                             screenshot_faces += 1
