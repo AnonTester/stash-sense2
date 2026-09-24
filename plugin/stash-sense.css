@@ -2335,11 +2335,17 @@
   margin-bottom: 1.5rem;
 }
 
+/* Width fixed, height follows the photo's own proportions (capped so an
+   extremely tall image can't blow the header up) -- a portrait performer photo
+   forced into the old 80x80 box via object-fit: cover was cropped at the top
+   and bottom. contain + auto height shows the whole image. */
 .ss-upstream-header img {
   width: 80px;
-  height: 80px;
+  height: auto;
+  max-height: 160px;
+  flex-shrink: 0;
   border-radius: 8px;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .ss-upstream-header h2 a {

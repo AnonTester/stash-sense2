@@ -1,5 +1,9 @@
 ## 2026-09-24
 
+### 0.27.2 (plugin)
+- Fix: the performer photo in an Upstream Performer Changes detail view was
+  cropped at the top and bottom; it now shows at its real proportions.
+
 ### 0.27.1 (plugin)
 - Fix: a match whose performer record wasn't found (source such as "seekfans")
   showed a dead "View on seekfans" link; it now shows the source as plain text.
