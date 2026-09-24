@@ -1,5 +1,9 @@
 ## 2026-09-24
 
+### 0.27.1 (plugin)
+- Fix: a match whose performer record wasn't found (source such as "seekfans")
+  showed a dead "View on seekfans" link; it now shows the source as plain text.
+
 ### 0.35.0 (sidecar) / 0.27.0 (plugin)
 - Improvement: the retired gender/age model is no longer offered for download
   (or in Download All); if still installed, Settings > Models shows it as

@@ -875,6 +875,12 @@
           return `<a href="${href}" target="_blank" rel="noopener" class="ss-link">${label}</a>`;
         }
         if (!match.local_performer_id) {
+          // Only a real stash-box endpoint is a domain (stashdb.org, fansdb.cc, ...);
+          // a catalogue source's unresolved id (e.g. endpoint "seekfans") would
+          // otherwise produce a dead https://seekfans/performers/<id> link.
+          if (!String(endpoint).includes('.')) {
+            return `<span class="ss-link-disabled">Source: ${endpoint}</span>`;
+          }
           return `<a href="${stashboxUrl}" target="_blank" rel="noopener" class="ss-link">View on ${endpoint}</a>`;
         }
         const localLink = `<a href="${this._localPerformerUrl(match.local_performer_id)}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>`;

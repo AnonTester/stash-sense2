@@ -6527,6 +6527,13 @@
       }
       if (!c.local_performer_id) {
         if (!c.stashdb_id) return '';
+        // Only a real stash-box endpoint is a domain (stashdb.org, fansdb.cc, ...).
+        // A catalogue source's id whose performer record couldn't be resolved
+        // arrives here as e.g. endpoint "seekfans" -- building
+        // https://seekfans/performers/<id> from that gives a dead link.
+        if (!endpoint.includes('.')) {
+          return `<span class="ss-link-disabled">Source: ${escapeHtml(endpoint)}</span>`;
+        }
         const stashboxUrl = `https://${endpoint}/performers/${c.stashdb_id}`;
         return `<a href="${escapeHtml(stashboxUrl)}" target="_blank" rel="noopener" class="ss-link">View on ${escapeHtml(endpoint)}</a>`;
       }
