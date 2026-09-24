@@ -61,6 +61,12 @@ async def download_model(model_name: str, background_tasks: BackgroundTasks):
             detail=f"Unknown model: {model_name}",
         )
 
+    if status[model_name].get("deprecated"):
+        raise HTTPException(
+            status_code=410,
+            detail=f"Model {model_name} is deprecated and no longer available for download",
+        )
+
     async def _do_download():
         try:
             await mgr.download_model(model_name)
@@ -69,6 +75,21 @@ async def download_model(model_name: str, background_tasks: BackgroundTasks):
 
     background_tasks.add_task(_do_download)
     return {"status": "download_started", "model": model_name}
+
+
+@router.delete("/models/{model_name}")
+async def delete_model(model_name: str):
+    """Delete an installed model file that is no longer used (deprecated).
+
+    Models still in use can't be deleted (409).
+    """
+    mgr = _get_manager()
+    try:
+        deleted = mgr.delete_model(model_name)
+    except ValueError as e:
+        status_code = 404 if str(e).startswith("Unknown model") else 409
+        raise HTTPException(status_code=status_code, detail=str(e))
+    return {"status": "deleted" if deleted else "not_installed", "model": model_name}
 
 
 @router.post("/models/download-all")

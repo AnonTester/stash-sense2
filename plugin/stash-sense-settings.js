@@ -833,10 +833,13 @@
       ]);
 
       const modelsObj = modelsResult.models || {};
+      // A deprecated (no longer used) model that isn't on disk has nothing
+      // left to show or offer -- hide it entirely; if a file is still there
+      // it stays listed so it can be deleted.
       const models = Object.entries(modelsObj).map(([key, info]) => ({
         name: key,
         ...info,
-      }));
+      })).filter(m => !(m.deprecated && m.status === 'not_installed'));
 
       if (models.length === 0) {
         const emptyRow = SS.createElement('div', {
@@ -890,11 +893,14 @@
           const control = SS.createElement('div', { className: 'ss-setting-control' });
 
           // Status badge
-          const statusClass = model.status === 'installed' ? 'ss-model-installed'
+          const isDeprecated = !!model.deprecated;
+          const statusClass = isDeprecated ? 'ss-model-deprecated'
+            : model.status === 'installed' ? 'ss-model-installed'
             : model.status === 'corrupted' ? 'ss-model-corrupted'
             : 'ss-model-not_installed';
 
-          const statusLabel = model.status === 'installed' ? 'Installed'
+          const statusLabel = isDeprecated ? 'No longer used'
+            : model.status === 'installed' ? 'Installed'
             : model.status === 'corrupted' ? 'Corrupted'
             : 'Not Installed';
 
@@ -904,8 +910,28 @@
           });
           control.appendChild(badge);
 
-          // Download button for non-installed models
-          if (model.status !== 'installed') {
+          if (isDeprecated) {
+            // No longer used by anything: offer removal, never a download.
+            const delBtn = SS.createElement('button', {
+              className: 'ss-btn ss-btn-danger ss-btn-sm',
+              textContent: 'Delete',
+            });
+            delBtn.addEventListener('click', async () => {
+              if (!window.confirm(`Delete ${modelName}? It is no longer used and can be safely removed.`)) return;
+              delBtn.disabled = true;
+              delBtn.textContent = 'Deleting...';
+              try {
+                await apiCall('models_delete', { model_name: model.name });
+                row.remove();
+              } catch (err) {
+                delBtn.textContent = 'Error';
+                delBtn.disabled = false;
+                console.error(`[Stash Sense] Failed to delete ${model.name}:`, err);
+              }
+            });
+            control.appendChild(delBtn);
+          } else if (model.status !== 'installed') {
+            // Download button for non-installed models
             hasNotInstalled = true;
             const dlBtn = SS.createElement('button', {
               className: 'ss-btn ss-btn-primary ss-btn-sm',

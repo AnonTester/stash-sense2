@@ -576,3 +576,86 @@ class TestSingleton:
             assert mgr is get_model_manager()
         finally:
             mm._model_manager = original
+
+
+# ============================================================================
+# Deprecated models
+# ============================================================================
+
+DEPRECATED_MANIFEST = {
+    "version": 5,
+    "repo": "AnonTester/stash-sense2-data",
+    "release_tag": "models",
+    "models": {
+        "live_model": {
+            "file": "live.onnx", "size": 10, "sha256": "aa", "group": "face_recognition",
+            "description": "In use",
+        },
+        "old_model": {
+            "file": "sub/old.onnx", "size": 10, "sha256": "bb", "group": "face_recognition",
+            "description": "No longer used", "deprecated": True,
+        },
+    },
+}
+
+
+@pytest.fixture
+def dep_mgr(tmp_path):
+    manifest = tmp_path / "models.json"
+    manifest.write_text(json.dumps(DEPRECATED_MANIFEST))
+    models = tmp_path / "models"
+    (models / "sub").mkdir(parents=True)
+    return ModelManager(manifest, models), models
+
+
+class TestDeprecatedModels:
+    def test_status_reports_deprecated_flag(self, dep_mgr):
+        mgr, _ = dep_mgr
+        status = mgr.get_status()
+        assert status["old_model"]["deprecated"] is True
+        assert status["live_model"]["deprecated"] is False
+
+    @pytest.mark.asyncio
+    async def test_download_refused(self, dep_mgr):
+        mgr, _ = dep_mgr
+        with pytest.raises(ValueError, match="deprecated"):
+            await mgr.download_model("old_model")
+
+    @pytest.mark.asyncio
+    async def test_download_all_skips_deprecated(self, dep_mgr):
+        mgr, _ = dep_mgr
+        with patch.object(mgr, "download_model", new=AsyncMock()) as dl:
+            results = await mgr.download_all()
+        dl.assert_awaited_once_with("live_model")
+        assert results["old_model"] == "skipped (deprecated)"
+
+    def test_delete_removes_file(self, dep_mgr):
+        mgr, models = dep_mgr
+        f = models / "sub" / "old.onnx"
+        f.write_bytes(b"x" * 10)
+        assert mgr.delete_model("old_model") is True
+        assert not f.exists()
+        assert mgr.get_status()["old_model"]["status"] == "not_installed"
+
+    def test_delete_corrupted_file_also_allowed(self, dep_mgr):
+        mgr, models = dep_mgr
+        (models / "sub" / "old.onnx").write_bytes(b"truncated")  # 9 bytes != manifest size 10
+        assert mgr.get_status()["old_model"]["status"] == "corrupted"
+        assert mgr.delete_model("old_model") is True
+
+    def test_delete_when_not_installed_returns_false(self, dep_mgr):
+        mgr, _ = dep_mgr
+        assert mgr.delete_model("old_model") is False
+
+    def test_delete_refuses_model_in_use(self, dep_mgr):
+        mgr, models = dep_mgr
+        f = models / "live.onnx"
+        f.write_bytes(b"x" * 10)
+        with pytest.raises(ValueError, match="in use"):
+            mgr.delete_model("live_model")
+        assert f.exists()
+
+    def test_delete_unknown_model(self, dep_mgr):
+        mgr, _ = dep_mgr
+        with pytest.raises(ValueError, match="Unknown model"):
+            mgr.delete_model("nope")

@@ -132,6 +132,9 @@ def main():
     elif mode == "models_download":
         model_name = args.get("model_name", "")
         result = sidecar_post(sidecar_url, f"/models/download/{model_name}", timeout=300)
+    elif mode == "models_delete":
+        model_name = args.get("model_name", "")
+        result = sidecar_delete(sidecar_url, f"/models/{model_name}")
     elif mode == "models_download_all":
         result = sidecar_post(sidecar_url, "/models/download-all", timeout=300)
     elif mode == "models_progress":

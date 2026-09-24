@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.26.2';
+  const PLUGIN_VERSION = '0.27.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -40,7 +40,11 @@
   // three new /recommendations/actions/*-scene-face-matches* endpoints, and
   // PerformerMatchResponse.top_timestamps_sec -- none of which exist on an
   // older sidecar.
-  const MIN_SIDECAR_VERSION = '0.34.0';
+  //
+  // Bumped to 0.35.0 for the Settings model list: it now reads the
+  // `deprecated` flag from /models/status and calls DELETE /models/{name},
+  // neither of which exists on an older sidecar.
+  const MIN_SIDECAR_VERSION = '0.35.0';
 
   // Default settings
   const DEFAULTS = {

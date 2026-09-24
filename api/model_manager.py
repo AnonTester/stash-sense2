@@ -62,6 +62,9 @@ class ModelInfo:
     sha256: str
     group: str
     description: str
+    # No longer used by any code path: never offered for download, skipped
+    # by download_all(), and the only kind of model delete_model() allows.
+    deprecated: bool = False
 
 
 @dataclass
@@ -120,6 +123,7 @@ class ModelManager:
                 sha256=info["sha256"],
                 group=info["group"],
                 description=info["description"],
+                deprecated=bool(info.get("deprecated", False)),
             )
 
     def _model_path(self, model: ModelInfo) -> Path:
@@ -154,6 +158,7 @@ class ModelManager:
                 "size": model.size,
                 "group": model.group,
                 "description": model.description,
+                "deprecated": model.deprecated,
             }
         return result
 
@@ -213,6 +218,8 @@ class ModelManager:
         model = self._models.get(model_name)
         if model is None:
             raise ValueError(f"Unknown model: {model_name}")
+        if model.deprecated:
+            raise ValueError(f"Model {model_name} is deprecated and no longer available for download")
 
         url = self.get_download_url(model_name)
         dest = self._model_path(model)
@@ -281,6 +288,9 @@ class ModelManager:
         """
         results = {}
         for name, model in self._models.items():
+            if model.deprecated:
+                results[name] = "skipped (deprecated)"
+                continue
             status = self._check_model_status(model)
             if status == ModelStatus.INSTALLED:
                 results[name] = "skipped"
@@ -293,6 +303,30 @@ class ModelManager:
                 results[name] = f"error: {e}"
 
         return results
+
+    def delete_model(self, model_name: str) -> bool:
+        """Delete an installed model file. Only deprecated models can be
+        deleted -- removing one that's still in use would break recognition.
+
+        Returns:
+            True if a file was removed, False if it wasn't installed.
+
+        Raises:
+            ValueError: If model_name is unknown or not deprecated.
+        """
+        model = self._models.get(model_name)
+        if model is None:
+            raise ValueError(f"Unknown model: {model_name}")
+        if not model.deprecated:
+            raise ValueError(f"Model {model_name} is in use; only deprecated models can be deleted")
+
+        path = self._model_path(model)
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        self._progress.pop(model_name, None)
+        if existed:
+            logger.warning(f"Deleted deprecated model {model_name} ({path})")
+        return existed
 
     def get_progress(self) -> dict[str, dict]:
         """Get download progress for active and recent downloads.

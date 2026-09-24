@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "repo": "AnonTester/stash-sense2-data",
   "release_tag": "models",
   "models": {
@@ -29,7 +29,8 @@
       "size": 1322532,
       "sha256": "4fde69b1c810857b88c64a335084f1c3fe8f01246c9a191b48c7bb756d6652fb",
       "group": "face_recognition",
-      "description": "buffalo_l gender/age classifier (used standalone for a soft cross-gender matching signal, not part of the detection+recognition pipeline)"
+      "deprecated": true,
+      "description": "buffalo_l gender/age classifier -- no longer used (gender-based matching was removed in sidecar 0.34.7); safe to delete"
     }
   }
 }

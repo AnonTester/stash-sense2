@@ -147,3 +147,69 @@ class TestDownloadProgress:
         assert progress["facenet512"]["total_bytes"] == 1000
         assert progress["facenet512"]["status"] == "downloading"
         assert progress["facenet512"]["percent"] == 50.0
+
+
+# ============================================================================
+# Deprecated models
+# ============================================================================
+
+@pytest.fixture
+def dep_client(tmp_path):
+    """Router wired to a manifest with one live and one deprecated model."""
+    manifest = tmp_path / "dep_models.json"
+    manifest.write_text(json.dumps({
+        "version": 5, "repo": "test/repo", "release_tag": "models",
+        "models": {
+            "live_model": {"file": "live.onnx", "size": 10, "sha256": "aa",
+                           "group": "face_recognition", "description": "In use"},
+            "old_model": {"file": "old.onnx", "size": 10, "sha256": "bb",
+                          "group": "face_recognition", "description": "Unused",
+                          "deprecated": True},
+        },
+    }))
+    models = tmp_path / "dep_models"
+    models.mkdir()
+    init_model_router(ModelManager(manifest, models))
+    app = FastAPI()
+    app.include_router(router)
+    return TestClient(app), models
+
+
+class TestDeprecatedModels:
+    def test_status_includes_deprecated_flag(self, dep_client):
+        client, _ = dep_client
+        models = client.get("/models/status").json()["models"]
+        assert models["old_model"]["deprecated"] is True
+        assert models["live_model"]["deprecated"] is False
+
+    def test_download_deprecated_is_gone(self, dep_client):
+        client, _ = dep_client
+        resp = client.post("/models/download/old_model")
+        assert resp.status_code == 410
+
+    def test_delete_installed_deprecated_model(self, dep_client):
+        client, models = dep_client
+        f = models / "old.onnx"
+        f.write_bytes(b"x" * 10)
+        resp = client.delete("/models/old_model")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "deleted", "model": "old_model"}
+        assert not f.exists()
+
+    def test_delete_not_installed_is_ok(self, dep_client):
+        client, _ = dep_client
+        resp = client.delete("/models/old_model")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "not_installed"
+
+    def test_delete_model_in_use_rejected(self, dep_client):
+        client, models = dep_client
+        f = models / "live.onnx"
+        f.write_bytes(b"x" * 10)
+        resp = client.delete("/models/live_model")
+        assert resp.status_code == 409
+        assert f.exists()
+
+    def test_delete_unknown_model(self, dep_client):
+        client, _ = dep_client
+        assert client.delete("/models/nope").status_code == 404

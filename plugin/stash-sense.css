@@ -3395,6 +3395,11 @@ a.ss-upstream-endpoint-badge:hover {
   background: rgba(220, 53, 69, 0.15);
 }
 
+.ss-model-deprecated {
+  color: #b58900;
+  background: rgba(181, 137, 0, 0.15);
+}
+
 .ss-models-group-header {
   background: rgba(255, 255, 255, 0.02);
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
