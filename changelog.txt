@@ -1,3 +1,9 @@
+## 2026-09-26
+
+### 0.35.1 (sidecar)
+- Fix: on NVIDIA GPUs the CUDA provider was never used (inference silently ran
+  on the CPU) and the GPU wasn't detected; both are fixed.
+
 ## 2026-09-24
 
 ### 0.27.2 (plugin)

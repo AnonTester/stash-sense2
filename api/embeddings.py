@@ -213,7 +213,13 @@ class FaceEmbeddingGenerator:
     def _ort_providers(self) -> list[str]:
         """Get ONNX Runtime providers based on device."""
         if self.device == "gpu":
-            return ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+            import onnxruntime as ort
+            # Only request providers this onnxruntime build has: an unknown name (e.g.
+            # ROCMExecutionProvider on the CUDA build) makes ORT log an EP error and drop
+            # the WHOLE list to CPU without ever trying CUDA.
+            preferred = ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CUDAExecutionProvider"]
+            available = set(ort.get_available_providers())
+            return [p for p in preferred if p in available] + ["CPUExecutionProvider"]
         return ["CPUExecutionProvider"]
 
     @property

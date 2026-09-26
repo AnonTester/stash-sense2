@@ -8,6 +8,7 @@
 # silently clobber a GPU-specific build installed first. See Dockerfile.rocm's
 # comments for the full story (proven live in /opt/face-pipeline-bench).
 insightface>=0.7.3,<1
+nvidia-ml-py>=12  # provides pynvml, which hardware.py's NVIDIA GPU probe needs; without it a CUDA host is reported as no GPU
 onnx>=1.15.0,<1.18  # insightface pulls this in unpinned; onnx>=1.18 registers a new
                      # ml_dtypes dtype at import whose finfo() segfaults under numpy<2
 ml_dtypes>=0.4.0,<0.5
