@@ -36,22 +36,26 @@ cd api && make lint            # check only
 cd api && make lint-fix        # auto-fix
 
 # Deploy to the live sidecar + plugin (this fork's actual deployment —
-# a local Docker build on <stash-host>, not a registry push):
-ssh <stash-host> "cd /root/homeserver/stash-sense2 && sh rebuild.sh"
-# rebuild.sh rebuilds the ROCm sidecar image (see the script's own comment
-# for the CPU-variant swap) AND copies plugin/* into Stash's installed
-# stash-sense2 plugin dir -- renaming plugin/stash-sense.yml to
+# a local Docker build on <sidecar-host>, not a registry push):
+ssh <sidecar-host> "cd /path/to/stash-sense2 && sh rebuild.sh"
+# rebuild.sh rebuilds the sidecar image from the local, git-ignored
+# docker-stashsense2.yml (which Dockerfile it uses -- CUDA, ROCm or CPU -- is
+# set there) AND copies plugin/* into Stash's installed stash-sense2 plugin
+# dir. When Stash runs on a different machine than the sidecar, set
+# PLUGIN_DEST to an rsync target ("<stash-host>:/path/to/plugins/stash-sense2")
+# in the environment or in rebuild.local.env next to the script (git-ignored).
+# The manifest is renamed on the way out: plugin/stash-sense.yml to
 # stash-sense2.yml on the way out (see "Plugin identity" below for why
 # that distinction matters). After it finishes, reload the plugin from
 # Stash's Settings > Plugins page (or restart Stash) for the new JS to
 # take effect — rebuild.sh alone doesn't do that last step.
 ```
 
-**This directory (`/root/homeserver/stash-sense2` on `<stash-host>`) is the
+**This directory (on `<sidecar-host>`) is the
 actual git working copy** — the one with `origin` pointing at
 `AnonTester/stash-sense2`, where commits/pushes happen. There is no
 separate local dev clone to `scp` changes from anymore; edit, commit, and
-push directly here (over the network mount, or via `ssh <stash-host>`),
+push directly here (over the network mount, or via `ssh <sidecar-host>`),
 then run `rebuild.sh` as above to redeploy. (Earlier revisions of this repo
 described a workflow with a separate local clone that got `scp`'d over on
 every change — that's gone; this checkout is the only one that matters.)
