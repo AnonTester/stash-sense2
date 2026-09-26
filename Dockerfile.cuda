@@ -49,11 +49,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # then install onnxruntime-gpu, then reinstall insightface --no-deps so a
 # future pip resolve of its own onnxruntime requirement can't silently pull
 # the CPU build back in. Mirrors Dockerfile.rocm's proven pattern.
-# The <1.23 cap matters: newer onnxruntime-gpu wheels are built for CUDA 13 and
-# cannot load the CUDA provider on this CUDA 12.4 base image (the provider fails
-# with a missing libcublasLt.so.13 and onnxruntime silently falls back to CPU).
+# onnxruntime-gpu 1.23+ is built for CUDA 13, so the matching CUDA 13 runtime
+# libraries are installed from pip as well: the `cuda`/`cudnn` extras name them
+# (runtime, nvrtc, cufft, curand, cuDNN 9) and cublas is added explicitly. This
+# needs an NVIDIA driver >= 580 on the host; the CUDA 12 libraries in the base
+# image are not used. Mixing an onnxruntime-gpu with libraries of the other CUDA
+# major makes the CUDA provider fail to load (missing libcublasLt.so.1x) and
+# onnxruntime then silently falls back to the CPU.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip uninstall -y onnxruntime && pip install "onnxruntime-gpu>=1.19,<1.23"
+    pip uninstall -y onnxruntime && pip install "onnxruntime-gpu[cuda,cudnn]>=1.23,<2" "nvidia-cublas~=13.0"
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --no-deps --force-reinstall "insightface>=0.7.3"
 
@@ -117,6 +121,8 @@ WORKDIR /app
 # Copy venv from build stage
 COPY --from=build /app/venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
+# The pip-installed CUDA 13 libraries (see the build stage) are on no default search path.
+ENV LD_LIBRARY_PATH=/app/venv/lib/python3.11/site-packages/nvidia/cu13/lib:/app/venv/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
 
 # Copy application code
 COPY api/ ./

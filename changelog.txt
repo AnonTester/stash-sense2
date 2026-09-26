@@ -2,7 +2,8 @@
 
 ### 0.35.1 (sidecar)
 - Fix: on NVIDIA GPUs the CUDA provider was never used (inference silently ran
-  on the CPU) and the GPU wasn't detected; both are fixed.
+  on the CPU) and the GPU wasn't detected; both are fixed. The RAM size in the
+  hardware info was always 0MB (psutil was missing from the image).
 
 ## 2026-09-24
 
