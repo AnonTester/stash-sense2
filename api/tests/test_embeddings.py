@@ -140,12 +140,27 @@ class TestDeviceSelection:
 
 
 class TestOrtProviders:
-    def test_gpu_device_lists_gpu_providers_before_cpu_fallback(self):
-        generator = FaceEmbeddingGenerator(device="gpu")
-        providers = generator._ort_providers()
-        assert providers[-1] == "CPUExecutionProvider"
-        assert "ROCMExecutionProvider" in providers
-        assert "CUDAExecutionProvider" in providers
+    """_ort_providers() must only request providers the installed onnxruntime build
+    has: an unknown name (e.g. ROCMExecutionProvider on the CUDA build) makes ORT
+    drop the WHOLE list to CPU without ever trying the GPU provider."""
+
+    @staticmethod
+    def _gpu_providers(available):
+        with patch("onnxruntime.get_available_providers", return_value=available):
+            return FaceEmbeddingGenerator(device="gpu")._ort_providers()
+
+    def test_rocm_build_lists_its_gpu_providers_before_cpu_fallback(self):
+        assert self._gpu_providers(
+            ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CPUExecutionProvider"]
+        ) == ["MIGraphXExecutionProvider", "ROCMExecutionProvider", "CPUExecutionProvider"]
+
+    def test_cuda_build_requests_only_cuda_then_cpu(self):
+        assert self._gpu_providers(
+            ["TensorrtExecutionProvider", "CUDAExecutionProvider", "CPUExecutionProvider"]
+        ) == ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    def test_cpu_only_build_falls_back_to_cpu_for_a_gpu_device(self):
+        assert self._gpu_providers(["CPUExecutionProvider"]) == ["CPUExecutionProvider"]
 
     def test_cpu_device_lists_only_cpu(self):
         generator = FaceEmbeddingGenerator(device="cpu")
