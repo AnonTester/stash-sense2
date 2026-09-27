@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.35.3 (sidecar) / 0.28.2 (plugin)
+- Fix: retrying a failed or cancelled Operations job left its Retry button
+  active even after the retry queued a new job; the old job's history card
+  now shows "Retried as a new job" instead.
+
 ### 0.35.2 (sidecar)
 - Fix: fingerprint generation progress and ETA now cover only the scenes that
   actually need fingerprinting (e.g. "x of 25") instead of every scene.

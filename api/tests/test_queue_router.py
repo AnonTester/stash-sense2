@@ -92,6 +92,29 @@ class TestQueueRouter:
         resp = client.get(f"/queue/{job_id}")
         assert resp.json()["status"] == "cancelled"
 
+    def test_retry_job_marks_old_job_retried_as_the_new_one(self, client, db):
+        resp = client.post("/queue", json={"type": "duplicate_performer", "triggered_by": "user"})
+        job_id = resp.json()["job_id"]
+        db.fail_job(job_id, "boom")
+
+        resp = client.post(f"/queue/{job_id}/retry")
+        assert resp.status_code == 200
+        new_id = resp.json()["job_id"]
+        assert new_id != job_id
+
+        # The failed job stays failed (history is preserved) but now links
+        # to the job its retry created, so the UI can stop offering Retry
+        # on it -- see stash-sense-operations.js's use of retried_as.
+        old_job = client.get(f"/queue/{job_id}").json()
+        assert old_job["status"] == "failed"
+        assert old_job["retried_as"] == new_id
+
+    def test_retry_only_allowed_for_failed_or_cancelled(self, client):
+        resp = client.post("/queue", json={"type": "duplicate_performer", "triggered_by": "user"})
+        job_id = resp.json()["job_id"]  # still queued
+        resp = client.post(f"/queue/{job_id}/retry")
+        assert resp.status_code == 400
+
     def test_get_queue_status(self, client):
         client.post("/queue", json={"type": "duplicate_performer", "triggered_by": "user"})
         resp = client.get("/queue/status")

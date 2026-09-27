@@ -3690,6 +3690,13 @@ a.ss-upstream-endpoint-badge:hover {
   font-family: monospace;
 }
 
+.ss-job-retried-note {
+  margin-top: 6px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--bs-secondary-color, #888);
+}
+
 .ss-job-actions {
   margin-top: 8px;
   display: flex;

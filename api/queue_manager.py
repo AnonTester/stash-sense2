@@ -112,6 +112,10 @@ class QueueManager:
                 task.cancel()
             self._db.cancel_job(job_id)
 
+    def mark_job_retried(self, job_id: int, new_job_id: int):
+        """Link a failed/cancelled job to the new job its retry created."""
+        self._db.mark_job_retried(job_id, new_job_id)
+
     def clear_history(self) -> int:
         """Delete all terminal jobs (completed/failed/cancelled). Returns count deleted."""
         return self._db.delete_terminal_jobs()

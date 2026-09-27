@@ -207,4 +207,5 @@ async def retry_job(job_id: int):
     )
     if new_id is None:
         raise HTTPException(status_code=409, detail="Job already queued")
+    _mgr().mark_job_retried(job_id, new_id)
     return {"job_id": new_id, "message": "Job re-queued"}

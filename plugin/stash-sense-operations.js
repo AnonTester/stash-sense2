@@ -344,6 +344,12 @@
         textContent: job.error_message,
       }));
     }
+    if (job.retried_as) {
+      card.appendChild(SS.createElement('div', {
+        className: 'ss-job-retried-note',
+        textContent: 'Retried as a new job',
+      }));
+    }
 
     // Action buttons
     const actions = SS.createElement('div', { className: 'ss-job-actions' });
@@ -384,7 +390,7 @@
       });
       btn.addEventListener('click', actionHandler(btn, () => QueueAPI.cancel(job.id), 'Cancel', 'Cancelling\u2026'));
       actions.appendChild(btn);
-    } else if (job.status === 'failed' || job.status === 'cancelled') {
+    } else if ((job.status === 'failed' || job.status === 'cancelled') && !job.retried_as) {
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-primary ss-btn-sm',
         textContent: 'Retry',

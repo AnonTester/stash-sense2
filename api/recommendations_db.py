@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -379,7 +379,8 @@ class RecommendationsDB:
                 triggered_by TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 started_at TEXT,
-                completed_at TEXT
+                completed_at TEXT,
+                retried_as INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_job_queue_status ON job_queue(status);
             CREATE INDEX IF NOT EXISTS idx_job_queue_type_status ON job_queue(type, status);
@@ -771,6 +772,48 @@ class RecommendationsDB:
 
                 UPDATE schema_version SET version = 18;
             """)
+
+        if from_version < 19:
+            # Links a failed/cancelled job to the new job its Retry button
+            # created, so the Operations history card can stop offering
+            # Retry once it's already been used -- the old row otherwise
+            # stayed status='failed' forever (retry only submits a new job,
+            # never touches the old one), leaving a stale, still-clickable
+            # Retry button next to the fresh retried job. See
+            # queue_router.retry_job / QueueManager.mark_job_retried.
+            #
+            # Guarded rather than a bare ALTER TABLE: a real chain can never
+            # hit either edge case (a fresh install gets job_queue, with
+            # this column, straight from _create_schema and skips migration
+            # entirely -- see _init_database), but test fixtures that build
+            # a full current-schema db and then roll schema_version back to
+            # simulate an older install do, and can do so from a version
+            # where job_queue doesn't exist in that fixture at all.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(job_queue)")}
+            if not cols:
+                conn.execute("""
+                    CREATE TABLE job_queue (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        type TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        priority INTEGER NOT NULL,
+                        cursor TEXT,
+                        items_total INTEGER,
+                        items_processed INTEGER DEFAULT 0,
+                        error_message TEXT,
+                        result_summary TEXT,
+                        progress_label TEXT,
+                        resource_used TEXT,
+                        triggered_by TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        started_at TEXT,
+                        completed_at TEXT,
+                        retried_as INTEGER
+                    )
+                """)
+            elif "retried_as" not in cols:
+                conn.execute("ALTER TABLE job_queue ADD COLUMN retried_as INTEGER")
+            conn.execute("UPDATE schema_version SET version = 19")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2656,6 +2699,15 @@ class RecommendationsDB:
         """Set job status directly."""
         with self._connection() as conn:
             conn.execute("UPDATE job_queue SET status = ? WHERE id = ?", (status, job_id))
+
+    def mark_job_retried(self, job_id: int, new_job_id: int):
+        """Record that a failed/cancelled job was retried as new_job_id, so
+        its history card stops offering Retry (see queue_router.retry_job)."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE job_queue SET retried_as = ? WHERE id = ?",
+                (new_job_id, job_id)
+            )
 
     def update_job_progress(self, job_id: int, items_processed: Optional[int] = None,
                             items_total: Optional[int] = None, cursor: Optional[str] = None,
