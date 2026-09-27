@@ -27,8 +27,11 @@ class FingerprintGenerationJob(BaseJob):
     scope is now a property of *which job type ran*, not something buried
     in a cursor.
 
-    Cursor format (JSON string): {"offset": <int>, "processed": <int>} --
-    purely a resume checkpoint now, saved after each batch of 100 scenes.
+    Cursor format (JSON string): {"offset": <int>, "processed": <int>, "v": 2} --
+    purely a resume checkpoint, saved after each batch of 100 scenes. "processed" is the
+    number of scenes actually attempted (skipped scenes don't count); cursors without "v"
+    (older versions counted skipped scenes too) are resumed at their offset with the
+    processed count reset, since the two counts can't be compared.
     """
 
     def __init__(self, refresh_outdated: bool):
@@ -49,7 +52,8 @@ class FingerprintGenerationJob(BaseJob):
             try:
                 c = json.loads(cursor)
                 start_offset = int(c.get("offset", 0))
-                start_processed = int(c.get("processed", 0))
+                if int(c.get("v", 1)) >= 2:
+                    start_processed = int(c.get("processed", 0))
             except (json.JSONDecodeError, KeyError, TypeError, ValueError):
                 logger.warning(
                     "Fingerprint job: could not parse cursor %r — starting from offset 0",
@@ -85,6 +89,7 @@ class FingerprintGenerationJob(BaseJob):
                 new_cursor = json.dumps({
                     "offset": progress.current_offset,
                     "processed": progress.processed_scenes,
+                    "v": 2,
                 })
                 await context.checkpoint(
                     cursor=new_cursor,
@@ -123,6 +128,7 @@ class FingerprintGenerationJob(BaseJob):
             resume_cursor = json.dumps({
                 "offset": final.current_offset,
                 "processed": final.processed_scenes,
+                "v": 2,
             })
             logger.warning(
                 "Fingerprint job interrupted (job_id=%d): "

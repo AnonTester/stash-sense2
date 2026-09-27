@@ -18,6 +18,7 @@ from fingerprint_generator import FingerprintResult, SceneFingerprintGenerator
 
 def _generator():
     stash = MagicMock()
+    stash.get_all_scene_ids = AsyncMock(return_value={1})
     rec_db = MagicMock()
     rec_db.get_scene_fingerprint.return_value = None
     gen = SceneFingerprintGenerator(stash_client=stash, rec_db=rec_db, db_version="2026.01.01")
@@ -263,7 +264,9 @@ class TestGenerateAllBatchedLoop:
         batched.assert_not_called()
         final = progresses[-1]
         assert final.skipped == 1
-        assert final.processed_scenes == 1
+        # A skipped scene is not progress: nothing needed doing, so 0 of 0.
+        assert final.processed_scenes == 0
+        assert final.total_scenes == 0
 
     async def test_processes_new_scene_via_orchestrator_and_marks_complete(self):
         gen, stash, rec_db = _generator()
@@ -343,3 +346,103 @@ class TestGenerateAllBatchedLoop:
         # Retry errored -- original zero-face success is kept, not counted as failed.
         assert final.successful == 1
         assert final.failed == 0
+
+
+class TestProgressCoversOnlyScenesThatNeedWork:
+    """Progress is "x of <scenes missing a fingerprint>", not a crawl through every scene in
+    the library that only slows down once it reaches the real work."""
+
+    @staticmethod
+    def _scene(sid):
+        return {"id": str(sid), "title": f"S{sid}", "files": [{"duration": 10, "width": 1920, "height": 1080}]}
+
+    def _setup(self, scenes_in_stash, complete_ids, *, batches=None):
+        gen, stash, rec_db = _generator()
+        stash.get_all_scene_ids = AsyncMock(return_value=set(scenes_in_stash))
+        scenes = [self._scene(s) for s in scenes_in_stash]
+        # total-count fetch, then the pages, then an empty page
+        stash.get_scenes_for_fingerprinting = AsyncMock(
+            side_effect=[(scenes[:1], len(scenes))] + (batches or [(scenes, len(scenes))]) + [([], len(scenes))]
+        )
+        rec_db.get_scene_fingerprint.side_effect = lambda sid: (
+            {"fingerprint_status": "complete", "db_version": "2026.01.01"} if sid in complete_ids else None
+        )
+        return gen, stash, rec_db
+
+    async def test_total_is_only_the_missing_scenes(self):
+        gen, _, _ = self._setup([1, 2, 3, 4], complete_ids={1, 2, 3})
+        with patch("scene_batch_orchestrator.identify_scenes_batched",
+                   _batched_results([("4", _response(faces_after_filter=1))])):
+            progresses = [p async for p in gen.generate_all(batch_size=100)]
+
+        final = progresses[-1]
+        assert final.total_scenes == 1
+        assert final.processed_scenes == 1
+        assert final.successful == 1
+        assert final.skipped == 3
+
+    async def test_skipped_scenes_do_not_advance_progress(self):
+        gen, _, _ = self._setup([1, 2, 3, 4], complete_ids={1, 2, 3})
+        seen = []  # the generator yields one mutable progress object, so snapshot values as they arrive
+        with patch("scene_batch_orchestrator.identify_scenes_batched",
+                   _batched_results([("4", _response(faces_after_filter=1))])):
+            async for p in gen.generate_all(batch_size=100):
+                seen.append((p.processed_scenes, p.total_scenes))
+
+        # progress only ever moves when the one missing scene finishes, and never exceeds the total
+        assert {processed for processed, _ in seen} == {0, 1}
+        assert all(processed <= total for processed, total in seen)
+
+    async def test_stops_paging_once_the_last_needed_scene_is_done(self):
+        # 4 scenes, batch_size=2: scene 1 (missing) is in the first page, so the second page
+        # (which would only be scanned to skip 3 and 4) must never be fetched.
+        page1 = ([self._scene(1), self._scene(2)], 4)
+        page2 = ([self._scene(3), self._scene(4)], 4)
+        gen, stash, _ = self._setup([1, 2, 3, 4], complete_ids={2, 3, 4}, batches=[page1, page2])
+        with patch("scene_batch_orchestrator.identify_scenes_batched",
+                   _batched_results([("1", _response(faces_after_filter=1))])):
+            progresses = [p async for p in gen.generate_all(batch_size=2)]
+
+        assert stash.get_scenes_for_fingerprinting.await_count == 2  # the count fetch + page 1 only
+        assert progresses[-1].total_scenes == 1
+        assert progresses[-1].processed_scenes == 1
+
+    async def test_nothing_missing_completes_immediately_with_zero_total(self):
+        gen, _, _ = self._setup([1, 2], complete_ids={1, 2})
+        with patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
+            progresses = [p async for p in gen.generate_all(batch_size=100)]
+
+        batched.assert_not_called()
+        final = progresses[-1]
+        assert final.total_scenes == 0
+        assert final.processed_scenes == 0
+        assert final.status.value == "completed"
+
+    async def test_resumed_total_includes_scenes_done_before_the_resume(self):
+        gen, _, _ = self._setup([1, 2, 3], complete_ids={1, 2})
+        first = None
+        with patch("scene_batch_orchestrator.identify_scenes_batched",
+                   _batched_results([("3", _response(faces_after_filter=1))])):
+            async for p in gen.generate_all(batch_size=100, start_offset=0, start_processed=40):
+                if first is None:
+                    first = (p.processed_scenes, p.total_scenes)
+                final = p
+
+        assert first == (40, 41)  # 40 done before the resume + 1 left
+        assert final.processed_scenes == 41
+
+    async def test_refresh_outdated_counts_outdated_scenes_as_needing_work(self):
+        gen, _, rec_db = self._setup([1, 2], complete_ids={1, 2})
+        rec_db.get_scene_fingerprint.side_effect = lambda sid: {
+            "fingerprint_status": "complete", "db_version": "2025.01.01" if sid == 2 else "2026.01.01"}
+        with patch("scene_batch_orchestrator.identify_scenes_batched",
+                   _batched_results([("2", _response(faces_after_filter=1))])):
+            progresses = [p async for p in gen.generate_all(batch_size=100, refresh_outdated=True)]
+        assert progresses[-1].total_scenes == 1
+
+        gen2, _, rec_db2 = self._setup([1, 2], complete_ids={1, 2})
+        rec_db2.get_scene_fingerprint.side_effect = rec_db.get_scene_fingerprint.side_effect
+        with patch("scene_batch_orchestrator.identify_scenes_batched") as batched:
+            progresses = [p async for p in gen2.generate_all(batch_size=100, refresh_outdated=False)]
+        batched.assert_not_called()
+        assert progresses[-1].total_scenes == 0  # "Fingerprint Missing" never touches outdated ones

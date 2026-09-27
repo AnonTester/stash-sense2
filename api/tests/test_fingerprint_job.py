@@ -125,12 +125,27 @@ class TestFingerprintJob:
         # which job type this is, never from the cursor.
         from jobs.fingerprint_job import FingerprintGenerationJob
         job = FingerprintGenerationJob(refresh_outdated=True)
-        cursor = json.dumps({"offset": 2700, "processed": 2780})
+        cursor = json.dumps({"offset": 2700, "processed": 12, "v": 2})
         coro, captured = self._run_and_capture(ctx, job, cursor=cursor)
         await coro
 
         assert captured['refresh_outdated'] is True
         assert captured['start_offset'] == 2700
+        assert captured['start_processed'] == 12
+        assert captured['skip_errors'] is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_cursor_keeps_offset_but_resets_processed(self, ctx):
+        # Older cursors counted skipped scenes in "processed"; that number can't be compared with
+        # the new attempted-only count, so it is dropped (the offset still resumes the paging).
+        from jobs.fingerprint_job import FingerprintGenerationJob
+        job = FingerprintGenerationJob(refresh_outdated=False)
+        cursor = json.dumps({"offset": 2700, "processed": 2780})
+        coro, captured = self._run_and_capture(ctx, job, cursor=cursor)
+        await coro
+
+        assert captured['start_offset'] == 2700
+        assert captured['start_processed'] == 0
         assert captured['skip_errors'] is True
 
     @pytest.mark.asyncio
@@ -158,4 +173,4 @@ class TestFingerprintJob:
             await job.run(ctx)
 
         checkpoint_cursor = json.loads(ctx._db.update_job_progress.call_args.kwargs['cursor'])
-        assert checkpoint_cursor == {"offset": 100, "processed": 5}
+        assert checkpoint_cursor == {"offset": 100, "processed": 5, "v": 2}

@@ -68,11 +68,11 @@ class GeneratorStatus(str, Enum):
 class GeneratorProgress:
     """Progress information for fingerprint generation."""
     status: GeneratorStatus
-    total_scenes: int
-    processed_scenes: int
+    total_scenes: int      # scenes to fingerprint in this run (missing/outdated) -- NOT every scene in Stash
+    processed_scenes: int  # of those, how many were attempted (successful + failed); skipped scenes don't count
     successful: int
     failed: int
-    skipped: int  # Already have current-version fingerprint
+    skipped: int  # Passed over: already have a current-version fingerprint (not part of the progress)
     current_scene_id: Optional[int] = None
     current_scene_title: Optional[str] = None
     error_message: Optional[str] = None
@@ -123,7 +123,8 @@ class SceneFingerprintGenerator:
     - Calls /identify/scene which saves fingerprint automatically
     - Respects rate limiting
     - Can be stopped gracefully
-    - Skips scenes with up-to-date fingerprints
+    - Skips scenes with up-to-date fingerprints; progress (and so its ETA) covers only the
+      scenes that actually need work, decided up front, not every scene in the library
     - Supports cursor-based resumption via start_offset / start_processed
     """
 
@@ -152,6 +153,9 @@ class SceneFingerprintGenerator:
         # State
         self._status = GeneratorStatus.IDLE
         self._stop_requested = False
+        # Scene ids still to fingerprint in the current generate_all() run; drained as scenes
+        # finish so the paging loop can stop as soon as the last needed scene is done.
+        self._remaining_ids: set[int] = set()
         self._progress = GeneratorProgress(
             status=GeneratorStatus.IDLE,
             total_scenes=0,
@@ -178,6 +182,12 @@ class SceneFingerprintGenerator:
             logger.info("Stop requested, will finish current scene")
 
     async def _get_scenes_with_retry(self, limit: int, offset: int) -> tuple[list, int]:
+        """One page of scenes from Stash, retried through a brief outage (see _with_stash_retry)."""
+        return await self._with_stash_retry(
+            lambda: self.stash.get_scenes_for_fingerprinting(limit=limit, offset=offset)
+        )
+
+    async def _with_stash_retry(self, call):
         """Fetch a page of scenes from Stash, retrying through a brief
         connectivity outage (Stash container restart, transient network
         blip) instead of letting the whole overnight run die on the first
@@ -189,7 +199,7 @@ class SceneFingerprintGenerator:
         attempt = 0
         while True:
             try:
-                return await self.stash.get_scenes_for_fingerprinting(limit=limit, offset=offset)
+                return await call()
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
                 attempt += 1
                 remaining = deadline - time.monotonic()
@@ -206,6 +216,18 @@ class SceneFingerprintGenerator:
                     attempt, remaining, e, wait,
                 )
                 await asyncio.sleep(wait)
+
+    def _needs_work(self, scene_id: int, refresh_outdated: bool, skip_errors: bool) -> bool:
+        """Whether generate_all() should fingerprint this scene in this run."""
+        existing = self.rec_db.get_scene_fingerprint(scene_id)
+        if not existing:
+            return True
+        status = existing.get("fingerprint_status")
+        if status == "complete":
+            return bool(refresh_outdated) and existing.get("db_version") != self.db_version
+        if status == "error" and skip_errors:
+            return False
+        return True
 
     async def generate_all(
         self,
@@ -252,27 +274,43 @@ class SceneFingerprintGenerator:
         logger.warning("Fingerprint generation: sprite_detection_enabled=%s", use_sprite)
 
         try:
-            # Get total scene count
+            # Total scene count (only drives the paging below)
             _, total = await self._get_scenes_with_retry(limit=1, offset=0)
-            self._progress.total_scenes = total
+
+            # Decide up front which scenes actually need fingerprinting, so progress and its ETA
+            # are measured against only those (25 missing -> "x of 25") instead of crawling every
+            # scene in the library and only slowing down once it reaches the real work. IDs only,
+            # one request; skipped scenes are then passed over without counting as progress.
+            all_scene_ids = await self._with_stash_retry(self.stash.get_all_scene_ids)
+            pending_ids = {
+                sid for sid in all_scene_ids if self._needs_work(sid, refresh_outdated, skip_errors)
+            }
+            self._remaining_ids = set(pending_ids)
+            # Scenes that need nothing this run (already fingerprinted with the current version, or
+            # errored earlier when resuming): tallied exactly, up front, without paging through them.
+            self._progress.skipped = len(all_scene_ids) - len(pending_ids)
+            # On a resume, start_processed scenes were already attempted before this run.
+            self._progress.total_scenes = start_processed + len(pending_ids)
 
             if resuming:
                 logger.warning(
                     "Fingerprint generation resuming from offset %d "
-                    "(previously processed: %d / %d, db_version=%s)",
-                    start_offset, start_processed, total, self.db_version,
+                    "(previously processed: %d, still to do: %d, db_version=%s)",
+                    start_offset, start_processed, len(pending_ids), self.db_version,
                 )
             else:
                 logger.warning(
-                    "Fingerprint generation starting: %d total scenes, db_version=%s, "
-                    "refresh_outdated=%s, batch_size=%d",
-                    total, self.db_version, refresh_outdated, batch_size,
+                    "Fingerprint generation starting: %d of %d scenes need fingerprinting, "
+                    "db_version=%s, refresh_outdated=%s, batch_size=%d",
+                    len(pending_ids), total, self.db_version, refresh_outdated, batch_size,
                 )
 
             yield self._progress
 
             offset = start_offset
-            while offset < total and not self._stop_requested:
+            # Stops early once every scene that needed work has been done -- the remaining pages
+            # would only be scanned to skip them.
+            while offset < total and not self._stop_requested and self._remaining_ids:
                 # Fetch batch of scenes
                 scenes, _ = await self._get_scenes_with_retry(
                     limit=batch_size,
@@ -294,7 +332,7 @@ class SceneFingerprintGenerator:
                     "Processing batch: offset=%d, scenes_in_batch=%d, "
                     "cumulative_processed=%d/%d (%.1f%%)",
                     offset, len(scenes),
-                    self._progress.processed_scenes, total,
+                    self._progress.processed_scenes, self._progress.total_scenes,
                     self._progress.progress_pct,
                 )
 
@@ -308,50 +346,12 @@ class SceneFingerprintGenerator:
                     scene_title = scene.get("title") or f"Scene {scene_id}"
                     scene_titles[scene_id] = scene_title
 
-                    # Check if we need to process this scene
-                    existing = self.rec_db.get_scene_fingerprint(scene_id)
-                    if existing:
-                        status = existing.get("fingerprint_status")
-                        if status == "complete":
-                            if not refresh_outdated or existing.get("db_version") == self.db_version:
-                                logger.debug(
-                                    "Scene %d (%s): skipped — already fingerprinted "
-                                    "(db_version=%s, current=%s)",
-                                    scene_id, scene_title,
-                                    existing.get("db_version"), self.db_version,
-                                )
-                                self._progress.current_scene_id = scene_id
-                                self._progress.current_scene_title = scene_title
-                                self._progress.batch_completed = False
-                                self._progress.skipped += 1
-                                self._progress.processed_scenes += 1
-                                batch_skipped += 1
-                                yield self._progress
-                                continue
-                        elif status == "error" and skip_errors:
-                            logger.debug(
-                                "Scene %d (%s): skipped — previous attempt failed "
-                                "(error record present, skip_errors=True)",
-                                scene_id, scene_title,
-                            )
-                            self._progress.current_scene_id = scene_id
-                            self._progress.current_scene_title = scene_title
-                            self._progress.batch_completed = False
-                            self._progress.skipped += 1
-                            self._progress.processed_scenes += 1
-                            batch_skipped += 1
-                            yield self._progress
-                            continue
-
-                        logger.debug(
-                            "Scene %d (%s): re-fingerprinting "
-                            "(status=%s, db_version=%s → %s)",
-                            scene_id, scene_title,
-                            status,
-                            existing.get("db_version"), self.db_version,
-                        )
-                    else:
-                        logger.debug("Scene %d (%s): no existing fingerprint", scene_id, scene_title)
+                    # Not in the pending set: already has what this run would produce (or, when resuming,
+                    # a previous attempt errored). Passed over; not part of the progress.
+                    if scene_id not in pending_ids:
+                        logger.debug("Scene %d (%s): skipped -- nothing to do this run", scene_id, scene_title)
+                        batch_skipped += 1
+                        continue
 
                     to_process.append(scene)
 
@@ -462,7 +462,7 @@ class SceneFingerprintGenerator:
                     "total processed=%d/%d (%.1f%%)",
                     offset,
                     batch_successful, batch_skipped, batch_failed,
-                    self._progress.processed_scenes, total,
+                    self._progress.processed_scenes, self._progress.total_scenes,
                     self._progress.progress_pct,
                 )
 
@@ -481,7 +481,7 @@ class SceneFingerprintGenerator:
                     "Fingerprint generation paused at offset %d "
                     "(%d/%d processed, %d ok, %d skipped, %d failed)",
                     offset,
-                    self._progress.processed_scenes, total,
+                    self._progress.processed_scenes, self._progress.total_scenes,
                     self._progress.successful,
                     self._progress.skipped,
                     self._progress.failed,
@@ -492,7 +492,7 @@ class SceneFingerprintGenerator:
                 logger.warning(
                     "Fingerprint generation complete: %d/%d processed "
                     "(%d successful, %d skipped, %d failed), db_version=%s",
-                    self._progress.processed_scenes, total,
+                    self._progress.processed_scenes, self._progress.total_scenes,
                     self._progress.successful,
                     self._progress.skipped,
                     self._progress.failed,
@@ -611,12 +611,13 @@ class SceneFingerprintGenerator:
         """Records one scene's final outcome into self._progress (for the
         caller to yield) and the batch-local tallies generate_all() logs at
         the end of each Stash-fetched batch. Called exactly once per scene
-        that reached _identify_scene_impl (skipped scenes are counted
-        inline in generate_all()'s own skip-scan loop, not here)."""
+        that reached _identify_scene_impl (skipped scenes are tallied
+        inline in generate_all()'s own skip-scan loop and are not progress)."""
         self._progress.current_scene_id = scene_id
         self._progress.current_scene_title = scene_title
         self._progress.batch_completed = False
         self._progress.processed_scenes += 1
+        self._remaining_ids.discard(scene_id)
         if result.success:
             self._progress.successful += 1
             batch_successful += 1

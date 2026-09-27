@@ -1,5 +1,9 @@
 ## 2026-09-27
 
+### 0.35.2 (sidecar)
+- Fix: fingerprint generation progress and ETA now cover only the scenes that
+  actually need fingerprinting (e.g. "x of 25") instead of every scene.
+
 ### 0.28.1 (plugin)
 - Fix: linking a scene's changed studio now pre-fills the search with the local
   studio's name instead of the (usually not yet existing) upstream name.
