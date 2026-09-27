@@ -16,6 +16,7 @@ import numpy as np
 
 from usearch.index import Index
 
+from name_script import resolve_display_name
 from stashbox_utils import classify_universal_id, normalize_url_for_compare
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,10 @@ class CandidateMatch:
                                      # local_performer_index dedup, plugin JS) already reads
     confidence: float = 0.0  # 0-1, higher is better
     rank: Optional[int] = None
+    # Set only when "Prefer Western Names" swapped `name` for a western
+    # alias -- see build_matches's own docstring and
+    # name_script.resolve_display_name.
+    original_name: Optional[str] = None
 
 
 @dataclass
@@ -134,6 +139,8 @@ def build_matches(
     performers: dict[str, dict],  # universal_id -> performer info
     config: MatchingConfig = DEFAULT_CONFIG,
     face_yaw: Optional[list] = None,  # index -> yaw degrees, or None
+    aliases: Optional[dict[str, list[str]]] = None,
+    prefer_western_names: bool = False,
 ) -> MatchingResult:
     """Build sorted, threshold-filtered CandidateMatch objects from one
     index query's results.
@@ -141,7 +148,15 @@ def build_matches(
     `face_yaw`: index -> yaw degrees (same shape as faces_mapping), for
     the steep-angle soft penalty -- optional, and a no-op when omitted or
     shorter than the matched index (an older dataset published before
-    this feature has no face_yaw.json at all)."""
+    this feature has no face_yaw.json at all).
+
+    `aliases`/`prefer_western_names`: settings.py's "Prefer Western Names"
+    display setting (see name_script.resolve_display_name) -- swaps a
+    non-Latin-script canonical name for a Latin-script alias when one is
+    on file. Local-index candidates (fuse_local_results below) are
+    deliberately NOT covered by this -- those names come from the user's
+    own already-real Stash performer records, a different concern from
+    this crawled-dataset display setting."""
     candidates: dict[int, CandidateMatch] = {}
     faces_count = len(faces_mapping)
 
@@ -155,8 +170,11 @@ def build_matches(
         if uid is None:
             continue
         info = performers.get(uid, {})
+        display_name, original_name = resolve_display_name(
+            uid, info.get("name", "Unknown"), aliases, prefer_western_names,
+        )
         candidate = CandidateMatch(
-            face_index=idx, universal_id=uid, name=info.get("name", "Unknown"),
+            face_index=idx, universal_id=uid, name=display_name, original_name=original_name,
             distance=float(dist), combined_distance=float(dist), rank=rank + 1,
         )
         candidate.confidence = max(0.0, min(1.0, 1.0 - candidate.combined_distance))
@@ -554,6 +572,8 @@ def match_face(
     face_yaw: Optional[list] = None,
     performer_link_index: Optional[dict[str, list[str]]] = None,
     endpoint_priority_domains: Optional[list[str]] = None,
+    aliases: Optional[dict[str, list[str]]] = None,
+    prefer_western_names: bool = False,
 ) -> MatchingResult:
     """
     Match a face against the database.
@@ -585,6 +605,7 @@ def match_face(
             endpoint priority, as domains in priority order (see
             recognizer.py's _endpoint_priority_domains()) -- used only to
             pick a winner among a linked group's present candidates.
+        aliases/prefer_western_names: see build_matches's own docstring.
 
     Returns:
         MatchingResult with candidates
@@ -592,7 +613,7 @@ def match_face(
     query_result = query_index(embedding, index, config)
     result = build_matches(
         query_result, faces_mapping, performers, config,
-        face_yaw=face_yaw,
+        face_yaw=face_yaw, aliases=aliases, prefer_western_names=prefer_western_names,
     )
 
     # Optionally merge in local-performer-index matches (see fuse_local_results).

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -285,6 +285,7 @@ class RecommendationsDB:
                 catalogue_url TEXT,
                 profile_url TEXT,
                 top_timestamps_sec TEXT,
+                original_name TEXT,
                 UNIQUE(fingerprint_id, person_id, match_rank)
             );
             CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
@@ -814,6 +815,19 @@ class RecommendationsDB:
             elif "retried_as" not in cols:
                 conn.execute("ALTER TABLE job_queue ADD COLUMN retried_as INTEGER")
             conn.execute("UPDATE schema_version SET version = 19")
+
+        if from_version < 20:
+            # The original (usually non-Latin-script) name a stored scene
+            # fingerprint match's own "name" was swapped from -- only set
+            # when settings.py's prefer_western_names was on at scan time
+            # (see analyzers/scene_face_match.py's _make_details). Same
+            # guard as v19's own migration -- a test fixture that builds a
+            # full current-schema db then rolls schema_version back can
+            # already have this column.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_fingerprint_matches)")}
+            if cols and "original_name" not in cols:
+                conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN original_name TEXT")
+            conn.execute("UPDATE schema_version SET version = 20")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -1883,7 +1897,8 @@ class RecommendationsDB:
         is_best_match (bool), universal_id, stashdb_id, name, confidence,
         distance, country, image_url, endpoint, already_tagged (bool),
         local_performer_id, source, catalogue_url, profile_url,
-        top_timestamps_sec (list[float], stored as JSON).
+        top_timestamps_sec (list[float], stored as JSON), original_name
+        (set only when prefer_western_names swapped the stored name).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
@@ -1893,8 +1908,8 @@ class RecommendationsDB:
                     fingerprint_id, person_id, frame_count, match_rank, is_best_match,
                     universal_id, stashdb_id, name, confidence, distance, country,
                     image_url, endpoint, already_tagged, local_performer_id,
-                    source, catalogue_url, profile_url, top_timestamps_sec
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, catalogue_url, profile_url, top_timestamps_sec, original_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -1904,6 +1919,7 @@ class RecommendationsDB:
                         m.get("image_url"), m.get("endpoint"), int(bool(m.get("already_tagged"))),
                         m.get("local_performer_id"), m.get("source"), m.get("catalogue_url"),
                         m.get("profile_url"), json.dumps(m.get("top_timestamps_sec") or []),
+                        m.get("original_name"),
                     )
                     for m in matches
                 ],

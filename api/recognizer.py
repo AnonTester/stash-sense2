@@ -82,6 +82,12 @@ class PerformerMatch:
     # universal_id (identifies the performer), this pins down exactly
     # which of that performer's photos was matched.
     matched_embedding_index: Optional[int] = None
+    # Set only when the "Prefer Western Names" setting swapped `name` for
+    # a western alias (see name_script.resolve_display_name) -- the
+    # original (usually non-Latin-script) name, for an "aka ..." line and
+    # for adding as an alias if this match is used to create a new local
+    # performer.
+    original_name: Optional[str] = None
 
 
 @dataclass
@@ -157,11 +163,21 @@ class FaceRecognizer:
                 for uid in group:
                     self.performer_link_index[uid] = [other for other in group if other != uid]
 
+        # universal_id -> that performer's own aliases (a stash-box
+        # source's own alias_list). Optional, same tolerance as
+        # performer_link_index above. See name_script.resolve_display_name()
+        # and settings.py's prefer_western_names.
+        self.aliases: dict[str, list[str]] = {}
+        if db_config.aliases_json_path and db_config.aliases_json_path.exists():
+            with open(db_config.aliases_json_path) as f:
+                self.aliases = json.load(f)
+
         # len(self.index), not len(self.faces): see database_health_router.py's
         # own /health comment for why the latter is an inflated address-space
         # size, not a real face count.
         print(f"Loaded {len(self.index)} faces, {len(self.performers)} performers, "
-              f"{len(self.performer_link_index)} performers in a linked group")
+              f"{len(self.performer_link_index)} performers in a linked group, "
+              f"{len(self.aliases)} performers with aliases")
 
         # Optionally load the local performer index -- built from this
         # Stash instance's own performer cover images by the
@@ -415,6 +431,15 @@ class FaceRecognizer:
         if embedding is None:
             embedding = self.generator.get_embedding(face)
 
+        try:
+            from settings import get_setting
+            prefer_western_names = bool(get_setting("prefer_western_names"))
+        except RuntimeError:
+            # Settings not initialized (e.g. standalone script/test) --
+            # same fallback convention as embeddings.py's own gpu_enabled
+            # read. Off by default, matching the setting's own fallback.
+            prefer_western_names = False
+
         local_index = self.local_performer_index
         result = match_face(
             embedding=embedding.embedding,
@@ -427,6 +452,8 @@ class FaceRecognizer:
             face_yaw=self.face_yaw,
             performer_link_index=self.performer_link_index,
             endpoint_priority_domains=self._endpoint_priority_domains(),
+            aliases=self.aliases,
+            prefer_western_names=prefer_western_names,
         )
 
         # Convert to PerformerMatch format for compatibility
@@ -481,6 +508,7 @@ class FaceRecognizer:
                 catalogue_url=catalogue_url,
                 profile_url=profile_url,
                 matched_embedding_index=candidate.face_index,
+                original_name=candidate.original_name,
             ))
 
         return matches, result, embedding

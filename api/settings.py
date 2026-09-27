@@ -56,7 +56,8 @@ CATEGORIES = {
     "signals": {"label": "Signals", "order": 3},
     "local_performers": {"label": "Local Performers", "order": 4},
     "upstream_sync": {"label": "Upstream Sync", "order": 5},
-    "diagnostics": {"label": "Diagnostics", "order": 6},
+    "display": {"label": "Display", "order": 6},
+    "diagnostics": {"label": "Diagnostics", "order": 7},
 }
 
 
@@ -164,6 +165,18 @@ _define("upstream_scene_gender_non_binary_enabled", "Non-Binary",
 _define("upstream_scene_gender_unknown_enabled", "Unknown",
         "Include performers with unknown or missing gender when detecting upstream scene performer changes",
         "upstream_sync", SettingType.BOOL, fallback=True)
+
+# -- Display --
+_define("prefer_western_names", "Prefer Western Names",
+        "Some performers (e.g. from javdatabase.com/javstash.org) have their name stored "
+        "in Japanese, Russian, Chinese, Thai, or another non-Latin script, with a romanized "
+        "or English name only present as an alias. When enabled, a match whose name isn't "
+        "in Latin script shows its first Latin-script alias as the display name instead, "
+        "with the original name shown alongside as \"aka ...\" -- makes it easier to compare "
+        "names across sources. Display only: never changes an existing local Stash "
+        "performer's own name. When a NEW local performer is created from such a match, "
+        "the western name is used as its name and the original name is added as an alias.",
+        "display", SettingType.BOOL, fallback=False)
 
 # -- Diagnostics --
 _define("debug_logging_enabled", "Debug Logging",

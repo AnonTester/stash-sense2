@@ -339,6 +339,17 @@
   margin-bottom: 8px;
 }
 
+/* "aka <original name>" -- settings.py's prefer_western_names swapped
+   the display name for a western alias; shown so the original (usually
+   non-Latin-script) name isn't hidden entirely. */
+.ss-match-original-name {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--bs-secondary-color, #888);
+  margin-top: -4px;
+  margin-bottom: 6px;
+}
+
 /* Links */
 .ss-links {
   display: flex;
@@ -4279,6 +4290,13 @@ a.ss-detail-entity-link:hover {
   font-size: 13px;
   font-weight: 600;
   color: var(--bs-body-color, #fff);
+  overflow-wrap: break-word;
+}
+
+.ss-sfm-candidate-original-name {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--bs-secondary-color, #888);
   overflow-wrap: break-word;
 }
 

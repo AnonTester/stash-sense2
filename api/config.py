@@ -91,6 +91,14 @@ class DatabaseConfig:
     # it. See matching.py's collapse_linked_candidates().
     performer_links_json_path: Path = None
 
+    # universal_id -> list of that performer's own aliases (a stash-box
+    # source's own alias_list, captured at crawl time). Optional, same
+    # tolerance as face_yaw_json_path above -- an older dataset published
+    # before this feature simply doesn't have it. See
+    # name_script.resolve_display_name() and settings.py's
+    # prefer_western_names.
+    aliases_json_path: Path = None
+
     def __post_init__(self):
         self.data_dir = Path(self.data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -104,6 +112,7 @@ class DatabaseConfig:
         self.manifest_json_path = self.manifest_json_path or self.data_dir / "manifest.json"
         self.face_yaw_json_path = self.face_yaw_json_path or self.data_dir / "face_yaw.json"
         self.performer_links_json_path = self.performer_links_json_path or self.data_dir / "performer_links.json"
+        self.aliases_json_path = self.aliases_json_path or self.data_dir / "aliases.json"
 
 
 # Embedding dimensions

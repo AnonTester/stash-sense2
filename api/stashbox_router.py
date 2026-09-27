@@ -108,6 +108,7 @@ class CreatePerformerFromCatalogueRequest(BaseModel):
     image_url: Optional[str] = Field(None, description="Cover image URL, downloaded by Stash itself on create")
     catalogue_url: Optional[str] = Field(None, description="The catalogue site's own profile page, e.g. seekfans.com/onlyfans/<user>")
     profile_url: Optional[str] = Field(None, description="Link to the actual external content site, e.g. onlyfans.com/<user> -- not every source has one")
+    original_name: Optional[str] = Field(None, description="Set only when settings.py's prefer_western_names swapped `name` for a western alias -- the original (usually non-Latin-script) name, added as an alias on create so it isn't lost.")
 
 
 class LinkPerformerRequest(BaseModel):
@@ -372,6 +373,11 @@ async def create_performer_from_catalogue(request: CreatePerformerFromCatalogueR
         handle = request.profile_url.rstrip("/").rsplit("/", 1)[-1]
         if handle:
             alias_list.append(handle)
+    # The name this match's own display was swapped FROM (prefer_western_names)
+    # -- kept as an alias so it isn't lost when the western name becomes
+    # this new performer's main name.
+    if request.original_name:
+        alias_list.append(request.original_name)
 
     create_input = {
         "name": request.name,

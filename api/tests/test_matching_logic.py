@@ -147,6 +147,61 @@ class TestBuildMatches:
         assert result.matches[0].name == "Unknown"
 
 
+class TestBuildMatchesPreferWesternNames:
+    """settings.py's "Prefer Western Names" display setting -- see
+    name_script.resolve_display_name for the actual swap rule, this only
+    covers that build_matches() wires it in correctly per-candidate."""
+
+    def _query_result(self, neighbors, distances):
+        return IndexQueryResult(
+            neighbors=np.array(neighbors, dtype=np.int64),
+            distances=np.array(distances, dtype=np.float32),
+        )
+
+    def test_setting_off_leaves_non_western_name_unchanged(self):
+        qr = self._query_result([0], [0.2])
+        faces = ["javstash.org:1"]
+        performers = {"javstash.org:1": {"name": "田村美羽"}}
+        aliases = {"javstash.org:1": ["Miu Tamura"]}
+
+        result = build_matches(qr, faces, performers, aliases=aliases, prefer_western_names=False)
+
+        assert result.matches[0].name == "田村美羽"
+        assert result.matches[0].original_name is None
+
+    def test_setting_on_swaps_to_western_alias(self):
+        qr = self._query_result([0], [0.2])
+        faces = ["javstash.org:1"]
+        performers = {"javstash.org:1": {"name": "田村美羽"}}
+        aliases = {"javstash.org:1": ["Miu Tamura"]}
+
+        result = build_matches(qr, faces, performers, aliases=aliases, prefer_western_names=True)
+
+        assert result.matches[0].name == "Miu Tamura"
+        assert result.matches[0].original_name == "田村美羽"
+
+    def test_setting_on_but_already_western_name_unchanged(self):
+        qr = self._query_result([0], [0.2])
+        faces = ["stashdb.org:1"]
+        performers = {"stashdb.org:1": {"name": "Sasha Grey"}}
+
+        result = build_matches(qr, faces, performers, aliases={}, prefer_western_names=True)
+
+        assert result.matches[0].name == "Sasha Grey"
+        assert result.matches[0].original_name is None
+
+    def test_setting_on_but_no_western_alias_available_unchanged(self):
+        qr = self._query_result([0], [0.2])
+        faces = ["javstash.org:1"]
+        performers = {"javstash.org:1": {"name": "田村美羽"}}
+        aliases = {"javstash.org:1": ["浅野美希"]}
+
+        result = build_matches(qr, faces, performers, aliases=aliases, prefer_western_names=True)
+
+        assert result.matches[0].name == "田村美羽"
+        assert result.matches[0].original_name is None
+
+
 class TestYawPenalty:
     """build_matches()'s soft steep-angle confidence penalty -- see
     matching.py's own _apply_yaw_penalty. Default config:
@@ -815,6 +870,29 @@ class TestMatchFace:
         result = match_face(np.zeros(512, dtype=np.float32), index, faces, performers)
 
         assert [m.name for m in result.matches] == ["A", "B"]
+
+    def test_prefer_western_names_swaps_main_index_but_not_local_index(self):
+        # Local-index candidates come from the user's own real Stash
+        # performer records -- deliberately untouched by this crawled-
+        # dataset display setting (see build_matches's own docstring).
+        main_index = _mock_index(keys=[0], distances=[0.2])
+        local_index = _mock_index(keys=[7], distances=[0.1])
+        faces = ["javstash.org:uuid-1"]
+        performers = {"javstash.org:uuid-1": {"name": "田村美羽"}}
+        aliases = {"javstash.org:uuid-1": ["Miu Tamura"]}
+        local_mapping = {"7": {"name": "田村美羽 (local)", "stashdb_id": None}}
+
+        result = match_face(
+            np.zeros(512, dtype=np.float32), main_index, faces, performers,
+            local_index=local_index, local_performers_mapping=local_mapping,
+            aliases=aliases, prefer_western_names=True,
+        )
+
+        by_uid = {m.universal_id: m for m in result.matches}
+        assert by_uid["javstash.org:uuid-1"].name == "Miu Tamura"
+        assert by_uid["javstash.org:uuid-1"].original_name == "田村美羽"
+        assert by_uid["local:7"].name == "田村美羽 (local)"
+        assert by_uid["local:7"].original_name is None
 
     def test_merges_local_index_when_provided(self):
         main_index = _mock_index(keys=[0], distances=[0.5])

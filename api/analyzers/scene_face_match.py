@@ -44,6 +44,7 @@ def _make_details(
     scene_id: str, scene_title: str, person_id: int, frame_count: int, is_best_match: bool,
     universal_id: str, stashdb_id, name, confidence, distance, country, image_url, endpoint,
     local_performer_id, source, catalogue_url, profile_url, top_timestamps_sec,
+    original_name=None,
 ) -> dict:
     """Shared recommendation `details` shape -- built the same way whether
     the match came from stored data or a fresh top-up identify."""
@@ -66,6 +67,7 @@ def _make_details(
         "catalogue_url": catalogue_url,
         "profile_url": profile_url,
         "top_timestamps_sec": top_timestamps_sec,
+        "original_name": original_name,
     }
 
 
@@ -223,6 +225,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     row["universal_id"], row["stashdb_id"], row["name"], row["confidence"], row["distance"],
                     row["country"], row["image_url"], row["endpoint"], row["local_performer_id"],
                     row["source"], row["catalogue_url"], row["profile_url"], row["top_timestamps_sec"],
+                    row.get("original_name"),
                 )
                 rec_id = self.create_recommendation(
                     target_type="scene", target_id=f"{scene_id}|{row['universal_id']}",
@@ -272,7 +275,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                         universal_id == best_uid, universal_id, match.stashdb_id, match.name,
                         match.confidence, match.distance, match.country, match.image_url, match.endpoint,
                         match.local_performer_id, match.source, match.catalogue_url, match.profile_url,
-                        match.top_timestamps_sec,
+                        match.top_timestamps_sec, getattr(match, "original_name", None),
                     )
                     rec_id = self.create_recommendation(
                         target_type="scene", target_id=f"{scene_id}|{universal_id}",

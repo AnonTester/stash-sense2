@@ -6420,6 +6420,7 @@
             </div>
           </label>
           <div class="ss-sfm-candidate-name">${escapeHtmlBreakable(c.name || 'Unknown')}</div>
+          ${c.original_name ? `<div class="ss-sfm-candidate-original-name">aka ${escapeHtmlBreakable(c.original_name)}</div>` : ''}
           <div class="ss-sfm-candidate-meta">
             ${Math.round((c.confidence || 0) * 100)}% match
             ${!isCandidatePending && !forDismissedSection ? ` &middot; <span class="ss-sfm-candidate-status">${escapeHtml(c.status)}</span>` : ''}

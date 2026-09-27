@@ -1157,6 +1157,35 @@ class TestEntityCreation:
         assert call_kwargs["stash_ids"] == [{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-uuid-1"}]
 
     @pytest.mark.asyncio
+    async def test_create_performer_from_stashbox_original_name_added_as_alias(self, mock_stash):
+        """settings.py's prefer_western_names swap -- e.g. a real
+        javstash.org match, not a catalogue source, so this hits the
+        non-catalogue branch. The original (usually non-Latin-script)
+        name must be added as an alias, combined with any real aliases
+        already fetched from the source."""
+        from recommendations_router import _create_performer_from_stashbox
+        await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={"name": "Miu Tamura", "aliases": ["Erika"], "original_name": "田村美羽"},
+            endpoint="https://javstash.org/graphql",
+            stashbox_id="perf-uuid-2",
+        )
+        call_kwargs = mock_stash.create_performer.call_args[1]
+        assert call_kwargs["alias_list"] == ["Erika", "田村美羽"]
+
+    @pytest.mark.asyncio
+    async def test_create_performer_from_stashbox_original_name_not_duplicated(self, mock_stash):
+        from recommendations_router import _create_performer_from_stashbox
+        await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={"name": "Miu Tamura", "aliases": ["田村美羽"], "original_name": "田村美羽"},
+            endpoint="https://javstash.org/graphql",
+            stashbox_id="perf-uuid-3",
+        )
+        call_kwargs = mock_stash.create_performer.call_args[1]
+        assert call_kwargs["alias_list"] == ["田村美羽"]
+
+    @pytest.mark.asyncio
     async def test_create_performer_from_stashbox_alias_match_raises_ambiguous(self, mock_stash):
         """A name/alias match alone is never sufficient grounds to link or
         create -- confirmed live, this exact pattern silently linked a real
@@ -1521,6 +1550,43 @@ class TestCatalogueSourcedPerformers:
         mock_stash.update_performer.assert_called_once_with(
             "200", urls=["https://onlyfans.com/janedoe", "https://seekfans.example/model/janedoe"],
         )
+
+    @pytest.mark.asyncio
+    async def test_original_name_added_as_alias_when_western_name_swap_happened(self, mock_stash):
+        """settings.py's prefer_western_names swapped the display name for
+        a western alias (see name_script.resolve_display_name) -- the
+        original (usually non-Latin-script) name must survive as an alias
+        on the newly-created performer, not be lost."""
+        from recommendations_router import _create_performer_from_stashbox
+
+        await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={
+                "name": "Miu Tamura", "source": "javdatabase",
+                "original_name": "田村美羽",
+            },
+            endpoint="javdatabase", stashbox_id="99",
+        )
+
+        create_kwargs = mock_stash.create_performer.call_args.kwargs
+        assert create_kwargs["alias_list"] == ["田村美羽"]
+
+    @pytest.mark.asyncio
+    async def test_original_name_combines_with_profile_url_handle_alias(self, mock_stash):
+        from recommendations_router import _create_performer_from_stashbox
+
+        await _create_performer_from_stashbox(
+            mock_stash,
+            stashbox_data={
+                "name": "Jane Doe", "source": "seekfans",
+                "profile_url": "https://onlyfans.com/janedoe",
+                "original_name": "Jane Original",
+            },
+            endpoint="seekfans", stashbox_id="4821",
+        )
+
+        create_kwargs = mock_stash.create_performer.call_args.kwargs
+        assert create_kwargs["alias_list"] == ["janedoe", "Jane Original"]
 
     @pytest.mark.asyncio
     async def test_alias_collision_still_raises_ambiguous(self, mock_stash):

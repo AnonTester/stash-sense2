@@ -167,6 +167,7 @@ class PerformerMatchResponse(BaseModel):
     top_timestamps_sec: list[float] = Field(default_factory=list, description="Up to 4 timestamps (seconds) of this match's strongest frames, for scene-player jump buttons. Only populated by scene identification's live ffmpeg-extraction path (matching_mode='cluster' or 'hybrid', via hybrid's own internal cluster component); empty for 'frequency' mode or the cached-signal fast path (no per-frame timestamps available there -- see _identify_scene_from_cache).")
     universal_id: Optional[str] = Field(None, description="This match's own universal_id (e.g. 'stashdb.org:<uuid>', 'local:<id>', or '<source>:<id>' for a catalogue match), for callers that need to cross-reference a match without reconstructing endpoint+stashdb_id themselves.")
     matched_embedding_index: Optional[int] = Field(None, description="The usearch index position of the one specific reference face that won this match -- None for a local-index match (no such index) or if unavailable. Distinct from any StashDB performer id: this points at exactly which photo of that performer was matched.")
+    original_name: Optional[str] = Field(None, description="Set only when the 'Prefer Western Names' setting swapped `name` for a western-script alias -- this is the original (usually non-Latin-script) name, for an 'aka ...' display line.")
 
 
 class FaceResult(BaseModel):
@@ -318,6 +319,7 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         profile_url=getattr(m, "profile_url", None),
         universal_id=uid,
         matched_embedding_index=getattr(m, "matched_embedding_index", None),
+        original_name=getattr(m, "original_name", None),
     )
     defaults.update(overrides)
     return PerformerMatchResponse(**defaults)

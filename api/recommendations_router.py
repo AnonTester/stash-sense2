@@ -161,6 +161,7 @@ def save_scene_fingerprint(
                     "catalogue_url": match.catalogue_url,
                     "profile_url": match.profile_url,
                     "top_timestamps_sec": match.top_timestamps_sec,
+                    "original_name": getattr(match, "original_name", None),
                 })
         rec_db.replace_fingerprint_matches(fingerprint_id, match_rows)
 
@@ -3464,10 +3465,21 @@ async def _do_create_performer(
             fields["country"] = stashbox_data["country"]
         profile_url = stashbox_data.get("profile_url")
         catalogue_url = stashbox_data.get("catalogue_url")
+        alias_list = []
         if profile_url:
             handle = profile_url.rstrip("/").rsplit("/", 1)[-1]
             if handle:
-                fields["alias_list"] = [handle]
+                alias_list.append(handle)
+        # The name this match's own display was swapped FROM
+        # (settings.py's prefer_western_names) -- kept as an alias so it
+        # isn't lost when the western name becomes this new performer's
+        # main name. Mirrors stashbox_router.py's own
+        # create_performer_from_catalogue (the live-Identify equivalent
+        # of this accept-and-create path).
+        if stashbox_data.get("original_name"):
+            alias_list.append(stashbox_data["original_name"])
+        if alias_list:
+            fields["alias_list"] = alias_list
         if stashbox_data.get("image_url"):
             fields["image"] = stashbox_data["image_url"]
         created = await stash.create_performer(**fields)
@@ -3477,8 +3489,11 @@ async def _do_create_performer(
         return created
 
     fields = {"name": performer_name}
-    if stashbox_data.get("aliases"):
-        fields["alias_list"] = stashbox_data["aliases"]
+    alias_list = list(stashbox_data.get("aliases") or [])
+    if stashbox_data.get("original_name") and stashbox_data["original_name"] not in alias_list:
+        alias_list.append(stashbox_data["original_name"])
+    if alias_list:
+        fields["alias_list"] = alias_list
     if stashbox_data.get("gender"):
         fields["gender"] = stashbox_data["gender"]
     fields["stash_ids"] = [{"endpoint": endpoint, "stash_id": stashbox_id}]
@@ -4419,6 +4434,7 @@ async def _resolve_scene_face_match_performer_id(stash, rec: Recommendation, sel
         "image_url": details.get("image_url"),
         "catalogue_url": details.get("catalogue_url"),
         "profile_url": details.get("profile_url"),
+        "original_name": details.get("original_name"),
     }
     performer = await _create_performer_from_stashbox(
         stash, stashbox_data, endpoint_url, stashdb_id, force_create=selection.force_create,

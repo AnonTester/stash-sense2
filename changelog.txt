@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.35.6 (sidecar) / 0.28.4 (plugin)
+- Feature: new "Prefer Western Names" setting (Settings > Display) shows a
+  match's Latin-script alias instead of a non-Latin canonical name, with
+  the original kept visible as "aka ..." and used as an alias on create.
+
 ### 0.35.5 (sidecar)
 - Fix: a local performer and its own catalogue-sourced entry (e.g.
   babepedia) no longer show as two separate Face Recommendations/Identify

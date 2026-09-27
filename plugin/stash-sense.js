@@ -701,7 +701,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
+            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl, originalName } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -719,6 +719,7 @@
                       source, name, country: country || undefined,
                       image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
                       profile_url: profileUrl || undefined,
+                      original_name: originalName || undefined,
                       ...(staged ? {} : { scene_id: targetSceneId }),
                       sidecar_url: settings.sidecarUrl,
                     })
@@ -832,7 +833,8 @@
                     data-country="${esc(match.country)}"
                     data-image-url="${esc(match.image_url)}"
                     data-catalogue-url="${esc(match.catalogue_url)}"
-                    data-profile-url="${esc(match.profile_url)}"`;
+                    data-profile-url="${esc(match.profile_url)}"
+                    data-original-name="${esc(match.original_name)}"`;
       },
 
       // Build the "View on ..." links for a match. Catalogue (non-stash-box)
@@ -1005,6 +1007,7 @@
             </div>
             <div class="ss-match-info">
               <h4>${match.name}</h4>
+              ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
               <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
               ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
               <div class="ss-links">
@@ -1075,6 +1078,7 @@
                 </div>
                 <div class="ss-match-info">
                   <h4>${m.name}</h4>
+                  ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                   <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                   ${altShowAlreadyTagged ? '<span class="ss-tagged-badge ss-tagged-badge-sm">Tagged</span>' : ''}
                   ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
@@ -1799,6 +1803,7 @@
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
+                  ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
                   <div class="ss-links">
@@ -1855,6 +1860,7 @@
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
+                      ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
                       <div class="ss-links">
@@ -1929,7 +1935,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, imageId: targetImageId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
+            const { endpoint, stashdbId, imageId: targetImageId, source, name, country, imageUrl, catalogueUrl, profileUrl, originalName } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -1947,6 +1953,7 @@
                       source, name, country: country || undefined,
                       image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
                       profile_url: profileUrl || undefined,
+                      original_name: originalName || undefined,
                       ...(staged ? {} : { image_id: targetImageId }),
                       sidecar_url: settings.sidecarUrl,
                     })
@@ -2116,6 +2123,7 @@
                 </div>
                 <div class="ss-match-info">
                   <h4>${match.name}</h4>
+                  ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
                   <div class="ss-links">
@@ -2177,6 +2185,7 @@
                     </div>
                     <div class="ss-match-info">
                       <h4>${m.name}</h4>
+                      ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
                       <div class="ss-links">
@@ -2253,7 +2262,7 @@
         resultsDiv.querySelectorAll('.ss-btn-create').forEach(btn => {
           btn.addEventListener('click', async (e) => {
             e.stopPropagation();
-            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl } = btn.dataset;
+            const { endpoint, stashdbId, sceneId: targetSceneId, source, name, country, imageUrl, catalogueUrl, profileUrl, originalName } = btn.dataset;
             btn.disabled = true;
             btn.textContent = 'Creating...';
 
@@ -2271,6 +2280,7 @@
                       source, name, country: country || undefined,
                       image_url: imageUrl || undefined, catalogue_url: catalogueUrl || undefined,
                       profile_url: profileUrl || undefined,
+                      original_name: originalName || undefined,
                       ...(staged ? {} : { scene_id: targetSceneId }),
                       sidecar_url: settings.sidecarUrl,
                     })
