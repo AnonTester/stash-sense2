@@ -19,10 +19,19 @@ class StashboxMatchResult:
     matched: bool
     endpoint: Optional[str] = None
     stash_id: Optional[str] = None
+    # True when both scenes are already independently linked to a real
+    # stash-box scene on the SAME endpoint but with a DIFFERENT id -- a
+    # confirmed external identity for each, not a soft signal to weigh
+    # against everything else. See calculate_duplicate_confidence's own
+    # use of this: authoritative evidence they are two distinct scenes,
+    # vetoing a match regardless of how strong the other signals look.
+    conflicting: bool = False
 
 
 def check_stashbox_match(scene_a: SceneMetadata, scene_b: SceneMetadata) -> StashboxMatchResult:
-    """Check if two scenes share the same stash-box ID on the same endpoint."""
+    """Check if two scenes share the same stash-box ID on the same
+    endpoint -- or, failing that, whether they're already each linked to
+    a *different* id on the same endpoint (conflicting=True)."""
     for sid_a in scene_a.stash_ids:
         for sid_b in scene_b.stash_ids:
             if sid_a.endpoint == sid_b.endpoint and sid_a.stash_id == sid_b.stash_id:
@@ -31,6 +40,10 @@ def check_stashbox_match(scene_a: SceneMetadata, scene_b: SceneMetadata) -> Stas
                     endpoint=sid_a.endpoint,
                     stash_id=sid_a.stash_id,
                 )
+    for sid_a in scene_a.stash_ids:
+        for sid_b in scene_b.stash_ids:
+            if sid_a.endpoint == sid_b.endpoint and sid_a.stash_id != sid_b.stash_id:
+                return StashboxMatchResult(matched=False, conflicting=True)
     return StashboxMatchResult(matched=False)
 
 
@@ -95,8 +108,17 @@ def metadata_score(scene_a: SceneMetadata, scene_b: SceneMetadata) -> tuple[floa
         score += 15.0
         reasons.append(f"Performers overlap ({performer_overlap:.0%})")
 
-    # Studio boost (mild, not decisive)
-    if scene_a.studio_id and scene_b.studio_id and scene_a.studio_id == scene_b.studio_id:
+    # Studio boost -- only when corroborated by date proximity. "Same
+    # studio" alone is weak evidence on its own: a studio with a large
+    # catalogue and a regularly recurring cast releases many genuinely
+    # different scenes sharing both, and unconditionally boosting for
+    # studio alone let "exact performer match + same studio, otherwise
+    # completely unrelated scenes (different titles, different dates,
+    # sometimes even already linked to two different confirmed stash-box
+    # scenes)" reach "Likely duplicate" purely from cast+studio overlap,
+    # with zero date/title/visual evidence -- confirmed live as the
+    # dominant false-positive pattern for prolific performers/studios.
+    if (same_date or close_date) and scene_a.studio_id and scene_b.studio_id and scene_a.studio_id == scene_b.studio_id:
         score += 10.0
         reasons.append("Same studio")
 
@@ -224,6 +246,15 @@ def calculate_duplicate_confidence(
                 metadata_reasoning="",
             ),
         )
+
+    # Both scenes are already independently linked to a different real
+    # stash-box scene on the same endpoint -- a confirmed external
+    # identity for each, so no combination of the weaker signals below
+    # can outweigh it. Checked even when a phash match is present: an
+    # accidental/false phash collision (rare, but not impossible) must
+    # not override a confirmed stash-box identity either.
+    if stashbox.conflicting:
+        return None
 
     # Compute individual signals
     p_score, p_reasoning = phash_score(phash_distance)

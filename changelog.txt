@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.35.9 (sidecar)
+- Fix: Duplicate Scenes flagged unrelated scenes from shared performer +
+  studio alone. Studio now needs date corroboration, and scenes already
+  linked to different confirmed stash-box IDs are never flagged.
+
 ### 0.35.8 (sidecar) / 0.28.7 (plugin)
 - Feature: "Custom Bulk Dismiss" for Face Recommendations -- pick from the
   top 20 performers by pending count and dismiss all their candidates at

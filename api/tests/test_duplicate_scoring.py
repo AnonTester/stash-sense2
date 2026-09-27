@@ -38,13 +38,40 @@ class TestMetadataScore:
         score, reason = metadata_score(a, b)
         assert 25.0 <= score <= 40.0
 
-    def test_studio_only_mild_boost(self):
+    def test_studio_alone_no_date_no_boost(self):
+        # Studio boost requires date corroboration (same_date or
+        # close_date) -- "same studio" alone is weak evidence on its own
+        # (a studio's whole catalogue shares it), and was the dominant
+        # false-positive pattern for prolific studios/performers before
+        # this guard (confirmed live: "exact performer match + same
+        # studio" alone reaching "Likely duplicate" for otherwise
+        # unrelated scenes).
         from duplicate_detection.scoring import metadata_score
 
         a = self._scene(scene_id="1", studio_id="s1")
         b = self._scene(scene_id="2", studio_id="s1")
         score, reason = metadata_score(a, b)
-        assert score == 10.0
+        assert score == 0.0
+        assert reason == "No metadata signals"
+
+    def test_studio_boost_with_date_proximity(self):
+        from duplicate_detection.scoring import metadata_score
+
+        a = self._scene(scene_id="1", studio_id="s1", date="2024-01-15")
+        b = self._scene(scene_id="2", studio_id="s1", date="2024-01-18")  # within 7 days
+        score, reason = metadata_score(a, b)
+        assert "Same studio" in reason
+
+    def test_studio_no_boost_without_date_but_with_performers(self):
+        # The exact-performer-match-only branch (no date signal) must not
+        # pick up the studio boost either.
+        from duplicate_detection.scoring import metadata_score
+
+        a = self._scene(scene_id="1", studio_id="s1", performer_ids={"p1", "p2"})
+        b = self._scene(scene_id="2", studio_id="s1", performer_ids={"p1", "p2"})
+        score, reason = metadata_score(a, b)
+        assert score == 25.0  # exact performer match only, no studio boost
+        assert "Same studio" not in reason
 
     def test_no_metadata_returns_zero(self):
         from duplicate_detection.scoring import metadata_score
@@ -123,6 +150,10 @@ class TestStashboxMatch:
         result = check_stashbox_match(scene_a, scene_b)
 
         assert result.matched is False
+        # Both scenes are independently confirmed to different real
+        # stash-box scenes on the same endpoint -- authoritative evidence
+        # they are NOT duplicates of each other.
+        assert result.conflicting is True
 
     def test_different_endpoints_same_id(self):
         from duplicate_detection.scoring import check_stashbox_match
@@ -141,6 +172,21 @@ class TestStashboxMatch:
 
         # Same ID but different endpoint = not a match
         assert result.matched is False
+        # Not a real conflict either -- these are two different endpoints'
+        # own id spaces, not two confirmed-different scenes on the same one.
+        assert result.conflicting is False
+
+    def test_no_stash_ids_not_conflicting(self):
+        from duplicate_detection.scoring import check_stashbox_match
+        from duplicate_detection.models import SceneMetadata
+
+        scene_a = SceneMetadata(scene_id="1")
+        scene_b = SceneMetadata(scene_id="2")
+
+        result = check_stashbox_match(scene_a, scene_b)
+
+        assert result.matched is False
+        assert result.conflicting is False
 
 
 class TestFaceSignatureSimilarity:
@@ -438,3 +484,44 @@ class TestCombinedConfidenceRedesign:
         match = calculate_duplicate_confidence(a, b, phash_distance=2)
         assert match is not None
         assert match.signal_breakdown.phash_distance == 2
+
+    def test_conflicting_stashbox_ids_vetoes_a_match_despite_strong_metadata(self):
+        # Real reported case: same performer + same studio (previously
+        # enough alone to reach "Likely duplicate"), but each scene is
+        # ALREADY confirmed to a different real stash-box scene -- that
+        # must win over every other signal, not just reduce the score.
+        from duplicate_detection.scoring import calculate_duplicate_confidence
+        from duplicate_detection.models import StashID
+
+        a = self._scene(
+            scene_id="1", studio_id="s1", performer_ids={"p1", "p2"}, date="2024-01-15",
+            stash_ids=[StashID("https://stashdb.org", "aaa")],
+        )
+        b = self._scene(
+            scene_id="2", studio_id="s1", performer_ids={"p1", "p2"}, date="2024-01-15",
+            stash_ids=[StashID("https://stashdb.org", "bbb")],
+        )
+        match = calculate_duplicate_confidence(a, b)
+        assert match is None
+
+    def test_conflicting_stashbox_ids_veto_beats_strong_phash_too(self):
+        from duplicate_detection.scoring import calculate_duplicate_confidence
+        from duplicate_detection.models import StashID
+
+        a = self._scene(scene_id="1", stash_ids=[StashID("https://stashdb.org", "aaa")])
+        b = self._scene(scene_id="2", stash_ids=[StashID("https://stashdb.org", "bbb")])
+        match = calculate_duplicate_confidence(a, b, phash_distance=0)
+        assert match is None
+
+    def test_same_performer_and_studio_alone_no_longer_flagged(self):
+        # The exact false-positive shape from the user's own report: same
+        # performer + same studio, different date, different titles
+        # (titles aren't modelled in SceneMetadata at all -- the point is
+        # this combination alone, with nothing else agreeing, must not
+        # reach the recommendation-creation threshold on its own).
+        from duplicate_detection.scoring import calculate_duplicate_confidence
+
+        a = self._scene(scene_id="1", studio_id="s1", performer_ids={"p1", "p2", "p3"}, date="2024-01-15")
+        b = self._scene(scene_id="2", studio_id="s1", performer_ids={"p1", "p2"}, date="2024-06-20")
+        match = calculate_duplicate_confidence(a, b)
+        assert match is None or match.confidence < 50.0
