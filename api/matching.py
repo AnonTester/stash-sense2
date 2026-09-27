@@ -338,6 +338,92 @@ def merge_local_candidates(
     return merged
 
 
+def build_local_catalogue_link_index(
+    local_performer_index, performers: dict[str, dict],
+) -> dict[str, list[str]]:
+    """Builds a performer_link_index-shaped dict (see scene_matcher.py's
+    own _link_key/_canonical_identity) linking a local performer's own
+    "local:<id>" universal_id to a catalogue main-database performer's
+    universal_id, when the local performer's own Stash `urls` match that
+    candidate's `profile_url`/`catalogue_url` -- e.g. a local performer
+    created directly from a babepedia profile, which has no stash_id to
+    link with (babepedia isn't a stash-box).
+
+    merge_local_candidates() above already catches this SAME signal, but
+    only within one single face-match query's own candidate list -- if
+    the local index's own top match and the main index's own catalogue
+    match for the same real person don't happen to co-occur in the same
+    frame's result (very possible across a whole scene: two small/large,
+    independently-ranked indices), each frame contributes a separate
+    identity to scene_matcher.py's cross-frame aggregation, which never
+    merges them back together -- confirmed live: a scene's Face
+    Recommendations showed a local "Dianaholiday" candidate and a
+    separate babepedia "Dianaholiday" candidate as two different persons,
+    despite the local performer being created from that exact babepedia
+    profile (name and URL both matching exactly).
+
+    Built ONCE over the whole dataset (not per-query against only
+    whichever candidates a single frame happened to rank), so it fixes
+    the cross-frame case directly -- see recognizer.py, which builds this
+    once at load and again on every local-index reload, and
+    scene_matcher.py's clustered_frequency_matching/hybrid_matching,
+    which merge it into the same performer_link_index dict already
+    threaded through _canonical_identity everywhere, so no other
+    caller/signature needs to change.
+
+    Empty local_performer_index (never synced) or no dataset-side
+    catalogue candidates gives {}, same "optional, absent means skip"
+    tolerance as performer_link_index itself."""
+    if not local_performer_index or not local_performer_index.mapping:
+        return {}
+
+    # normalized url -> catalogue universal_id, built once rather than
+    # rescanning the whole performers dict per local performer.
+    url_to_catalogue_uid: dict[str, str] = {}
+    for uid, info in performers.items():
+        if classify_universal_id(uid) != "catalogue":
+            continue
+        for url in (info.get("profile_url"), info.get("catalogue_url")):
+            normalized = normalize_url_for_compare(url)
+            if normalized:
+                url_to_catalogue_uid.setdefault(normalized, uid)
+
+    if not url_to_catalogue_uid:
+        return {}
+
+    index: dict[str, list[str]] = {}
+    for local_id, info in local_performer_index.mapping.items():
+        matched_uids = {
+            url_to_catalogue_uid[normalized]
+            for url in (info.get("urls") or [])
+            for normalized in [normalize_url_for_compare(url)]
+            if normalized and normalized in url_to_catalogue_uid
+        }
+        if not matched_uids:
+            continue
+        local_uid = f"local:{local_id}"
+        group = {local_uid, *matched_uids}
+        for member in group:
+            index.setdefault(member, [])
+            index[member] = list(set(index[member]) | (group - {member}))
+
+    return index
+
+
+def merge_link_indexes(*indexes: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Unions any number of performer_link_index-shaped dicts by key
+    (e.g. stash-sense2-data-gen's own performer_link_index plus this
+    sidecar's own build_local_catalogue_link_index) -- a key present in
+    more than one source keeps every group member from all of them."""
+    merged: dict[str, set[str]] = {}
+    for index in indexes:
+        if not index:
+            continue
+        for uid, group in index.items():
+            merged.setdefault(uid, set()).update(group)
+    return {uid: list(group) for uid, group in merged.items()}
+
+
 def _resolve_local_link_uid(uid: str, local_performers_mapping: Optional[dict[str, dict]]) -> str:
     """A local-index candidate's own `universal_id` stays "local:<id>"
     even when that local performer has been stash_id-linked to a real

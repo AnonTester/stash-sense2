@@ -13,10 +13,24 @@ from typing import Optional
 
 import numpy as np
 
-from matching import _extract_endpoint_domain, _STASHDB_ENDPOINT_SHORT_NAME
+from matching import _extract_endpoint_domain, _STASHDB_ENDPOINT_SHORT_NAME, merge_link_indexes
 from recognizer import FaceRecognizer, PerformerMatch, RecognitionResult
 
 logger = logging.getLogger(__name__)
+
+
+def _recognizer_link_index(recognizer) -> dict[str, list[str]]:
+    """performer_link_index (stash-sense2-data-gen's own linked-duplicate
+    groups) merged with local_catalogue_link_index (this sidecar's own
+    local-performer-to-catalogue-url links, see matching.py's
+    build_local_catalogue_link_index) -- everything downstream that
+    already consults performer_link_index (_link_key/_canonical_identity)
+    picks up both signals through this one merged dict, no other call
+    site needs to change."""
+    return merge_link_indexes(
+        getattr(recognizer, "performer_link_index", None) or {},
+        getattr(recognizer, "local_catalogue_link_index", None) or {},
+    )
 
 
 def _link_key(universal_id: Optional[str], performer_link_index: Optional[dict[str, list[str]]]) -> Optional[str]:
@@ -631,7 +645,7 @@ def clustered_frequency_matching(
         return []
 
     tagged_ids = set(scene_performer_stashdb_ids or [])
-    performer_link_index = getattr(recognizer, "performer_link_index", None) or {}
+    performer_link_index = _recognizer_link_index(recognizer)
     endpoint_priority_domains = (
         recognizer._endpoint_priority_domains() if hasattr(recognizer, "_endpoint_priority_domains") else []
     )
@@ -851,7 +865,7 @@ def hybrid_matching(
     # recognizer=None is a real, supported call shape (see
     # tests/test_scene_matcher_logic.py's TestHybridMatchingFrameTimestamps),
     # not just a defensive fallback.
-    performer_link_index = getattr(recognizer, "performer_link_index", None) or {}
+    performer_link_index = _recognizer_link_index(recognizer)
     endpoint_priority_domains = (
         recognizer._endpoint_priority_domains() if hasattr(recognizer, "_endpoint_priority_domains") else []
     )

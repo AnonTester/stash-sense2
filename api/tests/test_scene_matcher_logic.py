@@ -759,3 +759,84 @@ class TestClusteredFrequencyMatchingLinkedCandidates:
         names = [m.name for m in persons[0].all_matches]
         assert names[0] == "Elma"
         assert "Unrelated Performer" in names
+
+
+class TestClusteredFrequencyMatchingLocalCatalogueLink:
+    """Same collapsing behavior as TestClusteredFrequencyMatchingLinkedCandidates
+    above, but for recognizer.local_catalogue_link_index (a local performer
+    created directly from a catalogue profile, e.g. babepedia -- no
+    stash_id to link with, so performer_link_index alone can't catch it;
+    see matching.py's build_local_catalogue_link_index). Confirmed live: a
+    local "Dianaholiday" performer and the babepedia "Dianaholiday" she was
+    created from showed as two separate Face Recommendations candidates
+    despite matching name and URL exactly."""
+
+    def _local_and_catalogue_same_cluster(self, local_score=0.10, catalogue_score=0.50):
+        # stashdb_id == local_performer_id simulates an UNLINKED local
+        # match (recognizer.py's own convention -- see PerformerMatch's
+        # docstring: a stash_id-linked local match has them differ).
+        # local_catalogue_link_index is precisely the signal for an
+        # unlinked local performer, so the test must simulate one, not a
+        # stash_id-linked local match (a different, already-covered case
+        # -- see TestClusteredFrequencyMatchingLinkedCandidates).
+        match_local = _make_match(
+            "99", local_score, universal_id="local:99", local_performer_id="99",
+        )
+        match_local.name = "Dianaholiday"
+        match_catalogue = _make_match("42", catalogue_score, universal_id="babepedia:42")
+        match_catalogue.name = "Dianaholiday"
+        result_a = _embedded_result([match_local], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([match_catalogue], [0.0, 1.0, 0.0])
+        return [(0, result_a), (1, result_b)]
+
+    def _local_catalogue_link_index(self):
+        return {"local:99": ["babepedia:42"], "babepedia:42": ["local:99"]}
+
+    def test_local_and_catalogue_duplicate_collapse_to_one_person(self):
+        recognizer = SimpleNamespace(
+            performer_link_index={},
+            local_catalogue_link_index=self._local_catalogue_link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+
+        persons = clustered_frequency_matching(
+            self._local_and_catalogue_same_cluster(), recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        # The whole point: the babepedia duplicate must NOT show up as a
+        # separate "other possible match" for the local performer.
+        assert [m.name for m in persons[0].all_matches] == ["Dianaholiday"]
+
+    def test_stronger_catalogue_score_still_collapses_to_one_person(self):
+        recognizer = SimpleNamespace(
+            performer_link_index={},
+            local_catalogue_link_index=self._local_catalogue_link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+        clusters = self._local_and_catalogue_same_cluster(local_score=0.45, catalogue_score=0.10)
+
+        persons = clustered_frequency_matching(
+            clusters, recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+
+    def test_absent_local_catalogue_link_index_keeps_them_separate(self):
+        # Sanity check the fix is what does the collapsing -- without it
+        # (a recognizer with no such attribute, matching every real
+        # instance before this fix), the two must still show as two
+        # separate persons, proving the test actually exercises the fix.
+        recognizer = SimpleNamespace(performer_link_index={}, _endpoint_priority_domains=lambda: ["stashdb.org"])
+
+        persons = clustered_frequency_matching(
+            self._local_and_catalogue_same_cluster(), recognizer,
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 2

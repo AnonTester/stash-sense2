@@ -1,5 +1,11 @@
 ## 2026-09-27
 
+### 0.35.5 (sidecar)
+- Fix: a local performer and its own catalogue-sourced entry (e.g.
+  babepedia) no longer show as two separate Face Recommendations/Identify
+  candidates when the local performer's URL matches the catalogue profile
+  exactly but has no stash-box link to catch it otherwise.
+
 ### 0.35.4 (sidecar) / 0.28.3 (plugin)
 - Identify matches and Face Recommendations candidates now also expose their
   universal_id, and Identify matches which reference face was matched.

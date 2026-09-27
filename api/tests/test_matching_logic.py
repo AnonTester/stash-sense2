@@ -16,10 +16,12 @@ from matching import (
     IndexQueryResult,
     LOCAL_MATCH_BOOST,
     MatchingConfig,
+    build_local_catalogue_link_index,
     build_matches,
     collapse_linked_candidates,
     fuse_local_results,
     match_face,
+    merge_link_indexes,
     merge_local_candidates,
     query_index,
 )
@@ -460,6 +462,103 @@ class TestMergeLocalCandidatesUrlCrossCheck:
 
         assert len(merged) == 1
         assert merged[0].universal_id == "local:7"
+
+
+class TestBuildLocalCatalogueLinkIndex:
+    """merge_local_candidates' URL cross-check (TestMergeLocalCandidatesUrlCrossCheck
+    above) only merges a local/catalogue duplicate when both happen to
+    co-occur in the SAME query's own candidate list -- across a whole
+    scene's many frames they might never both rank in one frame's own
+    top-k, so scene_matcher.py's cross-frame aggregation needs the same
+    signal precomputed dataset-wide instead. Confirmed live: a local
+    "Dianaholiday" performer created directly from a babepedia profile
+    (matching name and URL, no stash_id since babepedia isn't a stash-box)
+    showed as two separate Face Recommendations candidates."""
+
+    def _local_index(self, mapping):
+        return SimpleNamespace(mapping=mapping)
+
+    def test_local_url_matches_catalogue_profile_url(self):
+        local_index = self._local_index({
+            "7": {"name": "Dianaholiday", "urls": ["https://www.babepedia.com/babe/Dianaholiday"]},
+        })
+        performers = {
+            "babepedia:42": {"profile_url": "https://babepedia.com/babe/Dianaholiday/"},
+        }
+
+        index = build_local_catalogue_link_index(local_index, performers)
+
+        assert index["local:7"] == ["babepedia:42"]
+        assert index["babepedia:42"] == ["local:7"]
+
+    def test_matches_via_catalogue_url_when_no_profile_url(self):
+        local_index = self._local_index({
+            "7": {"name": "Local", "urls": ["https://pornbox.com/model/99"]},
+        })
+        performers = {
+            "pornbox:99": {"profile_url": None, "catalogue_url": "https://pornbox.com/model/99"},
+        }
+
+        index = build_local_catalogue_link_index(local_index, performers)
+
+        assert index["local:7"] == ["pornbox:99"]
+
+    def test_no_url_overlap_produces_no_link(self):
+        local_index = self._local_index({
+            "7": {"name": "Local", "urls": ["https://babepedia.com/babe/someone-else"]},
+        })
+        performers = {"babepedia:42": {"profile_url": "https://babepedia.com/babe/Dianaholiday"}}
+
+        index = build_local_catalogue_link_index(local_index, performers)
+
+        assert index == {}
+
+    def test_real_stashbox_candidate_not_url_compared(self):
+        # Same rule as merge_local_candidates' own url pass -- a stashbox
+        # id has no profile_url/catalogue_url in `performers` at all in
+        # real data, but even if one were present it must not be linked.
+        local_index = self._local_index({
+            "7": {"name": "Local", "urls": ["https://onlyfans.com/x"]},
+        })
+        performers = {"stashdb.org:uuid-1": {"profile_url": "https://onlyfans.com/x"}}
+
+        index = build_local_catalogue_link_index(local_index, performers)
+
+        assert index == {}
+
+    def test_no_local_performer_index_gives_empty_dict(self):
+        assert build_local_catalogue_link_index(None, {"babepedia:42": {}}) == {}
+
+    def test_local_performer_with_no_urls_is_skipped(self):
+        local_index = self._local_index({"7": {"name": "Local", "urls": []}})
+        performers = {"babepedia:42": {"profile_url": "https://babepedia.com/babe/x"}}
+
+        assert build_local_catalogue_link_index(local_index, performers) == {}
+
+
+class TestMergeLinkIndexes:
+    def test_unions_groups_from_both_sources(self):
+        a = {"stashdb.org:1": ["pornbox:2"], "pornbox:2": ["stashdb.org:1"]}
+        b = {"local:7": ["babepedia:42"], "babepedia:42": ["local:7"]}
+
+        merged = merge_link_indexes(a, b)
+
+        assert set(merged["stashdb.org:1"]) == {"pornbox:2"}
+        assert set(merged["local:7"]) == {"babepedia:42"}
+
+    def test_key_present_in_both_sources_unions_members(self):
+        a = {"babepedia:42": ["stashdb.org:1"]}
+        b = {"babepedia:42": ["local:7"]}
+
+        merged = merge_link_indexes(a, b)
+
+        assert set(merged["babepedia:42"]) == {"stashdb.org:1", "local:7"}
+
+    def test_empty_and_none_sources_are_skipped(self):
+        assert merge_link_indexes({}, None, {"a": ["b"]}) == {"a": ["b"]}
+
+    def test_no_sources_gives_empty_dict(self):
+        assert merge_link_indexes() == {}
 
 
 class TestCollapseLinkedCandidates:

@@ -169,6 +169,17 @@ class FaceRecognizer:
         self.local_performer_index = None
         self._load_local_performer_index()
 
+        # local:<id> <-> catalogue universal_id links (a local performer's
+        # own urls matching a main-database catalogue candidate's own
+        # profile/catalogue url, e.g. one created directly from a babepedia
+        # profile -- no stash_id to link with, so the local-performer-sync
+        # hook's own stashdb_id tracking can't catch this). Depends on
+        # local_performer_index above, so built after it, not alongside
+        # performer_link_index -- see matching.build_local_catalogue_link_index
+        # and reload_local_performer_index() below for why this needs
+        # recomputing on every local-index reload, not just at startup.
+        self._rebuild_local_catalogue_link_index()
+
         # Initialize SQLite database reader for multi-signal data
         self.db_reader = None
         if db_config.sqlite_db_path and db_config.sqlite_db_path.exists():
@@ -206,6 +217,19 @@ class FaceRecognizer:
         full reload on the next request -- see main.py's
         refresh_local_performer_index()."""
         self._load_local_performer_index()
+        # A newly-synced/edited local performer's own urls can newly match
+        # (or stop matching) a catalogue candidate -- see
+        # _rebuild_local_catalogue_link_index's own comment at __init__.
+        self._rebuild_local_catalogue_link_index()
+
+    def _rebuild_local_catalogue_link_index(self) -> None:
+        from matching import build_local_catalogue_link_index
+        self.local_catalogue_link_index: dict[str, list[str]] = build_local_catalogue_link_index(
+            self.local_performer_index, self.performers,
+        )
+        local_count = sum(1 for uid in self.local_catalogue_link_index if uid.startswith("local:"))
+        if local_count:
+            print(f"Local catalogue link index: {local_count} local performer(s) linked by URL")
 
     def _get_performer_info(self, universal_id: str) -> dict:
         """Get performer info from universal ID."""

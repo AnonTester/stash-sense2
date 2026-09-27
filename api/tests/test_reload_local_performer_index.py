@@ -74,10 +74,49 @@ class TestLoadLocalPerformerIndex:
             assert fake_self.local_performer_index is second_index
 
 
+class TestRebuildLocalCatalogueLinkIndex:
+    """Thin wrapper around matching.build_local_catalogue_link_index (see
+    test_matching_logic.py's TestBuildLocalCatalogueLinkIndex for the
+    actual link-detection coverage) -- this only pins down that the
+    recognizer wires its own current local_performer_index/performers into
+    it and stores the result under the attribute _recognizer_link_index()
+    (scene_matcher.py) reads."""
+
+    def test_stores_the_built_index_on_self(self):
+        fake_local_index = SimpleNamespace(mapping={
+            "7": {"name": "Dianaholiday", "urls": ["https://babepedia.com/babe/Dianaholiday"]},
+        })
+        fake_self = SimpleNamespace(
+            local_performer_index=fake_local_index,
+            performers={"babepedia:42": {"profile_url": "https://babepedia.com/babe/Dianaholiday"}},
+        )
+
+        FaceRecognizer._rebuild_local_catalogue_link_index(fake_self)
+
+        assert fake_self.local_catalogue_link_index["local:7"] == ["babepedia:42"]
+
+
 class TestReloadLocalPerformerIndex:
     def test_delegates_to_load_local_performer_index(self):
-        fake_self = SimpleNamespace(_load_local_performer_index=MagicMock())
+        fake_self = SimpleNamespace(
+            _load_local_performer_index=MagicMock(),
+            _rebuild_local_catalogue_link_index=MagicMock(),
+        )
 
         FaceRecognizer.reload_local_performer_index(fake_self)
 
         fake_self._load_local_performer_index.assert_called_once_with()
+
+    def test_also_rebuilds_the_local_catalogue_link_index(self):
+        # A newly-synced/edited local performer's own urls can newly match
+        # (or stop matching) a catalogue candidate -- see
+        # recognizer.py's own comment on why this can't just be built once
+        # at startup (matching.build_local_catalogue_link_index).
+        fake_self = SimpleNamespace(
+            _load_local_performer_index=MagicMock(),
+            _rebuild_local_catalogue_link_index=MagicMock(),
+        )
+
+        FaceRecognizer.reload_local_performer_index(fake_self)
+
+        fake_self._rebuild_local_catalogue_link_index.assert_called_once_with()
