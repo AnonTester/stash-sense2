@@ -4623,6 +4623,34 @@ async def undismiss_scene_face_match(request: DismissSceneFaceMatchRequest):
     return {"success": True}
 
 
+@router.get("/actions/scene-face-match-performer-counts")
+async def scene_face_match_performer_counts(limit: int = 20):
+    """Top performers by pending scene_face_match candidate count, for the
+    "Custom Bulk Dismiss" tool -- a performer with poor/generic embedding
+    data can incorrectly match a large number of scenes, and dismissing
+    each one individually doesn't scale."""
+    db = get_rec_db()
+    return {"performers": db.get_scene_face_match_performer_counts(limit=limit)}
+
+
+class BulkDismissSceneFaceMatchPerformersRequest(BaseModel):
+    universal_ids: list[str]
+    reason: Optional[str] = None
+
+
+@router.post("/actions/bulk-dismiss-scene-face-match-performers")
+async def bulk_dismiss_scene_face_match_performers(request: BulkDismissSceneFaceMatchPerformersRequest):
+    """Dismiss every pending scene_face_match candidate for the given
+    performers (by universal_id), across every scene -- see
+    scene-face-match-performer-counts above for how the caller picks
+    which performers to dismiss."""
+    db = get_rec_db()
+    count = db.batch_dismiss_scene_face_match_by_performers(
+        request.universal_ids, reason=request.reason or "Custom bulk dismiss by performer",
+    )
+    return {"success": True, "dismissed_count": count}
+
+
 _SCENE_BULK_ALLOWED_SIMPLE_FIELDS = {"code", "urls"}
 
 

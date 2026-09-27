@@ -1309,6 +1309,23 @@ def handle_recommendations(mode, args, sidecar_url):
             {"rec_id": args.get("rec_id")},
         )
 
+    elif mode == "rec_scene_face_match_performer_counts":
+        limit = args.get("limit", 20)
+        return sidecar_get(
+            sidecar_url,
+            f"/recommendations/actions/scene-face-match-performer-counts?limit={limit}",
+        )
+
+    elif mode == "rec_bulk_dismiss_scene_face_match_performers":
+        return sidecar_post(
+            sidecar_url,
+            "/recommendations/actions/bulk-dismiss-scene-face-match-performers",
+            {
+                "universal_ids": args.get("universal_ids", []),
+                "reason": args.get("reason"),
+            },
+        )
+
     elif mode == "rec_accept_all_fingerprint_matches":
         payload = {}
         endpoint = args.get("endpoint")

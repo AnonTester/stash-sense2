@@ -1120,6 +1120,78 @@ class RecommendationsDB:
 
             return len(rec_ids)
 
+    def get_scene_face_match_performer_counts(self, limit: int = 20) -> list[dict]:
+        """Top performers by pending scene_face_match candidate count --
+        for the "Custom Bulk Dismiss" tool (a performer with poor/generic
+        embedding data can match a large number of scenes incorrectly;
+        dismissing each one individually doesn't scale). universal_id is
+        the same identity key used throughout this codebase (matching.py,
+        settings.py's prefer_western_names); rows with no universal_id
+        (shouldn't happen in practice -- scene_face_match's own
+        _make_details always sets it) are excluded rather than lumped
+        into one misleading "unknown" bucket."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    json_extract(details, '$.universal_id') AS universal_id,
+                    json_extract(details, '$.name') AS name,
+                    COUNT(*) AS count
+                FROM recommendations
+                WHERE type = 'scene_face_match' AND status = 'pending'
+                    AND json_extract(details, '$.universal_id') IS NOT NULL
+                GROUP BY universal_id
+                ORDER BY count DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def batch_dismiss_scene_face_match_by_performers(
+        self, universal_ids: list[str], reason: Optional[str] = None,
+    ) -> int:
+        """Dismiss every pending scene_face_match candidate for the given
+        performers (by universal_id), across every scene -- the bulk
+        counterpart to dismiss_scene_face_match (one candidate at a time).
+        Same shape as batch_dismiss_by_type: bulk status UPDATE, then a
+        dismissed_targets row per dismissed recommendation so a future
+        scan skips these exact (scene, performer) pairs too, same as
+        every other dismiss path. Returns the count dismissed."""
+        if not universal_ids:
+            return 0
+        with self._connection() as conn:
+            placeholders = ",".join("?" * len(universal_ids))
+            rows = conn.execute(
+                f"""
+                SELECT id, type, target_type, target_id FROM recommendations
+                WHERE type = 'scene_face_match' AND status = 'pending'
+                    AND json_extract(details, '$.universal_id') IN ({placeholders})
+                """,
+                universal_ids,
+            ).fetchall()
+
+            if not rows:
+                return 0
+
+            rec_ids = [row["id"] for row in rows]
+            conn.execute(
+                f"UPDATE recommendations SET status = 'dismissed', updated_at = datetime('now') "
+                f"WHERE id IN ({','.join('?' * len(rec_ids))})",
+                rec_ids,
+            )
+
+            for row in rows:
+                try:
+                    conn.execute(
+                        "INSERT INTO dismissed_targets (type, target_type, target_id, reason, permanent) VALUES (?, ?, ?, ?, ?)",
+                        (row["type"], row["target_type"], row["target_id"], reason, 0),
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Already dismissed
+
+            return len(rec_ids)
+
     def delete_pending_recommendations_by_type(self, rec_type: str) -> int:
         """Delete all pending recommendations for a type. Returns deleted row count."""
         with self._connection() as conn:

@@ -1290,3 +1290,79 @@ class TestGetSceneIdentifyResult:
         result = resp.json()["result"]
         assert len(result["persons"]) == 2
         assert {p["person_id"] for p in result["persons"]} == {0, 1}
+
+
+# ==================== Custom Bulk Dismiss (scene_face_match, by performer) ====================
+
+
+class TestSceneFaceMatchPerformerCountsAction:
+    """Test GET /recommendations/actions/scene-face-match-performer-counts
+    -- feeds the "Custom Bulk Dismiss" modal's checkbox list."""
+
+    def _create_candidate(self, db, scene_id, universal_id, name):
+        return db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id=f"{scene_id}|{universal_id}",
+            details={"universal_id": universal_id, "name": name, "scene_id": scene_id},
+        )
+
+    def test_returns_performers_ordered_by_count(self, db, client):
+        self._create_candidate(db, "1", "seekfans:1", "Autumn🌹")
+        self._create_candidate(db, "2", "seekfans:1", "Autumn🌹")
+        self._create_candidate(db, "3", "seekfans:2", "Charmie")
+
+        resp = client.get("/recommendations/actions/scene-face-match-performer-counts")
+
+        assert resp.status_code == 200
+        performers = resp.json()["performers"]
+        assert performers[0] == {"universal_id": "seekfans:1", "name": "Autumn🌹", "count": 2}
+        assert performers[1] == {"universal_id": "seekfans:2", "name": "Charmie", "count": 1}
+
+    def test_respects_limit_query_param(self, db, client):
+        for i in range(5):
+            self._create_candidate(db, str(i), f"seekfans:{i}", f"Performer {i}")
+
+        resp = client.get("/recommendations/actions/scene-face-match-performer-counts?limit=2")
+
+        assert len(resp.json()["performers"]) == 2
+
+    def test_empty_when_nothing_pending(self, db, client):
+        resp = client.get("/recommendations/actions/scene-face-match-performer-counts")
+        assert resp.json()["performers"] == []
+
+
+class TestBulkDismissSceneFaceMatchPerformersAction:
+    """Test POST /recommendations/actions/bulk-dismiss-scene-face-match-performers."""
+
+    def _create_candidate(self, db, scene_id, universal_id, name):
+        return db.create_recommendation(
+            type="scene_face_match", target_type="scene", target_id=f"{scene_id}|{universal_id}",
+            details={"universal_id": universal_id, "name": name, "scene_id": scene_id},
+        )
+
+    def test_dismisses_selected_performers_only(self, db, client):
+        self._create_candidate(db, "1", "seekfans:1", "Autumn🌹")
+        self._create_candidate(db, "2", "seekfans:1", "Autumn🌹")
+        self._create_candidate(db, "3", "seekfans:2", "Charmie")
+        unrelated_id = self._create_candidate(db, "4", "seekfans:3", "Camila Moon")
+
+        resp = client.post(
+            "/recommendations/actions/bulk-dismiss-scene-face-match-performers",
+            json={"universal_ids": ["seekfans:1", "seekfans:2"]},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["success"] is True
+        assert body["dismissed_count"] == 3
+        assert db.get_recommendation(unrelated_id).status == "pending"
+
+    def test_empty_universal_ids_dismisses_nothing(self, db, client):
+        self._create_candidate(db, "1", "seekfans:1", "Autumn🌹")
+
+        resp = client.post(
+            "/recommendations/actions/bulk-dismiss-scene-face-match-performers",
+            json={"universal_ids": []},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["dismissed_count"] == 0

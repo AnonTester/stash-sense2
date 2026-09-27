@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.35.8 (sidecar) / 0.28.7 (plugin)
+- Feature: "Custom Bulk Dismiss" for Face Recommendations -- pick from the
+  top 20 performers by pending count and dismiss all their candidates at
+  once, for a performer whose poor embedding keeps matching wrong scenes.
+
 ### 0.28.6 (plugin)
 - Fix: Scene Stash-Box Tagger's Resolved/Dismissed tabs were re-sorted by
   match confidence client-side, hiding the server's correct newest-first

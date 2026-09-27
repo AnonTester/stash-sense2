@@ -1579,6 +1579,52 @@
   color: var(--bs-body-color, #ddd);
 }
 
+/* Custom Bulk Dismiss (Face Recommendations, by performer) -- same field
+   list as .ss-cba-fields/.ss-cba-field above, just a two-column grid
+   (per-performer name/count rows tend to be short, so one column wastes
+   space for a top-20 list) instead of a single flex column. */
+.ss-cbd-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0;
+  border: 1px solid var(--bs-border-color, #333);
+  border-radius: 8px;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.ss-cbd-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bs-border-color, #2a2a2a);
+}
+
+.ss-cbd-item:nth-child(odd) {
+  border-right: 1px solid var(--bs-border-color, #2a2a2a);
+}
+
+.ss-cbd-item:hover {
+  background: var(--bs-tertiary-bg, #2a2a2a);
+}
+
+.ss-cbd-item input {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+@media (max-width: 600px) {
+  .ss-cbd-grid {
+    grid-template-columns: 1fr;
+  }
+  .ss-cbd-item:nth-child(odd) {
+    border-right: none;
+  }
+}
+
 .ss-cba-has-failures {
   color: #e0a458;
 }

@@ -355,6 +355,14 @@
       return apiCall('rec_undismiss_scene_face_match', { rec_id: recId });
     },
 
+    async getSceneFaceMatchPerformerCounts(limit = 20) {
+      return apiCall('rec_scene_face_match_performer_counts', { limit });
+    },
+
+    async bulkDismissSceneFaceMatchPerformers(universalIds, reason) {
+      return apiCall('rec_bulk_dismiss_scene_face_match_performers', { universal_ids: universalIds, reason });
+    },
+
     async acceptSceneChange(recId, resolutions = {}) {
       // resolutions: { [stashboxPerformerId]: {action: "link"|"create", performer_id?} } --
       // the user's explicit choice for a previously-ambiguous added
@@ -1322,6 +1330,124 @@
     });
   }
 
+  // Custom Bulk Dismiss (Face Recommendations, by performer) -- same
+  // modal shell/toolbar/progress-close flow as openCustomBulkAccept above,
+  // but the underlying data is "top performers by pending candidate
+  // count" rather than "changed fields", so the body/confirm logic is its
+  // own. For a performer whose poor/generic embedding data matches a
+  // large number of scenes incorrectly, dismissing each candidate one at
+  // a time doesn't scale -- this dismisses every pending scene_face_match
+  // candidate for the checked performers in one action.
+  async function openCustomBulkDismissPerformers() {
+    const overlay = document.createElement('div');
+    overlay.className = 'ss-modal-overlay';
+    overlay.innerHTML = `
+      <div class="ss-accept-all-modal">
+        <div class="ss-modal-header">
+          <h3>Custom Bulk Dismiss</h3>
+          <button class="ss-modal-close">&times;</button>
+        </div>
+        <div class="ss-modal-body"><div class="ss-loading-inline"><div class="ss-spinner"></div></div></div>
+        <div class="ss-modal-footer"><button class="ss-btn ss-btn-secondary" id="ss-cbd-cancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const body = overlay.querySelector('.ss-modal-body');
+    const footer = overlay.querySelector('.ss-modal-footer');
+
+    let busy = false;
+    let dirty = false;
+    const close = () => {
+      if (busy) return;
+      overlay.remove();
+      if (dirty) {
+        invalidateListCache();
+        renderCurrentView(document.getElementById('ss-recommendations'));
+      }
+    };
+    overlay.querySelector('.ss-modal-close').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    footer.querySelector('#ss-cbd-cancel').addEventListener('click', close);
+
+    let performers;
+    try {
+      const result = await RecommendationsAPI.getSceneFaceMatchPerformerCounts(20);
+      performers = result.performers || [];
+    } catch (e) {
+      body.innerHTML = `<p>Could not load performers: ${escapeHtml(e.message)}</p>`;
+      return;
+    }
+    if (performers.length === 0) {
+      body.innerHTML = '<p>No pending Face Recommendations candidates.</p>';
+      return;
+    }
+
+    const selected = new Set();
+    body.innerHTML = `
+      <p>Tick the performers whose pending Face Recommendations candidates should all be dismissed at once -- e.g. a performer whose poor/generic embedding data keeps matching unrelated scenes.</p>
+      <div class="ss-cba-toolbar">
+        <button class="ss-cba-link" id="ss-cbd-select-all">Select all</button>
+        <button class="ss-cba-link" id="ss-cbd-unselect-all">Unselect all</button>
+      </div>
+      <div class="ss-cbd-grid">
+        ${performers.map(p => `
+          <label class="ss-cbd-item">
+            <input type="checkbox" data-uid="${escapeHtml(p.universal_id)}" data-count="${p.count}">
+            <span class="ss-cba-label">${escapeHtmlBreakable(p.name || 'Unknown')}</span>
+            <span class="ss-cba-count" title="Pending Face Recommendations candidates for this performer">${p.count}</span>
+          </label>`).join('')}
+      </div>
+      <p class="ss-cba-summary" id="ss-cbd-summary"></p>`;
+    footer.innerHTML = `
+      <button class="ss-btn ss-btn-secondary" id="ss-cbd-cancel">Cancel</button>
+      <button class="ss-accept-all-btn" id="ss-cbd-confirm" disabled>Dismiss 0 recommendations</button>`;
+    footer.querySelector('#ss-cbd-cancel').addEventListener('click', close);
+
+    const checkboxes = [...body.querySelectorAll('input[type="checkbox"][data-uid]')];
+    const summaryEl = body.querySelector('#ss-cbd-summary');
+    const confirmBtn = footer.querySelector('#ss-cbd-confirm');
+    const update = () => {
+      const checked = checkboxes.filter(cb => cb.checked);
+      const total = checked.reduce((sum, cb) => sum + (Number(cb.dataset.count) || 0), 0);
+      summaryEl.innerHTML = `<strong>${checked.length}</strong> performer${checked.length === 1 ? '' : 's'} selected &mdash; <strong>${total}</strong> pending recommendation${total === 1 ? '' : 's'} will be dismissed.`;
+      confirmBtn.disabled = checked.length === 0;
+      confirmBtn.textContent = `Dismiss ${total} recommendation${total === 1 ? '' : 's'}`;
+    };
+    checkboxes.forEach(cb => cb.addEventListener('change', () => {
+      if (cb.checked) selected.add(cb.dataset.uid); else selected.delete(cb.dataset.uid);
+      update();
+    }));
+    const setAll = (checked) => {
+      checkboxes.forEach(cb => { cb.checked = checked; if (checked) selected.add(cb.dataset.uid); else selected.delete(cb.dataset.uid); });
+      update();
+    };
+    body.querySelector('#ss-cbd-select-all').addEventListener('click', () => setAll(true));
+    body.querySelector('#ss-cbd-unselect-all').addEventListener('click', () => setAll(false));
+    update();
+
+    confirmBtn.addEventListener('click', async () => {
+      if (selected.size === 0) return;
+      busy = true;
+      footer.innerHTML = '';
+      body.innerHTML = '<div class="ss-loading-inline"><div class="ss-spinner"></div></div>';
+      try {
+        const result = await RecommendationsAPI.bulkDismissSceneFaceMatchPerformers(
+          Array.from(selected), 'Custom bulk dismiss by performer',
+        );
+        dirty = true;
+        body.innerHTML = `
+          <div class="ss-batch-progress">
+            <div class="ss-batch-progress-text">Dismissed ${result.dismissed_count} recommendation${result.dismissed_count === 1 ? '' : 's'} for ${selected.size} performer${selected.size === 1 ? '' : 's'}.</div>
+          </div>`;
+      } catch (e) {
+        dirty = true;
+        body.innerHTML = `<p>Error: ${escapeHtml(e.message)}</p>`;
+      }
+      busy = false;
+      footer.innerHTML = '<button class="ss-accept-all-btn" id="ss-cbd-done">Close</button>';
+      footer.querySelector('#ss-cbd-done').addEventListener('click', close);
+    });
+  }
+
   // ==================== List View ====================
 
   // Builds a Stash-style pagination control: first-page / prev / a "Page X
@@ -1513,6 +1639,10 @@
             ? '<button class="ss-accept-all-btn" id="ss-accept-all-fp-btn" style="display:none;">Accept All High-Confidence</button>'
             : ''
           }
+          ${currentState.type === 'scene_face_match'
+            ? '<button class="ss-accept-all-btn" id="ss-bulk-dismiss-performers-btn" style="display:none;">Custom Bulk Dismiss</button>'
+            : ''
+          }
           ${currentState.type === 'duplicate_scenes'
             ? '<button class="ss-dismiss-selected-btn" id="ss-dismiss-selected-btn" style="display:none;">Dismiss Selected</button>'
             : ''
@@ -1569,6 +1699,12 @@
     const customBulkBtn = container.querySelector('#ss-custom-bulk-accept-btn');
     if (customBulkBtn) {
       customBulkBtn.addEventListener('click', () => openCustomBulkAccept(currentState.type));
+    }
+
+    // Custom Bulk Dismiss button (Face Recommendations, by performer)
+    const bulkDismissPerformersBtn = container.querySelector('#ss-bulk-dismiss-performers-btn');
+    if (bulkDismissPerformersBtn) {
+      bulkDismissPerformersBtn.addEventListener('click', () => openCustomBulkDismissPerformers());
     }
 
     // Accept All High-Confidence fingerprint matches button
