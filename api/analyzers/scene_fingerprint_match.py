@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from .base import BaseAnalyzer, AnalysisResult
+from name_script import resolve_display_name
 from scene_fingerprint_scoring import score_match, is_high_confidence
 from stashbox_client import StashBoxClient
 
@@ -176,6 +177,28 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
 
         # Batch query stash-box
         stashbox = StashBoxClient(endpoint, api_key)
+
+        # settings.py's prefer_western_names, for the matched scene's own
+        # studio name -- read once per endpoint (this run's own scope),
+        # same convention as this analyzer's other per-run setting reads.
+        # stash-box's Studio type has no alias field at all, so the only
+        # source of a western name is a local studio already stash_id-
+        # linked to this endpoint -- fetched once here, not per candidate.
+        try:
+            from settings import get_setting
+            prefer_western_names = bool(get_setting("prefer_western_names"))
+        except RuntimeError:
+            prefer_western_names = False
+        local_studio_aliases_by_stashbox_id: dict[str, list[str]] = {}
+        if prefer_western_names:
+            try:
+                for local_studio in await self.stash.get_studios_for_endpoint(endpoint):
+                    for sid in local_studio.get("stash_ids") or []:
+                        if sid.get("endpoint") == endpoint and sid.get("stash_id"):
+                            local_studio_aliases_by_stashbox_id[sid["stash_id"]] = local_studio.get("aliases") or []
+            except Exception as e:
+                logger.warning("[%s] Could not load local studios for name preference: %s", endpoint_name, e)
+
         self.set_items_total(len(scenes_needing_match), label=endpoint_name)
         logger.warning(
             "[%s] Starting scan of %d scenes with fingerprints",
@@ -256,6 +279,14 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                     studio = match.get("studio")
                     images = match.get("images") or []
 
+                    stashbox_studio_name = studio.get("name") if studio else None
+                    stashbox_studio_original_name = None
+                    if prefer_western_names and studio and studio.get("id"):
+                        stashbox_studio_name, stashbox_studio_original_name = resolve_display_name(
+                            str(studio["id"]), stashbox_studio_name,
+                            local_studio_aliases_by_stashbox_id, prefer_western_names,
+                        )
+
                     details = {
                         "local_scene_id": scene["id"],
                         "local_scene_title": scene.get("title") or f"Scene {scene['id']}",
@@ -263,7 +294,8 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                         "endpoint_name": endpoint_name,
                         "stashbox_scene_id": match["id"],
                         "stashbox_scene_title": match.get("title"),
-                        "stashbox_studio": studio.get("name") if studio else None,
+                        "stashbox_studio": stashbox_studio_name,
+                        "stashbox_studio_original": stashbox_studio_original_name,
                         "stashbox_studio_id": str(studio.get("id")) if studio and studio.get("id") is not None else None,
                         "stashbox_performers": performers,
                         "stashbox_performer_links": performer_links,

@@ -21,6 +21,18 @@ class TestGetStudiosForEndpoint:
         assert result[0]["name"] == "Brazzers"
 
     @pytest.mark.asyncio
+    async def test_query_requests_aliases(self):
+        # Needed for settings.py's prefer_western_names -- a local
+        # studio's own aliases are the only source of a western name for
+        # it (stash-box's own Studio type has no alias field at all).
+        from stash_client_unified import StashClientUnified
+        client = StashClientUnified("http://localhost:9999", "test-key")
+        client._execute = AsyncMock(return_value={"findStudios": {"studios": []}})
+        await client.get_studios_for_endpoint("https://stashdb.org/graphql")
+        query = client._execute.call_args[0][0]
+        assert "aliases" in query
+
+    @pytest.mark.asyncio
     async def test_returns_empty_list_when_none(self):
         from stash_client_unified import StashClientUnified
         client = StashClientUnified("http://localhost:9999", "test-key")

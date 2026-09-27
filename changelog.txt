@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.35.7 (sidecar) / 0.28.5 (plugin)
+- Feature: "Prefer Western Names" now also covers studios -- Scene
+  Stash-Box Tagger and Upstream Studio Changes show a linked local
+  studio's own western alias, with the original name as "aka ...".
+
 ### 0.35.6 (sidecar) / 0.28.4 (plugin)
 - Feature: new "Prefer Western Names" setting (Settings > Display) shows a
   match's Latin-script alias instead of a non-Latin canonical name, with

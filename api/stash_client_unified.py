@@ -830,6 +830,7 @@ class StashClientUnified:
             studios {
               id
               name
+              aliases
               urls
               parent_studio {
                 id

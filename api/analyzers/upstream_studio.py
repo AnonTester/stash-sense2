@@ -9,6 +9,7 @@ import logging
 from typing import Optional
 
 from .base_upstream import BaseUpstreamAnalyzer
+from name_script import resolve_display_name
 from stashbox_client import StashBoxClient
 from upstream_field_mapper import (
     normalize_upstream_studio,
@@ -48,6 +49,10 @@ def _build_local_studio_data(studio: dict, endpoint: str = "") -> dict:
         "urls": urls,
         "parent_studio": parent_studio_val,
         "_parent_studio_name": parent_studio_name,
+        # Not diffed (stash-box's own Studio type has no alias field to
+        # compare against) -- purely for settings.py's prefer_western_names
+        # display swap. See UpstreamStudioAnalyzer._build_recommendation_details.
+        "_aliases": studio.get("aliases") or [],
     }
 
 
@@ -106,3 +111,33 @@ class UpstreamStudioAnalyzer(BaseUpstreamAnalyzer):
                     continue
             filtered.append(change)
         return filtered
+
+    def _build_recommendation_details(
+        self, endpoint, endpoint_name, stash_box_id, local_entity, updated_at, changes,
+    ) -> dict:
+        """Same as the base implementation, plus settings.py's
+        prefer_western_names: swaps studio_name (the recommendation's own
+        card title/detail header) for this studio's own western alias
+        when its real name isn't in Latin script. Only this display field
+        swaps -- `changes`' own "Name" field diff (if any) still compares
+        the real raw local/upstream names, so "did this actually change"
+        stays correct. stash-box's Studio type has no alias field, so the
+        only source of a western name here is this already-linked local
+        studio's own aliases (see _build_local_studio_data's "_aliases")."""
+        details = super()._build_recommendation_details(
+            endpoint, endpoint_name, stash_box_id, local_entity, updated_at, changes,
+        )
+        try:
+            from settings import get_setting
+            prefer_western = bool(get_setting("prefer_western_names"))
+        except RuntimeError:
+            prefer_western = False
+        if prefer_western:
+            local_aliases = local_entity.get("aliases") or []
+            display_name, original_name = resolve_display_name(
+                str(local_entity["id"]), details["studio_name"],
+                {str(local_entity["id"]): local_aliases}, prefer_western,
+            )
+            details["studio_name"] = display_name
+            details["studio_name_original"] = original_name
+        return details

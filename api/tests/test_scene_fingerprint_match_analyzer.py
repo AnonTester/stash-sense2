@@ -384,3 +384,99 @@ class TestAcceptAllAction:
 
         assert accepted == 1
         mock_db.resolve_recommendation.assert_called_once_with(1, action="accepted")
+
+
+class TestPreferWesternNamesStudio:
+    """settings.py's prefer_western_names applied to the matched scene's
+    own studio name -- stash-box's Studio type has no alias field, so the
+    only source of a western name is a local studio already stash_id-
+    linked to this same endpoint (see stash_client_unified.py's
+    get_studios_for_endpoint, now also fetching aliases)."""
+
+    @pytest.mark.asyncio
+    async def test_swaps_to_local_studio_alias_when_setting_on(self):
+        db = make_mock_db()
+        stash = make_mock_stash()
+        stash.get_scenes_with_fingerprints.return_value = (
+            [make_scene("42", "My Scene", [{"type": "md5", "value": "abc123"}])], 1,
+        )
+        stash.get_studios_for_endpoint.return_value = [
+            {
+                "id": "1462", "name": "カリビアンコム", "aliases": ["Caribbeancom"],
+                "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "s1"}],
+            }
+        ]
+        stashbox_match = make_stashbox_match(
+            "sb-uuid-1", "Matched Scene",
+            [{"hash": "abc123", "algorithm": "MD5", "duration": 1800, "submissions": 5,
+              "created": "2024-01-01", "updated": "2024-06-01"}],
+            studio={"id": "s1", "name": "カリビアンコム"},
+        )
+
+        with patch("analyzers.scene_fingerprint_match.StashBoxClient") as MockSBC, \
+                patch("settings.get_setting", return_value=True):
+            mock_sbc = AsyncMock()
+            mock_sbc.find_scenes_by_fingerprints.return_value = [[stashbox_match]]
+            MockSBC.return_value = mock_sbc
+            analyzer = SceneFingerprintMatchAnalyzer(stash, db)
+            await analyzer.run(incremental=False)
+
+        details = db.create_recommendation.call_args[1]["details"]
+        assert details["stashbox_studio"] == "Caribbeancom"
+        assert details["stashbox_studio_original"] == "カリビアンコム"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_when_setting_off(self):
+        db = make_mock_db()
+        stash = make_mock_stash()
+        stash.get_scenes_with_fingerprints.return_value = (
+            [make_scene("42", "My Scene", [{"type": "md5", "value": "abc123"}])], 1,
+        )
+        stashbox_match = make_stashbox_match(
+            "sb-uuid-1", "Matched Scene",
+            [{"hash": "abc123", "algorithm": "MD5", "duration": 1800, "submissions": 5,
+              "created": "2024-01-01", "updated": "2024-06-01"}],
+            studio={"id": "s1", "name": "カリビアンコム"},
+        )
+
+        with patch("analyzers.scene_fingerprint_match.StashBoxClient") as MockSBC, \
+                patch("settings.get_setting", return_value=False):
+            mock_sbc = AsyncMock()
+            mock_sbc.find_scenes_by_fingerprints.return_value = [[stashbox_match]]
+            MockSBC.return_value = mock_sbc
+            analyzer = SceneFingerprintMatchAnalyzer(stash, db)
+            await analyzer.run(incremental=False)
+
+        details = db.create_recommendation.call_args[1]["details"]
+        assert details["stashbox_studio"] == "カリビアンコム"
+        assert details["stashbox_studio_original"] is None
+        # get_studios_for_endpoint should not even be queried when the
+        # setting is off -- no local-studio lookup needed at all.
+        stash.get_studios_for_endpoint.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_linked_local_studio_leaves_name_unchanged(self):
+        db = make_mock_db()
+        stash = make_mock_stash()
+        stash.get_scenes_with_fingerprints.return_value = (
+            [make_scene("42", "My Scene", [{"type": "md5", "value": "abc123"}])], 1,
+        )
+        stash.get_studios_for_endpoint.return_value = []  # nothing linked yet
+        stashbox_match = make_stashbox_match(
+            "sb-uuid-1", "Matched Scene",
+            [{"hash": "abc123", "algorithm": "MD5", "duration": 1800, "submissions": 5,
+              "created": "2024-01-01", "updated": "2024-06-01"}],
+            studio={"id": "s1", "name": "カリビアンコム"},
+        )
+
+        with patch("analyzers.scene_fingerprint_match.StashBoxClient") as MockSBC, \
+                patch("settings.get_setting", return_value=True):
+            mock_sbc = AsyncMock()
+            mock_sbc.find_scenes_by_fingerprints.return_value = [[stashbox_match]]
+            MockSBC.return_value = mock_sbc
+            analyzer = SceneFingerprintMatchAnalyzer(stash, db)
+            await analyzer.run(incremental=False)
+
+        details = db.create_recommendation.call_args[1]["details"]
+        assert details["stashbox_studio"] == "カリビアンコム"
+        assert details["stashbox_studio_original"] is None

@@ -260,3 +260,88 @@ class TestUpstreamStudioAnalyzer:
             MockSBC.return_value = mock_sbc
             result = await analyzer.run()
         assert result.recommendations_created == 0
+
+
+class TestUpstreamStudioPreferWesternNames:
+    """settings.py's prefer_western_names -- see the local studio 1462
+    example that prompted this (name in Japanese, alias "Caribbeancom",
+    already linked to javstash.org): stash-box's own Studio type has no
+    alias field, so the only source of a western name is this already-
+    linked local studio's own aliases."""
+
+    @pytest.fixture
+    def mock_stash(self):
+        stash = MagicMock()
+        stash.get_stashbox_connections = AsyncMock(return_value=[
+            {"endpoint": "https://stashdb.org/graphql", "api_key": "test-key", "name": "stashdb"},
+        ])
+        return stash
+
+    @pytest.fixture
+    def rec_db(self, tmp_path):
+        from recommendations_db import RecommendationsDB
+        return RecommendationsDB(tmp_path / "test.db")
+
+    async def _run(self, mock_stash, rec_db, local_studio, upstream_name, prefer_western):
+        from analyzers.upstream_studio import UpstreamStudioAnalyzer
+        mock_stash.get_studios_for_endpoint = AsyncMock(return_value=[local_studio])
+        upstream = {
+            "id": local_studio["stash_ids"][0]["stash_id"], "name": upstream_name,
+            "urls": [], "parent": None,
+            "deleted": False, "created": "2024-01-01T00:00:00Z", "updated": "2026-01-15T10:00:00Z",
+        }
+        analyzer = UpstreamStudioAnalyzer(mock_stash, rec_db)
+        with patch("stashbox_client.StashBoxClient") as MockSBC, \
+                patch("settings.get_setting", return_value=prefer_western):
+            mock_sbc = MagicMock()
+            mock_sbc.get_studio = AsyncMock(return_value=upstream)
+            MockSBC.return_value = mock_sbc
+            await analyzer.run()
+        return rec_db.get_recommendations(type="upstream_studio_changes")
+
+    @pytest.mark.asyncio
+    async def test_swaps_to_western_alias_when_setting_on(self, mock_stash, rec_db):
+        local_studio = {
+            "id": "1462", "name": "カリビアンコム", "aliases": ["Caribbeancom"], "urls": [],
+            "parent_studio": None,
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-uuid-1"}],
+        }
+        recs = await self._run(mock_stash, rec_db, local_studio, upstream_name="Different Name", prefer_western=True)
+        assert len(recs) == 1
+        assert recs[0].details["studio_name"] == "Caribbeancom"
+        assert recs[0].details["studio_name_original"] == "カリビアンコム"
+
+    @pytest.mark.asyncio
+    async def test_unchanged_when_setting_off(self, mock_stash, rec_db):
+        local_studio = {
+            "id": "1462", "name": "カリビアンコム", "aliases": ["Caribbeancom"], "urls": [],
+            "parent_studio": None,
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-uuid-1"}],
+        }
+        recs = await self._run(mock_stash, rec_db, local_studio, upstream_name="Different Name", prefer_western=False)
+        assert len(recs) == 1
+        assert recs[0].details["studio_name"] == "カリビアンコム"
+        assert "studio_name_original" not in recs[0].details
+
+    @pytest.mark.asyncio
+    async def test_already_western_name_unchanged(self, mock_stash, rec_db):
+        local_studio = {
+            "id": "10", "name": "Brazzers", "aliases": ["BZ"], "urls": [],
+            "parent_studio": None,
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-uuid-1"}],
+        }
+        recs = await self._run(mock_stash, rec_db, local_studio, upstream_name="Different Name", prefer_western=True)
+        assert len(recs) == 1
+        assert recs[0].details["studio_name"] == "Brazzers"
+        assert recs[0].details["studio_name_original"] is None
+
+    @pytest.mark.asyncio
+    async def test_no_western_alias_available_unchanged(self, mock_stash, rec_db):
+        local_studio = {
+            "id": "1462", "name": "カリビアンコム", "aliases": [], "urls": [],
+            "parent_studio": None,
+            "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-uuid-1"}],
+        }
+        recs = await self._run(mock_stash, rec_db, local_studio, upstream_name="Different Name", prefer_western=True)
+        assert len(recs) == 1
+        assert recs[0].details["studio_name"] == "カリビアンコム"

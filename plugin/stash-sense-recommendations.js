@@ -2168,6 +2168,7 @@
             </div>
             <div class="ss-rec-card-info">
               <div class="ss-rec-card-title">Upstream Changes: ${details.studio_name || 'Unknown'}</div>
+              ${details.studio_name_original ? `<div class="ss-match-original-name">aka ${escapeHtml(details.studio_name_original)}</div>` : ''}
               <div class="ss-rec-card-subtitle">
                 ${changeCount} field${changeCount !== 1 ? 's' : ''} changed · ${details.endpoint_name || ''}
               </div>
@@ -2231,7 +2232,7 @@
               </div>
               <div class="ss-rec-card-subtitle">
                 &rarr; ${escapeHtml(d.stashbox_scene_title || 'Unknown')}
-                ${d.stashbox_studio ? ` &middot; ${escapeHtml(d.stashbox_studio)}` : ''}
+                ${d.stashbox_studio ? ` &middot; ${escapeHtml(d.stashbox_studio)}${d.stashbox_studio_original ? ` (aka ${escapeHtml(d.stashbox_studio_original)})` : ''}` : ''}
               </div>
               <div class="ss-rec-card-fields" style="color: ${matchColor}">
                 ${d.match_count}/${d.total_local_fingerprints} fingerprints
@@ -4599,6 +4600,7 @@
         <h2 style="margin: 0 0 4px 0;">
           <a href="/studios/${studioId}" target="_blank">${details.studio_name || 'Unknown'}</a>
         </h2>
+        ${details.studio_name_original ? `<div class="ss-match-original-name">aka ${escapeHtml(details.studio_name_original)}</div>` : ''}
         <a href="${details.endpoint.replace(/\/graphql$/, '')}/studios/${details.stash_box_id}" target="_blank" class="ss-upstream-endpoint-badge">${details.endpoint_name || 'Upstream'}</a>
       </div>
     `;
