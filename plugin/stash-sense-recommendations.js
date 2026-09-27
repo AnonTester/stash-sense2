@@ -6408,7 +6408,7 @@
         ? `<div class="ss-sfm-candidate-dismissed-at">Dismissed ${formatRecTimestamp(c.dismissed_at)}</div>`
         : '';
       return `
-        <div class="ss-sfm-candidate${isCandidatePending ? '' : ' ss-sfm-candidate-inactive'}" data-rec-id="${c.recommendation_id}">
+        <div class="ss-sfm-candidate${isCandidatePending ? '' : ' ss-sfm-candidate-inactive'}" data-rec-id="${c.recommendation_id}" data-ss-universal-id="${escapeHtml(c.universal_id || '')}">
           <label class="ss-sfm-candidate-select">
             <input type="checkbox" class="ss-sfm-candidate-cb" data-rec-id="${c.recommendation_id}"
               ${preselect ? 'checked' : ''} ${isCandidatePending ? '' : 'disabled'} />

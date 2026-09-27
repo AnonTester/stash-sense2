@@ -165,6 +165,8 @@ class PerformerMatchResponse(BaseModel):
     catalogue_url: Optional[str] = Field(None, description="Catalogue source's own profile page, set only for catalogue matches")
     profile_url: Optional[str] = Field(None, description="Link to the actual external content site (e.g. onlyfans.com), when the catalogue source has one")
     top_timestamps_sec: list[float] = Field(default_factory=list, description="Up to 4 timestamps (seconds) of this match's strongest frames, for scene-player jump buttons. Only populated by scene identification's live ffmpeg-extraction path (matching_mode='cluster' or 'hybrid', via hybrid's own internal cluster component); empty for 'frequency' mode or the cached-signal fast path (no per-frame timestamps available there -- see _identify_scene_from_cache).")
+    universal_id: Optional[str] = Field(None, description="This match's own universal_id (e.g. 'stashdb.org:<uuid>', 'local:<id>', or '<source>:<id>' for a catalogue match), for callers that need to cross-reference a match without reconstructing endpoint+stashdb_id themselves.")
+    matched_embedding_index: Optional[int] = Field(None, description="The usearch index position of the one specific reference face that won this match -- None for a local-index match (no such index) or if unavailable. Distinct from any StashDB performer id: this points at exactly which photo of that performer was matched.")
 
 
 class FaceResult(BaseModel):
@@ -314,6 +316,8 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         source=getattr(m, "source", None),
         catalogue_url=getattr(m, "catalogue_url", None),
         profile_url=getattr(m, "profile_url", None),
+        universal_id=uid,
+        matched_embedding_index=getattr(m, "matched_embedding_index", None),
     )
     defaults.update(overrides)
     return PerformerMatchResponse(**defaults)

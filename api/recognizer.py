@@ -77,6 +77,11 @@ class PerformerMatch:
     source: Optional[str] = None
     catalogue_url: Optional[str] = None
     profile_url: Optional[str] = None
+    # The usearch index position of the one specific reference face that
+    # won this match (matching.CandidateMatch.face_index) -- unlike
+    # universal_id (identifies the performer), this pins down exactly
+    # which of that performer's photos was matched.
+    matched_embedding_index: Optional[int] = None
 
 
 @dataclass
@@ -451,6 +456,7 @@ class FaceRecognizer:
                 source=source,
                 catalogue_url=catalogue_url,
                 profile_url=profile_url,
+                matched_embedding_index=candidate.face_index,
             ))
 
         return matches, result, embedding

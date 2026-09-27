@@ -903,6 +903,18 @@
         return links.join(' ');
       },
 
+      // data-* attributes only, for a third-party plugin to read this
+      // match's identity without reconstructing universal_id itself. Empty
+      // string for a local-only match (already_tagged local library
+      // performer, no universal_id) so a reader knows to treat it as
+      // nothing to cross-reference. This plugin never reads these back.
+      _reviewDataAttrs(match) {
+        const uid = match.universal_id || '';
+        const escapedUid = SS.escapeHtml ? SS.escapeHtml(uid) : uid;
+        const idx = (match.matched_embedding_index ?? '');
+        return `data-ss-universal-id="${escapedUid}" data-ss-embedding-index="${idx}"`;
+      },
+
       // Resolve a match to its local Stash performer, if any is already in
       // the library. Local-index matches (match.local_performer_id set)
       // already know their local id directly -- no GraphQL round-trip
@@ -987,7 +999,7 @@
             <span class="ss-person-frames">${person.frame_count} appearances</span>
             ${showAlreadyTagged ? '<span class="ss-tagged-badge">Tagged</span>' : ''}
           </div>
-          <div class="ss-match">
+          <div class="ss-match" ${this._reviewDataAttrs(match)}>
             <div class="ss-match-image">
               ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
             </div>
@@ -1057,7 +1069,7 @@
             const li = document.createElement('li');
             li.className = 'ss-alt-match-item';
             li.innerHTML = `
-              <div class="ss-match">
+              <div class="ss-match" ${this._reviewDataAttrs(m)}>
                 <div class="ss-match-image">
                   ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
@@ -2098,7 +2110,7 @@
               <div class="ss-person-header">
                 <span class="ss-person-label">Face ${i + 1}</span>
               </div>
-              <div class="ss-match">
+              <div class="ss-match" ${this._reviewDataAttrs(match)}>
                 <div class="ss-match-image">
                   ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
@@ -2159,7 +2171,7 @@
                 const li = document.createElement('li');
                 li.className = 'ss-alt-match-item';
                 li.innerHTML = `
-                  <div class="ss-match">
+                  <div class="ss-match" ${this._reviewDataAttrs(m)}>
                     <div class="ss-match-image">
                       ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
