@@ -1,3 +1,10 @@
+## 2026-09-27
+
+### 0.28.0 (plugin)
+- Feature: the upstream change pages' "Accept All ..." buttons are now one
+  "Custom Bulk Accept": tick which changed fields may be accepted and every
+  recommendation that only changes those fields is accepted.
+
 ## 2026-09-26
 
 ### 0.35.1 (sidecar)

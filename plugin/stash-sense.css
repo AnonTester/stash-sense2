@@ -1499,6 +1499,88 @@
   color: var(--bs-secondary-color, #aaa);
 }
 
+/* Custom Bulk Accept: pick which changed fields may be accepted */
+.ss-cba-toolbar {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.ss-cba-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  color: var(--bs-link-color, #6ea8fe);
+  cursor: pointer;
+}
+
+.ss-cba-link:hover {
+  text-decoration: underline;
+}
+
+.ss-cba-fields {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--bs-border-color, #333);
+  border-radius: 8px;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.ss-cba-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  margin: 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--bs-border-color, #2a2a2a);
+}
+
+.ss-cba-field:last-child {
+  border-bottom: none;
+}
+
+.ss-cba-field:hover {
+  background: var(--bs-tertiary-bg, #2a2a2a);
+}
+
+.ss-cba-field input {
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.ss-cba-label {
+  flex: 1;
+  font-size: 14px;
+  color: var(--bs-body-color, #ddd);
+}
+
+.ss-cba-count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--bs-secondary-color, #aaa);
+}
+
+.ss-accept-all-modal .ss-modal-body p.ss-cba-summary {
+  margin: 14px 0 0 0;
+  color: var(--bs-body-color, #ddd);
+}
+
+.ss-cba-has-failures {
+  color: #e0a458;
+}
+
+.ss-cba-failures {
+  margin: 0;
+  padding: 0 0 0 18px;
+  font-size: 12px;
+  color: var(--bs-secondary-color, #aaa);
+  max-height: 30vh;
+  overflow-y: auto;
+}
+
 /* Pagination -- mirrors Stash's own list pagination control (first/prev/
    "X of Y" page jump/next/last), rebuilt from scratch since this plugin has
    no handle into Stash's actual React pagination component. */

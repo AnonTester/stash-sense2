@@ -355,18 +355,6 @@
       return apiCall('rec_undismiss_scene_face_match', { rec_id: recId });
     },
 
-    async acceptAllSceneTagOnlyChanges() {
-      return apiCall('rec_accept_all_scene_tag_only_changes', {});
-    },
-
-    async acceptAllPerformerUrlOnlyChanges() {
-      return apiCall('rec_accept_all_performer_url_only_changes', {});
-    },
-
-    async acceptSceneTagOnlyChange(recId) {
-      return apiCall('rec_accept_scene_tag_only_change', { rec_id: recId });
-    },
-
     async acceptSceneChange(recId, resolutions = {}) {
       // resolutions: { [stashboxPerformerId]: {action: "link"|"create", performer_id?} } --
       // the user's explicit choice for a previously-ambiguous added
@@ -374,17 +362,8 @@
       return apiCall('rec_accept_scene_change', { rec_id: recId, resolutions });
     },
 
-    async sceneTagOnlyStats() {
-      return apiCall('rec_scene_tag_only_stats', {});
-    },
-    async performerUrlOnlyStats() {
-      return apiCall('rec_performer_url_only_stats', {});
-    },
     async fingerprintMatchStats() {
       return apiCall('rec_fingerprint_match_stats', {});
-    },
-    async bulkAcceptStats(type) {
-      return apiCall('rec_bulk_accept_stats', { type });
     },
   };
 
@@ -453,32 +432,6 @@
       if (local === upstream) return false;
       return true;
     });
-  }
-
-  function isTagUrlCodeOnlySceneChangeDetails(details) {
-    if (!details || typeof details !== 'object') return false;
-
-    const simpleChanges = filterRealChanges(details.changes || []);
-    const allowedFields = new Set(['code', 'urls']);
-    if (simpleChanges.some(change => !allowedFields.has(change.field))) return false;
-
-    if (details.studio_change) return false;
-
-    const performerChanges = details.performer_changes || {};
-    if ((performerChanges.added || []).length > 0) return false;
-    if ((performerChanges.removed || []).length > 0) return false;
-
-    const tagChanges = details.tag_changes || {};
-    const hasTagChanges = (tagChanges.added || []).length > 0 || (tagChanges.removed || []).length > 0;
-    const hasSimpleChanges = simpleChanges.length > 0;
-    return hasTagChanges || hasSimpleChanges;
-  }
-
-  function isUrlOnlyPerformerChangeDetails(details) {
-    if (!details || typeof details !== 'object') return false;
-    const changes = filterRealChanges(details.changes || []);
-    if (changes.length === 0) return false;
-    return changes.every(change => change.field === 'urls');
   }
 
   function parseConfidencePercent(value) {
@@ -925,7 +878,7 @@
 
     for (const rec of recommendations) {
       // Scenes use a dedicated per-rec accept endpoint with full relational resolution;
-      // they are handled separately in the acceptAllBtn handler for upstream_scene_changes.
+      // they are handled separately by runSceneAcceptLoop() (Custom Bulk Accept).
       if (rec.type === 'upstream_scene_changes') continue;
 
       const details = rec.details;
@@ -1003,53 +956,6 @@
     return { batchChanges: results, noOpRecIds };
   }
 
-  function showAcceptAllModal(batchChanges) {
-    return new Promise((resolve) => {
-      const totalChanges = batchChanges.reduce((sum, item) => sum + item.changes.length, 0);
-
-      const overlay = document.createElement('div');
-      overlay.className = 'ss-modal-overlay';
-      overlay.innerHTML = `
-        <div class="ss-accept-all-modal">
-          <div class="ss-modal-header">
-            <h3>Accept All Changes</h3>
-            <button class="ss-modal-close">&times;</button>
-          </div>
-          <div class="ss-modal-body">
-            <p>This will apply smart defaults to <strong>${batchChanges.length}</strong> ${batchChanges.length === 1 ? 'entity' : 'entities'} (${totalChanges} field ${totalChanges === 1 ? 'change' : 'changes'}). Upstream values are preferred when available; alias lists are merged.</p>
-            ${batchChanges.map(item => `
-              <div class="ss-batch-entity-group">
-                <span class="ss-batch-entity-name">${escapeHtml(item.entityName)}</span>
-                <span class="ss-batch-entity-type">${escapeHtml(item.entityType)}</span>
-                <ul class="ss-batch-changes-list">
-                  ${item.changes.map(c => `<li><span class="ss-batch-field-name">${escapeHtml(c.field)}:</span> ${escapeHtml(c.desc)}</li>`).join('')}
-                </ul>
-              </div>
-            `).join('')}
-          </div>
-          <div class="ss-modal-footer">
-            <button class="ss-btn ss-btn-secondary" id="ss-modal-cancel">Cancel</button>
-            <button class="ss-accept-all-btn" id="ss-modal-confirm">Accept ${batchChanges.length} ${batchChanges.length === 1 ? 'Change' : 'Changes'}</button>
-          </div>
-        </div>
-      `;
-
-      document.body.appendChild(overlay);
-
-      function close(result) {
-        if (!result) overlay.remove();
-        resolve(result);
-      }
-
-      overlay.querySelector('.ss-modal-close').addEventListener('click', () => close(false));
-      overlay.querySelector('#ss-modal-cancel').addEventListener('click', () => close(false));
-      overlay.querySelector('#ss-modal-confirm').addEventListener('click', () => close(true));
-      overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) close(false);
-      });
-    });
-  }
-
   async function processBatchChanges(batchChanges, modalOverlay) {
     const modal = modalOverlay.querySelector('.ss-accept-all-modal');
     const body = modal.querySelector('.ss-modal-body');
@@ -1100,6 +1006,320 @@
     }
 
     return { succeeded, failed };
+  }
+
+  // ==================== Custom Bulk Accept ====================
+  //
+  // One button on every upstream list page. The user ticks which *changed fields* are acceptable and
+  // every pending recommendation whose changes are entirely within that selection is accepted (subset
+  // rule): a rec changing URLs and Cup Size is NOT accepted when only URLs is ticked, a URL-only rec is.
+
+  // Fieldkey -> label for every field the rec really changes (same "real change" test the detail view
+  // uses). Scene relations are not in `changes`, so they get their own pseudo-fields ("@" prefix keeps
+  // them from ever colliding with a real field name).
+  function computeRecFieldSet(rec) {
+    const fields = new Map();
+    const details = (rec && rec.details) || {};
+    for (const change of filterRealChanges(details.changes || [])) {
+      fields.set(change.field, change.field_label || change.field);
+    }
+    if (rec && rec.type === 'upstream_scene_changes') {
+      if (details.studio_change != null) fields.set('@studio', 'Studio');
+      const pc = details.performer_changes || {};
+      if ((pc.added || []).length > 0) fields.set('@performers_added', 'Performers added');
+      if ((pc.removed || []).length > 0) fields.set('@performers_removed', 'Performers removed');
+      const tc = details.tag_changes || {};
+      if ((tc.added || []).length > 0) fields.set('@tags_added', 'Tags added');
+      if ((tc.removed || []).length > 0) fields.set('@tags_removed', 'Tags removed');
+    }
+    return fields;
+  }
+
+  // entries: [{rec, fields: Map}] -> those whose fields are ALL in selectedKeys (and non-empty).
+  function selectRecsForFields(entries, selectedKeys) {
+    return entries.filter(e => e.fields.size > 0 && [...e.fields.keys()].every(k => selectedKeys.has(k)));
+  }
+
+  // [{key, label, count}] sorted by how many recs contain the field, then label.
+  function summarizeBulkFields(entries) {
+    const byKey = new Map();
+    for (const e of entries) {
+      for (const [key, label] of e.fields) {
+        const item = byKey.get(key) || { key, label, count: 0 };
+        item.count += 1;
+        byKey.set(key, item);
+      }
+    }
+    return [...byKey.values()].sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+  }
+
+  // Accept scene-change recommendations one by one (full relational resolution per rec). Ambiguous
+  // performer matches don't stop the loop; they're collected and resolved together in one review
+  // modal afterwards. onProgress(processed, total, elapsedSecOfCurrentItem) is called about once a second.
+  async function runSceneAcceptLoop(recs, onProgress) {
+    const STALL_TIMEOUT_MIN_MS = 120000;
+    const total = recs.length;
+    const result = { total, accepted: 0, cleaned: 0, failed: 0, ensuredPerformers: 0, ensuredTags: 0, failureDetails: [] };
+    let processed = 0;
+    let avgMsPerItem = 0;
+    let stallTimeoutMs = STALL_TIMEOUT_MIN_MS;
+    let currentItemStart = 0;
+    let progressTicker = null;
+    const needsReview = [];
+
+    const report = () => {
+      onProgress(processed, total, Math.max(0, Math.floor((Date.now() - currentItemStart) / 1000)));
+    };
+
+    for (const rec of recs) {
+      currentItemStart = Date.now();
+      report();
+      progressTicker = setInterval(report, 1000);
+      try {
+        const response = await Promise.race([
+          RecommendationsAPI.acceptSceneChange(rec.id),
+          new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${Math.ceil(stallTimeoutMs / 1000)}s`)), stallTimeoutMs)),
+        ]);
+        if (response?.success === false && response?.ambiguous) {
+          needsReview.push({ recId: rec.id, ambiguous: response.ambiguous });
+        } else if (response?.action === 'deleted_stale_scene') {
+          result.cleaned += 1;
+        } else {
+          result.accepted += 1;
+          result.ensuredPerformers += (response?.ensured_performers_count || 0);
+          result.ensuredTags += (response?.ensured_tags_count || 0);
+        }
+      } catch (e) {
+        result.failed += 1;
+        const msg = String(e.message || e || 'unknown error');
+        result.failureDetails.push(`rec ${rec.id}: ${msg}`);
+        console.warn('[Stash Sense] Accept scene change failed:', { rec_id: rec.id, error: msg });
+      } finally {
+        if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
+        processed += 1;
+        const duration = Date.now() - currentItemStart;
+        avgMsPerItem = avgMsPerItem === 0 ? duration : Math.round((avgMsPerItem * (processed - 1) + duration) / processed);
+        stallTimeoutMs = Math.max(STALL_TIMEOUT_MIN_MS, avgMsPerItem * 8);
+        report();
+      }
+    }
+
+    if (needsReview.length > 0) {
+      // One combined modal, one card-picker section per ambiguous performer across every scene that
+      // hit one -- keyed by "recId:stashboxId" so two scenes' ambiguities never collide.
+      const flatItems = needsReview.flatMap((r) => r.ambiguous.map((a) => ({ ...a, _recId: r.recId })));
+      const resolutionMap = await showAmbiguousPerformerModal(
+        flatItems, (item) => `${item._recId}:${item.stashbox_id}`,
+      );
+      if (resolutionMap) {
+        for (const { recId, ambiguous } of needsReview) {
+          const resolutions = {};
+          for (const a of ambiguous) {
+            const choice = resolutionMap.get(`${recId}:${a.stashbox_id}`);
+            if (choice) {
+              resolutions[a.stashbox_id] = choice.resolvedPerformerId
+                ? { action: 'link', performer_id: choice.resolvedPerformerId }
+                : { action: 'create' };
+            }
+          }
+          try {
+            const response = await RecommendationsAPI.acceptSceneChange(recId, resolutions);
+            if (response?.action === 'deleted_stale_scene') {
+              result.cleaned += 1;
+            } else {
+              result.accepted += 1;
+              result.ensuredPerformers += (response?.ensured_performers_count || 0);
+              result.ensuredTags += (response?.ensured_tags_count || 0);
+            }
+          } catch (e) {
+            result.failed += 1;
+            const msg = String(e.message || e || 'unknown error');
+            result.failureDetails.push(`rec ${recId}: ${msg}`);
+            console.warn('[Stash Sense] Accept scene change (post-review) failed:', { rec_id: recId, error: msg });
+          }
+        }
+      } else {
+        // Cancelled: these stay pending, same as a skip. Counted as not accepted in the summary.
+        result.failed += needsReview.length;
+        result.failureDetails.push(`${needsReview.length} scene(s) left pending: ambiguous performer match not resolved`);
+      }
+    }
+    return result;
+  }
+
+  // Applies the matched recs and returns a summary {lines: [...], failures: [...]}. `overlay` is the
+  // open Custom Bulk Accept modal; its body shows the progress.
+  async function applyCustomBulkAccept(type, recs, overlay) {
+    const body = overlay.querySelector('.ss-modal-body');
+    const showProgress = (text, pct) => {
+      body.innerHTML = `
+        <div class="ss-batch-progress">
+          <div class="ss-batch-progress-bar"><div class="ss-batch-progress-fill" style="width: ${pct}%"></div></div>
+          <div class="ss-batch-progress-text">${escapeHtml(text)}</div>
+        </div>`;
+    };
+
+    if (type === 'upstream_scene_changes') {
+      showProgress(`Accepting 0 / ${recs.length}...`, 0);
+      const r = await runSceneAcceptLoop(recs, (processed, total, elapsedSec) => {
+        const fill = body.querySelector('.ss-batch-progress-fill');
+        const text = body.querySelector('.ss-batch-progress-text');
+        if (fill) fill.style.width = `${Math.round((processed / Math.max(1, total)) * 100)}%`;
+        if (text) text.textContent = `Accepting ${Math.min(processed + 1, total)} / ${total} (${elapsedSec}s)...`;
+      });
+      const lines = [`${r.accepted} of ${r.total} accepted`];
+      if (r.ensuredPerformers > 0) lines.push(`${r.ensuredPerformers} performers created`);
+      if (r.ensuredTags > 0) lines.push(`${r.ensuredTags} tags created`);
+      if (r.cleaned > 0) lines.push(`${r.cleaned} stale removed`);
+      if (r.failed > 0) {
+        lines.push(`${r.failed} failed or left pending`);
+        console.warn('[Stash Sense] Custom bulk accept (scenes) failures:', r.failureDetails);
+      }
+      return { lines, failures: r.failureDetails, ok: r.failed === 0 };
+    }
+
+    // performer / tag / studio: smart defaults (upstream preferred when non-empty, alias/URL lists merged)
+    const { batchChanges, noOpRecIds } = computeBatchChanges(recs);
+    // Real difference, but the smart default would change nothing (e.g. upstream cleared a field that
+    // local already has). Nothing to apply; mark reviewed so they don't sit pending forever.
+    let autoResolved = 0;
+    for (let i = 0; i < noOpRecIds.length; i++) {
+      showProgress(`Marking ${i + 1} / ${noOpRecIds.length} as already in sync...`, Math.round(((i + 1) / noOpRecIds.length) * 100));
+      try {
+        await RecommendationsAPI.resolve(noOpRecIds[i], 'accepted_no_changes', {
+          note: 'Upstream had no additional information over the local value',
+          batch: true,
+        });
+        autoResolved += 1;
+      } catch (e) {
+        console.warn('[Stash Sense] Could not mark rec as reviewed:', noOpRecIds[i], e);
+      }
+    }
+    let applied = 0;
+    let failed = [];
+    if (batchChanges.length > 0) {
+      const r = await processBatchChanges(batchChanges, overlay);
+      applied = r.succeeded;
+      failed = r.failed;
+    }
+    const lines = [`${applied} applied`];
+    if (autoResolved > 0) lines.push(`${autoResolved} already in sync`);
+    if (failed.length > 0) {
+      lines.push(`${failed.length} failed`);
+      console.warn('[Stash Sense] Custom bulk accept failures:', failed);
+    }
+    return { lines, failures: failed.map(f => `${f.entityName}: ${f.error}`), ok: failed.length === 0 };
+  }
+
+  async function openCustomBulkAccept(type) {
+    const overlay = document.createElement('div');
+    overlay.className = 'ss-modal-overlay';
+    overlay.innerHTML = `
+      <div class="ss-accept-all-modal">
+        <div class="ss-modal-header">
+          <h3>Custom Bulk Accept</h3>
+          <button class="ss-modal-close">&times;</button>
+        </div>
+        <div class="ss-modal-body"><div class="ss-loading-inline"><div class="ss-spinner"></div></div></div>
+        <div class="ss-modal-footer"><button class="ss-btn ss-btn-secondary" id="ss-cba-cancel">Cancel</button></div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const body = overlay.querySelector('.ss-modal-body');
+    const footer = overlay.querySelector('.ss-modal-footer');
+
+    let busy = false;   // applying: closing would hide progress but not stop the run, so disallow it
+    let dirty = false;  // something was applied: refresh the list when the modal closes
+    const close = () => {
+      if (busy) return;
+      overlay.remove();
+      if (dirty) {
+        invalidateListCache();
+        renderCurrentView(document.getElementById('ss-recommendations'));
+      }
+    };
+    overlay.querySelector('.ss-modal-close').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    footer.querySelector('#ss-cba-cancel').addEventListener('click', close);
+
+    let entries;
+    try {
+      const allPending = await RecommendationsAPI.getList({ type, status: 'pending', limit: 10000, offset: 0 });
+      entries = (allPending.recommendations || [])
+        .map(rec => ({ rec, fields: computeRecFieldSet(rec) }))
+        .filter(e => e.fields.size > 0);
+    } catch (e) {
+      body.innerHTML = `<p>Could not load recommendations: ${escapeHtml(e.message)}</p>`;
+      return;
+    }
+    if (entries.length === 0) {
+      body.innerHTML = '<p>No pending recommendations with changes.</p>';
+      return;
+    }
+
+    const fields = summarizeBulkFields(entries);
+    const selected = new Set();
+    body.innerHTML = `
+      <p>Tick the changed fields you are happy to accept. A recommendation is accepted only if <strong>every</strong> field it changes is ticked &mdash; one that also changes an unticked field is left alone.</p>
+      <div class="ss-cba-toolbar">
+        <button class="ss-cba-link" id="ss-cba-select-all">Select all</button>
+        <button class="ss-cba-link" id="ss-cba-unselect-all">Unselect all</button>
+      </div>
+      <div class="ss-cba-fields">
+        ${fields.map(f => `
+          <label class="ss-cba-field">
+            <input type="checkbox" data-key="${escapeHtml(f.key)}">
+            <span class="ss-cba-label">${escapeHtml(f.label)}</span>
+            <span class="ss-cba-count" title="Pending recommendations that change this field">${f.count}</span>
+          </label>`).join('')}
+      </div>
+      <p class="ss-cba-summary" id="ss-cba-summary"></p>`;
+    footer.innerHTML = `
+      <button class="ss-btn ss-btn-secondary" id="ss-cba-cancel">Cancel</button>
+      <button class="ss-accept-all-btn" id="ss-cba-confirm" disabled>Accept 0 recommendations</button>`;
+    footer.querySelector('#ss-cba-cancel').addEventListener('click', close);
+
+    const checkboxes = [...body.querySelectorAll('input[type="checkbox"][data-key]')];
+    const summaryEl = body.querySelector('#ss-cba-summary');
+    const confirmBtn = footer.querySelector('#ss-cba-confirm');
+    let matched = [];
+    const update = () => {
+      matched = selectRecsForFields(entries, selected);
+      summaryEl.innerHTML = `<strong>${matched.length}</strong> of ${entries.length} pending recommendations will be accepted.`;
+      confirmBtn.disabled = matched.length === 0;
+      confirmBtn.textContent = `Accept ${matched.length} ${matched.length === 1 ? 'recommendation' : 'recommendations'}`;
+    };
+    checkboxes.forEach(cb => cb.addEventListener('change', () => {
+      if (cb.checked) selected.add(cb.dataset.key); else selected.delete(cb.dataset.key);
+      update();
+    }));
+    const setAll = (checked) => {
+      checkboxes.forEach(cb => { cb.checked = checked; if (checked) selected.add(cb.dataset.key); else selected.delete(cb.dataset.key); });
+      update();
+    };
+    body.querySelector('#ss-cba-select-all').addEventListener('click', () => setAll(true));
+    body.querySelector('#ss-cba-unselect-all').addEventListener('click', () => setAll(false));
+    update();
+
+    confirmBtn.addEventListener('click', async () => {
+      if (matched.length === 0) return;
+      busy = true;
+      footer.innerHTML = '';
+      try {
+        const summary = await applyCustomBulkAccept(type, matched.map(e => e.rec), overlay);
+        dirty = true;
+        body.innerHTML = `
+          <div class="ss-batch-progress">
+            <div class="ss-batch-progress-text ${summary.ok ? '' : 'ss-cba-has-failures'}">${escapeHtml(summary.lines.join(' • '))}</div>
+          </div>
+          ${summary.failures.length > 0 ? `<ul class="ss-cba-failures">${summary.failures.slice(0, 20).map(f => `<li>${escapeHtml(f)}</li>`).join('')}${summary.failures.length > 20 ? `<li>&hellip; and ${summary.failures.length - 20} more (see the browser console)</li>` : ''}</ul>` : ''}`;
+      } catch (e) {
+        dirty = true;
+        body.innerHTML = `<p>Error: ${escapeHtml(e.message)}</p>`;
+      }
+      busy = false;
+      footer.innerHTML = '<button class="ss-accept-all-btn" id="ss-cba-done">Close</button>';
+      footer.querySelector('#ss-cba-done').addEventListener('click', close);
+    });
   }
 
   // ==================== List View ====================
@@ -1286,19 +1506,11 @@
         ${currentState.status === 'pending' ? `
         <div class="ss-list-actions">
           ${currentState.type === 'upstream_performer_changes' || currentState.type === 'upstream_tag_changes' || currentState.type === 'upstream_studio_changes' || currentState.type === 'upstream_scene_changes'
-            ? '<button class="ss-accept-all-btn" id="ss-accept-all-btn" style="display:none;">Accept All Changes</button>'
+            ? '<button class="ss-accept-all-btn" id="ss-custom-bulk-accept-btn" style="display:none;">Custom Bulk Accept</button>'
             : ''
           }
           ${currentState.type === 'scene_fingerprint_match'
             ? '<button class="ss-accept-all-btn" id="ss-accept-all-fp-btn" style="display:none;">Accept All High-Confidence</button>'
-            : ''
-          }
-          ${currentState.type === 'upstream_scene_changes'
-            ? '<button class="ss-accept-all-btn" id="ss-accept-all-tag-url-code-btn" style="display:none;">Accept All Tag/URL/Code Only Changes</button>'
-            : ''
-          }
-          ${currentState.type === 'upstream_performer_changes'
-            ? '<button class="ss-accept-all-btn" id="ss-accept-all-performer-url-btn" style="display:none;">Accept All URL Only Changes</button>'
             : ''
           }
           ${currentState.type === 'duplicate_scenes'
@@ -1353,243 +1565,10 @@
       });
     });
 
-    // Accept All Changes button
-    const acceptAllBtn = container.querySelector('#ss-accept-all-btn');
-    if (acceptAllBtn) {
-      acceptAllBtn.addEventListener('click', async () => {
-        acceptAllBtn.disabled = true;
-        acceptAllBtn.textContent = 'Loading...';
-
-        // Upstream scene changes: dedicated per-rec accept loop with full relational resolution
-        if (currentState.type === 'upstream_scene_changes') {
-          try {
-            const allPending = await RecommendationsAPI.getList({
-              type: 'upstream_scene_changes',
-              status: 'pending',
-              limit: 10000,
-              offset: 0,
-            });
-            const recs = allPending.recommendations || [];
-            const total = recs.length;
-            if (total === 0) {
-              acceptAllBtn.textContent = 'No pending scene changes';
-              setTimeout(() => {
-                acceptAllBtn.textContent = 'Accept All Changes';
-                acceptAllBtn.disabled = false;
-              }, 1600);
-              return;
-            }
-
-            const STALL_TIMEOUT_MIN_MS = 120000;
-            let accepted = 0;
-            let cleaned = 0;
-            let failed = 0;
-            let ensuredPerformers = 0;
-            let ensuredTags = 0;
-            let processed = 0;
-            let avgMsPerItem = 0;
-            let stallTimeoutMs = STALL_TIMEOUT_MIN_MS;
-            let currentItemStart = 0;
-            let progressTicker = null;
-            const failureDetails = [];
-            // Ambiguous performer matches (see PerformerIdentityAmbiguous)
-            // are neither a success nor a failure -- they don't stop the
-            // loop over other, independent scenes, but they're collected
-            // here to resolve together in one review pass after the loop,
-            // rather than popping a modal mid-automated-run.
-            const needsReview = [];
-
-            const setProgressText = () => {
-              const elapsedSec = Math.max(0, Math.floor((Date.now() - currentItemStart) / 1000));
-              acceptAllBtn.textContent = `Accepting ${processed}/${total} (${elapsedSec}s)...`;
-            };
-
-            for (const rec of recs) {
-              currentItemStart = Date.now();
-              setProgressText();
-              progressTicker = setInterval(setProgressText, 1000);
-
-              try {
-                const response = await Promise.race([
-                  RecommendationsAPI.acceptSceneChange(rec.id),
-                  new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${Math.ceil(stallTimeoutMs / 1000)}s`)), stallTimeoutMs)),
-                ]);
-                if (response?.success === false && response?.ambiguous) {
-                  needsReview.push({ recId: rec.id, ambiguous: response.ambiguous });
-                } else if (response?.action === 'deleted_stale_scene') {
-                  cleaned += 1;
-                } else {
-                  accepted += 1;
-                  ensuredPerformers += (response?.ensured_performers_count || 0);
-                  ensuredTags += (response?.ensured_tags_count || 0);
-                }
-              } catch (e) {
-                failed += 1;
-                const msg = String(e.message || e || 'unknown error');
-                failureDetails.push(`rec ${rec.id}: ${msg}`);
-                console.warn('[Stash Sense] Accept scene change failed:', { rec_id: rec.id, error: msg });
-              } finally {
-                if (progressTicker) { clearInterval(progressTicker); progressTicker = null; }
-                processed += 1;
-                const duration = Date.now() - currentItemStart;
-                avgMsPerItem = avgMsPerItem === 0 ? duration : Math.round((avgMsPerItem * (processed - 1) + duration) / processed);
-                stallTimeoutMs = Math.max(STALL_TIMEOUT_MIN_MS, avgMsPerItem * 8);
-                setProgressText();
-              }
-            }
-
-            if (needsReview.length > 0) {
-              // One combined modal, one card-picker section per ambiguous
-              // performer across every scene that hit one -- keyed by
-              // "recId:stashboxId" so two different scenes' ambiguities
-              // never collide with each other.
-              const flatItems = needsReview.flatMap((r) =>
-                r.ambiguous.map((a) => ({ ...a, _recId: r.recId })));
-              const resolutionMap = await showAmbiguousPerformerModal(
-                flatItems, (item) => `${item._recId}:${item.stashbox_id}`,
-              );
-              if (resolutionMap) {
-                for (const { recId, ambiguous } of needsReview) {
-                  const resolutions = {};
-                  for (const a of ambiguous) {
-                    const choice = resolutionMap.get(`${recId}:${a.stashbox_id}`);
-                    if (choice) {
-                      resolutions[a.stashbox_id] = choice.resolvedPerformerId
-                        ? { action: 'link', performer_id: choice.resolvedPerformerId }
-                        : { action: 'create' };
-                    }
-                  }
-                  try {
-                    const response = await RecommendationsAPI.acceptSceneChange(recId, resolutions);
-                    if (response?.action === 'deleted_stale_scene') {
-                      cleaned += 1;
-                    } else {
-                      accepted += 1;
-                      ensuredPerformers += (response?.ensured_performers_count || 0);
-                      ensuredTags += (response?.ensured_tags_count || 0);
-                    }
-                  } catch (e) {
-                    failed += 1;
-                    const msg = String(e.message || e || 'unknown error');
-                    failureDetails.push(`rec ${recId}: ${msg}`);
-                    console.warn('[Stash Sense] Accept scene change (post-review) failed:', { rec_id: recId, error: msg });
-                  }
-                }
-              } else {
-                // User cancelled -- these stay pending, same as a skip.
-                // Counted as "failed" for the summary text below since
-                // they didn't end up accepted either, even though nothing
-                // actually errored.
-                failed += needsReview.length;
-                failureDetails.push(`${needsReview.length} scene(s) left pending: ambiguous performer match not resolved`);
-              }
-            }
-
-            if (failed > 0) {
-              const suffix = cleaned > 0 ? `, ${cleaned} stale removed` : '';
-              acceptAllBtn.textContent = `${accepted}/${total} accepted${suffix}, ${failed} failed — see browser console`;
-              acceptAllBtn.classList.add('ss-btn-error');
-              console.warn('[Stash Sense] Accept all scene changes failures:', failureDetails);
-            } else {
-              const parts = [`Accepted ${accepted}/${total}`];
-              if (ensuredPerformers > 0) parts.push(`${ensuredPerformers} performers created`);
-              if (ensuredTags > 0) parts.push(`${ensuredTags} tags created`);
-              if (cleaned > 0) parts.push(`${cleaned} stale removed`);
-              acceptAllBtn.textContent = parts.join(', ');
-              acceptAllBtn.classList.add('ss-btn-success');
-            }
-
-            invalidateListCache();
-            setTimeout(() => {
-              renderCurrentView(document.getElementById('ss-recommendations'));
-            }, 1500);
-          } catch (e) {
-            acceptAllBtn.textContent = `Error: ${e.message}`;
-            acceptAllBtn.classList.add('ss-btn-error');
-            acceptAllBtn.disabled = false;
-          }
-          return;
-        }
-
-        // Performer / tag / studio changes: smart-default batch with confirmation modal
-        try {
-          // Fetch ALL pending (high limit to get everything)
-          const allPending = await RecommendationsAPI.getList({
-            type: currentState.type,
-            status: 'pending',
-            limit: 10000,
-            offset: 0,
-          });
-
-          RecommendationsAPI.bulkAcceptStats(currentState.type).catch(() => null);
-          const { batchChanges, noOpRecIds } = computeBatchChanges(allPending.recommendations);
-
-          // Recs with a real local/upstream difference but nothing the smart
-          // default would actually change (e.g. upstream cleared a field
-          // local already has a value for) never show up in the batch and
-          // never auto-resolve on their own -- without this they'd sit
-          // pending forever, permanently excluded from both Accept All and
-          // the per-item auto-resolve check. Clear them out silently; there's
-          // nothing to confirm since nothing is being applied.
-          let autoResolved = 0;
-          if (noOpRecIds.length > 0) {
-            const results = await Promise.allSettled(
-              noOpRecIds.map(id => RecommendationsAPI.resolve(id, 'accepted_no_changes', {
-                note: 'Upstream had no additional information over the local value',
-                batch: true,
-              }))
-            );
-            autoResolved = results.filter(r => r.status === 'fulfilled').length;
-          }
-
-          if (batchChanges.length === 0) {
-            acceptAllBtn.textContent = autoResolved > 0
-              ? `${autoResolved} had nothing new, marked reviewed`
-              : 'No changes to apply';
-            invalidateListCache();
-            setTimeout(() => {
-              acceptAllBtn.textContent = 'Accept All Changes';
-              acceptAllBtn.disabled = false;
-              renderCurrentView(document.getElementById('ss-recommendations'));
-            }, 2000);
-            return;
-          }
-
-          const confirmed = await showAcceptAllModal(batchChanges);
-          if (!confirmed) {
-            acceptAllBtn.textContent = 'Accept All Changes';
-            acceptAllBtn.disabled = false;
-            if (autoResolved > 0) {
-              invalidateListCache();
-              renderCurrentView(document.getElementById('ss-recommendations'));
-            }
-            return;
-          }
-
-          const overlay = document.querySelector('.ss-modal-overlay');
-          const result = await processBatchChanges(batchChanges, overlay);
-
-          overlay.remove();
-
-          const autoResolvedSuffix = autoResolved > 0 ? `, ${autoResolved} had nothing new` : '';
-          if (result.failed.length === 0) {
-            acceptAllBtn.textContent = `Done! ${result.succeeded} applied${autoResolvedSuffix}`;
-            acceptAllBtn.classList.add('ss-btn-success');
-          } else {
-            acceptAllBtn.textContent = `${result.succeeded} applied${autoResolvedSuffix}, ${result.failed.length} failed`;
-            acceptAllBtn.classList.add('ss-btn-error');
-            console.warn('[Stash Sense] Accept all changes failures:', result.failed);
-          }
-
-          invalidateListCache();
-          setTimeout(() => {
-            renderCurrentView(document.getElementById('ss-recommendations'));
-          }, 2000);
-        } catch (e) {
-          acceptAllBtn.textContent = `Error: ${e.message}`;
-          acceptAllBtn.disabled = false;
-        }
-      });
+    // Custom Bulk Accept button (performer / tag / studio / scene changes)
+    const customBulkBtn = container.querySelector('#ss-custom-bulk-accept-btn');
+    if (customBulkBtn) {
+      customBulkBtn.addEventListener('click', () => openCustomBulkAccept(currentState.type));
     }
 
     // Accept All High-Confidence fingerprint matches button
@@ -1611,158 +1590,6 @@
           acceptAllFpBtn.textContent = `Failed: ${e.message}`;
           acceptAllFpBtn.classList.add('ss-btn-error');
           acceptAllFpBtn.disabled = false;
-        }
-      });
-    }
-
-    // Accept All Tag-Only Scene Changes button
-    const acceptAllTagOnlyBtn = container.querySelector('#ss-accept-all-tag-url-code-btn');
-    if (acceptAllTagOnlyBtn) {
-      acceptAllTagOnlyBtn.addEventListener('click', async () => {
-        acceptAllTagOnlyBtn.disabled = true;
-        acceptAllTagOnlyBtn.textContent = 'Loading...';
-        try {
-          const allPending = await RecommendationsAPI.getList({
-            type: 'upstream_scene_changes',
-            status: 'pending',
-            limit: 10000,
-            offset: 0,
-          });
-
-          const allSceneChanges = allPending.recommendations || [];
-          const tagUrlCodeOnlyRecs = allSceneChanges.filter(rec => isTagUrlCodeOnlySceneChangeDetails(rec.details));
-          const total = tagUrlCodeOnlyRecs.length;
-          RecommendationsAPI.sceneTagOnlyStats().catch(() => null);
-          if (total === 0) {
-            acceptAllTagOnlyBtn.textContent = 'No tag/URL/code-only changes';
-            setTimeout(() => {
-              acceptAllTagOnlyBtn.textContent = 'Accept All Tag/URL/Code Only Changes';
-              acceptAllTagOnlyBtn.disabled = false;
-            }, 1600);
-            return;
-          }
-
-          const STALL_TIMEOUT_MIN_MS = 120000;
-          let accepted = 0;
-          let cleaned = 0;
-          let failed = 0;
-          let ensuredTags = 0;
-          let processed = 0;
-          let avgMsPerItem = 0;
-          let stallTimeoutMs = STALL_TIMEOUT_MIN_MS;
-          let currentItemStart = 0;
-          let progressTicker = null;
-          const failureDetails = [];
-
-          const setProgressText = () => {
-            const elapsedSec = Math.max(0, Math.floor((Date.now() - currentItemStart) / 1000));
-            acceptAllTagOnlyBtn.textContent = `Accepting ${processed}/${total} (${elapsedSec}s)...`;
-          };
-
-          for (const rec of tagUrlCodeOnlyRecs) {
-            currentItemStart = Date.now();
-            setProgressText();
-            progressTicker = setInterval(setProgressText, 1000);
-
-            try {
-              const response = await Promise.race([
-                RecommendationsAPI.acceptSceneTagOnlyChange(rec.id),
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`Timed out after ${Math.ceil(stallTimeoutMs / 1000)}s`)), stallTimeoutMs)),
-              ]);
-              if (response?.action === 'deleted_stale_scene') {
-                cleaned += 1;
-              } else {
-                accepted += 1;
-                ensuredTags += (response?.ensured_tags_count || 0);
-              }
-            } catch (e) {
-              failed += 1;
-              const msg = String(e.message || e || 'unknown error');
-              failureDetails.push(`rec ${rec.id}: ${msg}`);
-              console.warn('[Stash Sense] Accept tag/url/code-only scene change failed:', { rec_id: rec.id, error: msg });
-            } finally {
-              if (progressTicker) {
-                clearInterval(progressTicker);
-                progressTicker = null;
-              }
-              processed += 1;
-              const duration = Date.now() - currentItemStart;
-              avgMsPerItem = avgMsPerItem === 0 ? duration : Math.round((avgMsPerItem * (processed - 1) + duration) / processed);
-              // Dynamic stall timeout grows with observed item duration.
-              stallTimeoutMs = Math.max(STALL_TIMEOUT_MIN_MS, avgMsPerItem * 8);
-              setProgressText();
-            }
-          }
-
-          if (failed > 0) {
-            const cleanedSuffix = cleaned > 0 ? `, ${cleaned} stale removed` : '';
-            acceptAllTagOnlyBtn.textContent = `${accepted}/${total} accepted${cleanedSuffix}, ${failed} failed — see browser console for details`;
-            acceptAllTagOnlyBtn.classList.add('ss-btn-error');
-            console.warn('[Stash Sense] Tag/URL/code-only accept failures:', failureDetails);
-          } else {
-            const parts = [`Accepted ${accepted}/${total}`];
-            if (ensuredTags > 0) parts.push(`${ensuredTags} tags created/linked`);
-            if (cleaned > 0) parts.push(`${cleaned} stale removed`);
-            acceptAllTagOnlyBtn.textContent = parts.join(', ');
-            acceptAllTagOnlyBtn.classList.add('ss-btn-success');
-          }
-
-          invalidateListCache();
-          setTimeout(() => {
-            renderCurrentView(document.getElementById('ss-recommendations'));
-          }, 1500);
-        } catch (e) {
-          acceptAllTagOnlyBtn.textContent = `Failed: ${e.message}`;
-          acceptAllTagOnlyBtn.classList.add('ss-btn-error');
-          acceptAllTagOnlyBtn.disabled = false;
-        }
-      });
-    }
-
-    // Accept All URL Only Performer Changes button
-    const acceptAllPerformerUrlBtn = container.querySelector('#ss-accept-all-performer-url-btn');
-    if (acceptAllPerformerUrlBtn) {
-      acceptAllPerformerUrlBtn.addEventListener('click', async () => {
-        acceptAllPerformerUrlBtn.disabled = true;
-        acceptAllPerformerUrlBtn.textContent = 'Loading...';
-        try {
-          const allPending = await RecommendationsAPI.getList({
-            type: 'upstream_performer_changes',
-            status: 'pending',
-            limit: 10000,
-            offset: 0,
-          });
-
-          const urlOnlyRecs = (allPending.recommendations || []).filter(rec => isUrlOnlyPerformerChangeDetails(rec.details));
-          const total = urlOnlyRecs.length;
-          RecommendationsAPI.performerUrlOnlyStats().catch(() => null);
-          if (total === 0) {
-            acceptAllPerformerUrlBtn.textContent = 'No URL-only changes';
-            setTimeout(() => {
-              acceptAllPerformerUrlBtn.textContent = 'Accept All URL Only Changes';
-              acceptAllPerformerUrlBtn.disabled = false;
-            }, 1600);
-            return;
-          }
-
-          const result = await RecommendationsAPI.acceptAllPerformerUrlOnlyChanges();
-          const accepted = result.accepted_count || 0;
-          const failed = result.failed_count || 0;
-          if (failed > 0) {
-            acceptAllPerformerUrlBtn.textContent = `${accepted} accepted, ${failed} failed`;
-            acceptAllPerformerUrlBtn.classList.add('ss-btn-error');
-          } else {
-            acceptAllPerformerUrlBtn.textContent = `Accepted ${accepted}`;
-            acceptAllPerformerUrlBtn.classList.add('ss-btn-success');
-          }
-          invalidateListCache();
-          setTimeout(() => {
-            renderCurrentView(document.getElementById('ss-recommendations'));
-          }, 1500);
-        } catch (e) {
-          acceptAllPerformerUrlBtn.textContent = `Failed: ${e.message}`;
-          acceptAllPerformerUrlBtn.classList.add('ss-btn-error');
-          acceptAllPerformerUrlBtn.disabled = false;
         }
       });
     }
