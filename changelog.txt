@@ -1,5 +1,10 @@
 ## 2026-09-27
 
+### 0.28.6 (plugin)
+- Fix: Scene Stash-Box Tagger's Resolved/Dismissed tabs were re-sorted by
+  match confidence client-side, hiding the server's correct newest-first
+  order. Only Pending re-sorts by confidence now, same as Duplicate Scenes.
+
 ### 0.35.7 (sidecar) / 0.28.5 (plugin)
 - Feature: "Prefer Western Names" now also covers studios -- Scene
   Stash-Box Tagger and Upstream Studio Changes show a linked local

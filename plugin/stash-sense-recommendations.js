@@ -1709,9 +1709,14 @@
         allRecommendations = result.recommendations;
         total = result.total;
 
-        // Defensive client-side ordering for Scene Stash-Box Tagger:
-        // high-confidence first, then confidence descending.
-        if (currentState.type === 'scene_fingerprint_match') {
+        // Defensive client-side ordering for Scene Stash-Box Tagger pending
+        // items: high-confidence first, then confidence descending.
+        // Dismissed/resolved use server-side recency sort (same rule as
+        // duplicate_scenes right below) -- don't override it. Missing this
+        // guard previously re-sorted dismissed/resolved by confidence too,
+        // which has nothing to do with recency, making that history look
+        // shuffled instead of newest-first.
+        if (currentState.type === 'scene_fingerprint_match' && currentState.status === 'pending') {
           allRecommendations.sort((a, b) => {
             const aHigh = a?.details?.high_confidence ? 1 : 0;
             const bHigh = b?.details?.high_confidence ? 1 : 0;
