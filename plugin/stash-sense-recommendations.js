@@ -5208,7 +5208,7 @@
             dropdown.replaceWith(linked);
             const btn = studioRow.querySelector('.ss-scene-create-btn');
             if (btn) btn.remove();
-          }, upstreamStudio.name);
+          }, localStudio?.name || upstreamStudio.name, upstreamStudio.name);
           studioRow.appendChild(dropdown);
 
           const createBtn = document.createElement('button');
@@ -6658,7 +6658,10 @@
    * @param {function} onMatch - callback(localId, localName) when linked
    * @returns {HTMLElement} the dropdown container element
    */
-  function createEntitySearchDropdown(entityType, endpoint, stashboxId, onMatch, initialSearch) {
+  // initialSearch pre-fills the search box. autoLinkName (default: initialSearch) is the name the
+  // automatic exact-match lookup/link uses -- separate so a caller can show one name (e.g. the local
+  // studio) while only ever auto-linking on another (the upstream one).
+  function createEntitySearchDropdown(entityType, endpoint, stashboxId, onMatch, initialSearch, autoLinkName) {
     const container = document.createElement('div');
     container.className = 'ss-entity-search-dropdown';
     let resolved = false;
@@ -6724,7 +6727,7 @@
       // auto-selected even when not present in in-browser cache.
       setTimeout(async () => {
         if (resolved) return;
-        const q = String(initialSearch || '').trim();
+        const q = String(autoLinkName || initialSearch || '').trim();
         if (q.length < 2) return;
         try {
           const resp = await RecommendationsAPI.searchEntities(entityType, q, endpoint);

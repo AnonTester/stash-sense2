@@ -1,5 +1,9 @@
 ## 2026-09-27
 
+### 0.28.1 (plugin)
+- Fix: linking a scene's changed studio now pre-fills the search with the local
+  studio's name instead of the (usually not yet existing) upstream name.
+
 ### 0.28.0 (plugin)
 - Feature: the upstream change pages' "Accept All ..." buttons are now one
   "Custom Bulk Accept": tick which changed fields may be accepted and every
