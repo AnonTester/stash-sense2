@@ -1,15 +1,14 @@
 ## 2026-09-28
 
+### 0.28.10 (plugin)
+- Fix: "Review match" now links a linked local+stashdb candidate by its
+  stashdb.org identity, not the local-only id it could otherwise carry --
+  that id resolved to a completely unrelated, wrong performer.
+
 ### 0.38.0 (sidecar)
 - Improvement: Refresh Outdated and Face Recommendations' full scan now
-  scope themselves to what a recently-applied delta update actually
-  touched, instead of rematching every db_version-outdated scene
-  unconditionally -- a scene a delta provably couldn't have affected is
-  marked current (or served from stored data) without a real rematch.
-  Falls back to the previous always-rematch behavior on a fresh/never-
-  updated install, after a full-zip update, or if this can't be proven
-  safe; a new "Scope Refresh Outdated To Delta Changes" setting (on by
-  default) can also turn it off by hand.
+  skip scenes a delta update provably couldn't have affected, instead of
+  rematching every outdated scene unconditionally. New setting to disable.
 
 ### 0.28.9 (plugin)
 - Fix: Operations' Queue section now lists pending jobs in run order

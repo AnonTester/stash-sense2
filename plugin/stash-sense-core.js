@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.28.9';
+  const PLUGIN_VERSION = '0.28.10';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -605,6 +605,23 @@
     return div.innerHTML;
   }
 
+  // The universal_id a third-party tool should use to cross-reference a
+  // match -- NOT always the same as the match's own `universal_id`. A
+  // linked local+stashdb match can win the sidecar's own internal scoring
+  // merge as a "local:<id>" identity even when a real, resolvable
+  // stashdb_id is already known for it, and "local:<id>" refers to THIS
+  // Stash instance's own performer id space, meaningless anywhere else.
+  // Prefers the real stashdb.org identity whenever one is known (same
+  // condition already used for each caller's own "View on stashdb.org"
+  // link), falling back to the match's own universal_id (empty string for
+  // a local-only match with no stashdb link at all).
+  function reviewableUniversalId(match) {
+    if (match.local_performer_id && match.stashdb_id && match.stashdb_id !== match.local_performer_id) {
+      return `stashdb.org:${match.stashdb_id}`;
+    }
+    return match.universal_id || '';
+  }
+
   // Strip an absolute sidecar-origin URL down to a same-origin-relative
   // path -- the sidecar's own STASH_URL isn't necessarily the address the
   // browser uses to reach Stash (reverse proxy, different LAN
@@ -858,6 +875,7 @@
     getConfidenceClass,
     escapeHtml,
     relativeUrl,
+    reviewableUniversalId,
     thumbnailUrl,
     renderPerformerCandidateCards,
   };

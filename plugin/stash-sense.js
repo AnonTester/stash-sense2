@@ -910,8 +910,11 @@
       // string for a local-only match (already_tagged local library
       // performer, no universal_id) so a reader knows to treat it as
       // nothing to cross-reference. This plugin never reads these back.
+      // SS.reviewableUniversalId, not match.universal_id directly -- see
+      // that function's own comment for why a linked local+stashdb match
+      // needs this.
       _reviewDataAttrs(match) {
-        const uid = match.universal_id || '';
+        const uid = SS.reviewableUniversalId ? SS.reviewableUniversalId(match) : (match.universal_id || '');
         const escapedUid = SS.escapeHtml ? SS.escapeHtml(uid) : uid;
         const idx = (match.matched_embedding_index ?? '');
         return `data-ss-universal-id="${escapedUid}" data-ss-embedding-index="${idx}"`;
