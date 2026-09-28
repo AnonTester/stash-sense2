@@ -6602,7 +6602,7 @@
       <div class="ss-sfm-detail">
         <div class="ss-sfm-detail-header">
           <h2>${escapeHtmlBreakable(sceneTitle)}</h2>
-          <a class="ss-detail-entity-link" href="${escapeHtml(sceneHref)}" target="_blank" rel="noopener">Open in Stash</a>
+          <a class="ss-btn ss-btn-add ss-btn-sm ss-sfm-open-in-stash-btn" href="${escapeHtml(sceneHref)}" target="_blank" rel="noopener">Open in Stash &#8599;</a>
         </div>
 
         ${videoSourcesHtml

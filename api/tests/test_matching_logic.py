@@ -791,6 +791,34 @@ class TestCollapseLinkedCandidatesWithLocalResolution:
 
         assert len(collapsed) == 2
 
+    def test_unlinked_local_candidate_always_wins_its_catalogue_group_regardless_of_score(self):
+        # The Dianaholiday report (2026-09-28): an UNLINKED local performer
+        # (no stashdb_id -- created directly from a catalogue profile, e.g.
+        # babepedia, which has no stash_id to link with in the first place)
+        # grouped with her own catalogue entry via matching.
+        # build_local_catalogue_link_index (not stash_id resolution -- no
+        # local_performers_mapping needed/passed here, matching that
+        # function's real caller in scene_matcher.py). Confirmed live: the
+        # catalogue candidate's own frame scored BETTER in one particular
+        # scene even after LOCAL_MATCH_BOOST, surfacing babepedia over the
+        # user's own already-existing local performer -- an already-
+        # existing local performer needs zero import and must always win
+        # this tier, unconditionally, same as a prioritized stashbox
+        # endpoint does one tier up (see this function's own docstring).
+        matches = [
+            self._match("babepedia:465878", distance=0.34, name="Dianaholiday"),
+            self._match("local:2915", distance=0.40, name="Dianaholiday"),  # boosted, still worse
+        ]
+        link_index = {
+            "local:2915": ["babepedia:465878"],
+            "babepedia:465878": ["local:2915"],
+        }
+
+        collapsed = collapse_linked_candidates(matches, link_index, ["stashdb.org"])
+
+        assert len(collapsed) == 1
+        assert collapsed[0].universal_id == "local:2915"
+
 
 class TestMatchFaceLinkedCandidates:
     def test_match_face_collapses_linked_group_via_endpoint_priority(self):

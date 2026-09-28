@@ -478,20 +478,35 @@ def collapse_linked_candidates(
     signal, sourced from stash-sense2-data-gen rather than derived here.
 
     Unlike merge_local_candidates' "keep whichever scored better" rule,
-    the winner here is picked by `endpoint_priority_domains` (the user's
-    own configured stash-box endpoint order, Settings > ... > Endpoint
-    priority -- see recognizer.py's _endpoint_priority_domains()) when at
-    least one present group member has a stashbox-shaped universal_id --
-    the actual goal is which entity gets CREATED in the user's Stash
-    instance, not just which one has a marginally tighter distance score
-    today (confirmed live: this is what motivated the feature -- an iafd/
-    pornpics catalogue match was surfacing instead of an already-known
-    StashDB entry for the same person, risking a duplicate performer
-    getting created in Stash). Falls back to match-score, same convention
-    as merge_local_candidates, only when NO present group member has a
-    stashbox endpoint at all (an all-catalogue group, e.g. two catalogue-
-    only performers linked to each other with no stashbox member present
-    in this particular match's results).
+    the winner here is picked by priority, not raw score -- the actual
+    goal is which entity needs the LEAST action from the user, not just
+    which one has a marginally tighter distance score today. Two tiers,
+    in order:
+      1. A present group member with universal_id "local:<id>" ALWAYS
+         wins outright, unconditionally, over anything else in the group
+         -- an already-existing local Stash performer needs zero import/
+         creation at all, more so even than a prioritized stash-box match
+         (confirmed live, 2026-09-28: a local "Dianaholiday" performer and
+         her own babepedia entry -- linked via matching.
+         build_local_catalogue_link_index, no stash-box endpoint present
+         in the group at all -- fell through to the raw-score fallback
+         below, and in one particular scene the babepedia candidate's own
+         frame happened to score better even after LOCAL_MATCH_BOOST,
+         surfacing the catalogue entry over the user's own existing
+         performer for no good reason).
+      2. Otherwise, `endpoint_priority_domains` (the user's own configured
+         stash-box endpoint order, Settings > ... > Endpoint priority --
+         see recognizer.py's _endpoint_priority_domains()), when at least
+         one present group member has a stashbox-shaped universal_id
+         (confirmed live: this is what motivated tier 2 originally -- an
+         iafd/pornpics catalogue match was surfacing instead of an
+         already-known StashDB entry for the same person, risking a
+         duplicate performer getting created in Stash).
+    Falls back to match-score, same convention as merge_local_candidates,
+    only when NO present group member is local and none has a stashbox
+    endpoint either (an all-catalogue group, e.g. two catalogue-only
+    performers linked to each other with no local or stashbox member
+    present in this particular match's results).
 
     `performer_link_index` empty (no dataset support yet, or nothing
     linked) is a no-op returning `matches` unchanged -- same "optional,
@@ -528,8 +543,21 @@ def collapse_linked_candidates(
     seen: set[str] = set()
     result: list[CandidateMatch] = []
 
+    # -1 is a sentinel below every real endpoint_priority_domains index
+    # (always >= 0) -- see this function's own docstring, tier 1: an
+    # unlinked "local:<id>" member always outranks everything else in its
+    # group, unconditionally. A local candidate that IS stash_id-linked
+    # never reaches here as "local:..." at all (by_resolved/present_group
+    # are built from resolved_uid, which _resolve_local_link_uid already
+    # rewrote to the linked stashdb.org id for exactly that case) -- this
+    # branch only ever fires for the genuinely-unlinked case tier 1 exists
+    # for.
+    LOCAL_RANK = -1
+
     def endpoint_rank(resolved_uid: str) -> int:
         domain = _extract_endpoint_domain(resolved_uid)
+        if domain == "local":
+            return LOCAL_RANK
         if domain in endpoint_priority_domains:
             return endpoint_priority_domains.index(domain)
         return len(endpoint_priority_domains)  # no configured stashbox endpoint -- lowest priority
@@ -549,7 +577,7 @@ def collapse_linked_candidates(
 
         ranked = sorted(present_group, key=endpoint_rank)
         if endpoint_rank(ranked[0]) < len(endpoint_priority_domains):
-            winner_uid = ranked[0]
+            winner_uid = ranked[0]  # tier 1 (local, rank -1) or tier 2 (a prioritized stashbox endpoint)
         else:
             winner_uid = min(present_group, key=lambda u: by_resolved[u].combined_distance)
         result.append(by_resolved[winner_uid])

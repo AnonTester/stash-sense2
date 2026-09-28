@@ -1,3 +1,25 @@
+## 2026-09-28
+
+### 0.28.8 (plugin)
+- Improvement: Face Recommendations detail's "Open in Stash" link is now a
+  small badge in the top-right corner (same style as the deep scan tool's
+  own "Open in Stash ↗"), not a plain text link.
+
+### 0.36.0 (sidecar)
+- Feature: when a matched candidate's linked group has a stash-box entry
+  that wasn't independently found (e.g. only a pornbox record matched,
+  but it's linked to a StashDB entry for the same person), that entry is
+  now shown instead -- avoids creating a duplicate performer in Stash
+  when the linked stash-box entry may already exist there, or get added
+  separately later.
+
+### 0.35.10 (sidecar)
+- Fix: a linked local performer + catalogue entry (e.g. babepedia) now
+  always displays as the local performer, not whichever side happened to
+  score better -- an already-existing local performer needs no import.
+  Fixed in both the single-face and scene-wide (Face Recommendations,
+  bulk/cached Identify) matching paths.
+
 ## 2026-09-27
 
 ### 0.35.9 (sidecar)

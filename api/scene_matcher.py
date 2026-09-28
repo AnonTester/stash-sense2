@@ -123,12 +123,30 @@ def _resolve_local_link(match_like) -> Optional[str]:
 
 
 def _endpoint_rank(universal_id: Optional[str], endpoint_priority_domains: list[str]) -> int:
-    """Same ranking matching.py's collapse_linked_candidates uses: a lower
-    number is higher priority. A universal_id whose endpoint domain is in
-    the user's configured stash-box endpoint priority order (Settings >
-    ... > Endpoint priority) ranks by its position there; anything else
-    (an unconfigured stashbox endpoint, a catalogue source like pornbox/
-    iafd, or a local match) ranks last, tied at len(endpoint_priority_domains)."""
+    """Same ranking matching.py's collapse_linked_candidates uses (kept as
+    a second, independent implementation -- this module's own frame/
+    cluster-spanning aggregation needs it before collapse_linked_candidates
+    ever runs; see that function's own docstring for why the two can't
+    share one copy directly): a lower number is higher priority.
+
+    An UNLINKED "local:<id>" candidate (_resolve_local_link leaves it
+    unchanged -- see that function's own docstring) always ranks -1,
+    unconditionally ahead of everything else, including a configured
+    stashbox priority endpoint -- an already-existing local Stash
+    performer needs zero import at all, more so even than a prioritized
+    stash-box match (added 2026-09-28, mirroring the identical fix in
+    matching.py's collapse_linked_candidates -- see that function's own
+    docstring for the live incident, "Dianaholiday", that motivated it;
+    this copy needed the exact same fix since it's the one actually used
+    for the scene-wide/multi-frame case, not the single-face one).
+
+    Otherwise, a universal_id whose endpoint domain is in the user's
+    configured stash-box endpoint priority order (Settings > ... >
+    Endpoint priority) ranks by its position there; anything else (an
+    unconfigured stashbox endpoint, or a catalogue source like pornbox/
+    iafd) ranks last, tied at len(endpoint_priority_domains)."""
+    if universal_id and universal_id.startswith("local:"):
+        return -1
     domain = _extract_endpoint_domain(universal_id) if universal_id else None
     if domain in endpoint_priority_domains:
         return endpoint_priority_domains.index(domain)
@@ -141,24 +159,80 @@ def _pick_priority_match(
     """Pick which of several PerformerMatch objects for the same (possibly
     linked) identity to actually show, by the same rule
     collapse_linked_candidates already applies to a single face's own
-    candidate list: prefer the user's configured stash-box endpoint
-    priority order over a marginally better match score -- e.g. a linked
-    group's stashdb.org member should win over its pornbox member even if
-    a given frame happened to score the pornbox photo a hair closer.
+    candidate list: an unlinked local match always wins outright (see
+    _endpoint_rank's own docstring); otherwise prefer the user's
+    configured stash-box endpoint priority order over a marginally better
+    match score -- e.g. a linked group's stashdb.org member should win
+    over its pornbox member even if a given frame happened to score the
+    pornbox photo a hair closer.
     Ranks each candidate by its EFFECTIVE endpoint (_resolve_local_link),
     not its literal universal_id -- a local-index match linked to a
     stashdb.org entry must be judged as stashdb.org here too, or it ties
     with an unconfigured catalogue source (both fall back to "no
     configured priority") and the winner ends up decided by raw match
     score alone, which flips unpredictably run to run. Falls back to best
-    (lowest) combined_score only when NONE of the candidates resolves to
-    a configured priority endpoint at all."""
+    (lowest) combined_score only when NONE of the candidates is local or
+    resolves to a configured priority endpoint at all."""
     if len(matches) == 1:
         return matches[0]
     ranked = sorted(matches, key=lambda m: _endpoint_rank(_resolve_local_link(m), endpoint_priority_domains))
     if _endpoint_rank(_resolve_local_link(ranked[0]), endpoint_priority_domains) < len(endpoint_priority_domains):
         return ranked[0]
     return min(matches, key=lambda m: m.combined_score)
+
+
+def _substitute_linked_priority_winner(
+    best_match: PerformerMatch, raw_matches: list[PerformerMatch],
+    performer_link_index: Optional[dict[str, list[str]]], endpoint_priority_domains: list[str],
+    recognizer,
+) -> PerformerMatch:
+    """_pick_priority_match above only ranks among candidates that were
+    actually FOUND by a vector search this scene/frame -- it can't invent
+    a linked group member that never independently ranked as a candidate
+    at all. This is exactly that missing half: if `best_match`'s own
+    linked group (performer_link_index) lists a member with STRICTLY
+    better priority than `best_match` itself, and that member ISN'T
+    already among `raw_matches` (if it were, _pick_priority_match above
+    would already have picked it), substitute a synthetic match for it
+    instead (recognizer.build_linked_substitute_match -- carries over
+    best_match's own distance/score, since there's no independent
+    measurement for the substitute).
+
+    Added 2026-09-28: confirmed live, "Custest Girls of All Time Part 1"
+    matched a pornbox "Lindsey" candidate whose own performer_link_index
+    group already lists a stashdb.org "Eden Petty" entry, but Eden
+    Petty's own reference photo never ranked as a candidate for this
+    scene at all -- a pornbox-only performer would get created in Stash
+    for someone who may already exist there (or get added separately
+    later) as Eden Petty, a duplicate the dataset's own link already
+    knows to avoid but the local Stash instance has no way to find out
+    about on its own. See recognizer.py's build_linked_substitute_match
+    for the full rationale and PerformerMatch construction.
+
+    A no-op (returns `best_match` unchanged) when performer_link_index is
+    empty/absent, `best_match` has no group, every group member is
+    already present, no member outranks `best_match`, `recognizer` has no
+    build_linked_substitute_match (a bare/mocked recognizer in a test),
+    or that builder returns None (a stale/dangling link-index entry)."""
+    if not performer_link_index:
+        return best_match
+    resolved_best = _resolve_local_link(best_match)
+    group = performer_link_index.get(resolved_best)
+    if not group:
+        return best_match
+    present = {_resolve_local_link(m) for m in raw_matches}
+    candidates = [uid for uid in group if uid not in present]
+    if not candidates:
+        return best_match
+    best_rank = _endpoint_rank(resolved_best, endpoint_priority_domains)
+    better = min(candidates, key=lambda uid: _endpoint_rank(uid, endpoint_priority_domains))
+    if _endpoint_rank(better, endpoint_priority_domains) >= best_rank:
+        return best_match
+    build_fn = getattr(recognizer, "build_linked_substitute_match", None)
+    if build_fn is None:
+        return best_match
+    substitute = build_fn(better, best_match)
+    return substitute if substitute is not None else best_match
 
 
 def match_universal_id(match) -> Optional[str]:
@@ -345,6 +419,7 @@ def aggregate_matches(
     frame_timestamps: Optional[dict[int, float]] = None,
     performer_link_index: Optional[dict[str, list[str]]] = None,
     endpoint_priority_domains: Optional[list[str]] = None,
+    recognizer=None,
 ) -> list:
     """
     Aggregate matches across multiple frames for a person.
@@ -436,6 +511,9 @@ def aggregate_matches(
         weighted_score = confidence * (1 + frame_bonus)
 
         match = _pick_priority_match(match_candidates[link_key], endpoint_priority_domains or [])
+        match = _substitute_linked_priority_winner(
+            match, match_candidates[link_key], performer_link_index, endpoint_priority_domains or [], recognizer,
+        )
 
         top_timestamps_sec: list[float] = []
         if frame_timestamps:
@@ -472,6 +550,7 @@ def frequency_based_matching(
     _distance_to_confidence=None,
     performer_link_index: Optional[dict[str, list[str]]] = None,
     endpoint_priority_domains: Optional[list[str]] = None,
+    recognizer=None,
 ) -> list:
     """
     Identify performers by counting appearances across all face matches.
@@ -554,6 +633,9 @@ def frequency_based_matching(
         # best (lowest) distance match when no candidate has a configured
         # priority endpoint -- see _pick_priority_match.
         best_match = _pick_priority_match([m[1] for m in matches], endpoint_priority_domains or [])
+        best_match = _substitute_linked_priority_winner(
+            best_match, [m[1] for m in matches], performer_link_index, endpoint_priority_domains or [], recognizer,
+        )
 
         performer_scores.append({
             "stashdb_id": link_key,
@@ -718,6 +800,9 @@ def clustered_frequency_matching(
             # endpoint. See _pick_priority_match.
             raw_matches = [m[1] for m in matches]
             best_match = _pick_priority_match(raw_matches, endpoint_priority_domains)
+            best_match = _substitute_linked_priority_winner(
+                best_match, raw_matches, performer_link_index, endpoint_priority_domains, recognizer,
+            )
             is_tagged = any(m.stashdb_id in tagged_ids for m in raw_matches)
 
             # Apply small boost for already-tagged performers
@@ -882,6 +967,7 @@ def hybrid_matching(
         _distance_to_confidence=_distance_to_confidence,
         performer_link_index=performer_link_index,
         endpoint_priority_domains=endpoint_priority_domains,
+        recognizer=recognizer,
     )
     # Keyed by canonical identity (see _canonical_identity), not each
     # PersonResult's own raw stashdb_id -- otherwise two linked-but-
@@ -906,6 +992,7 @@ def hybrid_matching(
             _distance_to_confidence=_distance_to_confidence,
             performer_link_index=performer_link_index,
             endpoint_priority_domains=endpoint_priority_domains,
+            recognizer=recognizer,
         )
         if aggregated:
             cluster_persons.append({

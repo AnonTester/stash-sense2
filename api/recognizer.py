@@ -251,6 +251,125 @@ class FaceRecognizer:
         """Get performer info from universal ID."""
         return self.performers.get(universal_id, {})
 
+    def _resolve_match_fields(self, universal_id: str) -> dict:
+        """The per-category (local/catalogue/stashbox) field lookup
+        recognize_face_v2() needs to turn a bare universal_id into a full
+        PerformerMatch -- factored out so build_linked_substitute_match()
+        below can build one too, for a universal_id that was never itself
+        found by a vector search (see that method's own docstring).
+        Returns {stashdb_id, country, image_url, local_performer_id,
+        source, catalogue_url, profile_url} -- exactly PerformerMatch's
+        own non-name, non-score fields."""
+        id_part = universal_id.split(":", 1)[1] if ":" in universal_id else universal_id
+        category = classify_universal_id(universal_id)
+
+        source = catalogue_url = profile_url = None
+        if category == "local":
+            # Local-index match: id_part is the local Stash performer
+            # id, not a StashDB uuid. Use the real linked stashdb_id if
+            # this performer has one (so "already tagged" checks and
+            # StashBox linking still work for them), otherwise fall
+            # back to the local id as the identifier.
+            local_info = (self.local_performer_index.mapping.get(id_part, {})
+                          if self.local_performer_index else {})
+            stashdb_id = local_info.get("stashdb_id") or id_part
+            country = None
+            image_url = local_info.get("image_url")
+            local_performer_id = id_part
+            profile_url = _local_match_profile_url(local_info)
+        elif category == "catalogue":
+            # Non-stash-box source (e.g. seekfans) -- id_part is the
+            # internal database performer id, not a StashDB uuid, and
+            # there's no stashbox metadata API to fetch a cover/link
+            # from, so pull everything from performers.json directly.
+            info = self.performers.get(universal_id, {})
+            stashdb_id = id_part
+            country = info.get("country")
+            image_url = info.get("image_url")
+            local_performer_id = None
+            source = info.get("source")
+            catalogue_url = info.get("catalogue_url")
+            profile_url = info.get("profile_url")
+        else:
+            stashdb_id = id_part
+            country = self.performers.get(universal_id, {}).get("country")
+            image_url = self.performers.get(universal_id, {}).get("image_url")
+            local_performer_id = None
+
+        return {
+            "stashdb_id": stashdb_id, "country": country, "image_url": image_url,
+            "local_performer_id": local_performer_id, "source": source,
+            "catalogue_url": catalogue_url, "profile_url": profile_url,
+        }
+
+    def build_linked_substitute_match(self, universal_id: str, template: "PerformerMatch") -> Optional["PerformerMatch"]:
+        """Builds a full PerformerMatch for `universal_id` -- a linked-
+        group member that was NEVER itself found by a vector search this
+        scene/frame -- carrying over `template`'s own distance/
+        combined_score/matched_embedding_index (there's no independent
+        measurement for `universal_id` to use instead; `template` IS what
+        was actually detected, this is just displaying it under its
+        linked group's own preferred identity).
+
+        Added 2026-09-28 for scene_matcher.py's own linked-group display
+        substitution (see that module's _substitute_linked_priority_winner):
+        confirmed live, "Custest Girls of All Time Part 1" matched a
+        pornbox "Lindsey" candidate whose own performer_link_index group
+        already lists a stashdb.org "Eden Petty" entry -- but Eden Petty's
+        own reference photo never independently ranked as a candidate for
+        this scene at all, so there was nothing for the existing display-
+        priority logic (_pick_priority_match/collapse_linked_candidates)
+        to collapse; a pornbox-only performer would otherwise get created
+        in Stash for someone who may already exist there (or get added
+        there separately later) as Eden Petty, a duplicate the dataset's
+        own link already knows to avoid but the local Stash instance has
+        no way to find out about on its own.
+
+        Returns None (never raises) if universal_id turns out not to
+        resolve to anything real in `self.performers`/the local index --
+        callers must tolerate a stale/dangling link-index entry the same
+        way every other optional-signal consumer in this codebase does."""
+        info = self.performers.get(universal_id)
+        category = classify_universal_id(universal_id)
+        if info is None and category != "local":
+            return None
+        if category == "local":
+            id_part = universal_id.split(":", 1)[1] if ":" in universal_id else universal_id
+            if not (self.local_performer_index and self.local_performer_index.mapping.get(id_part)):
+                return None
+
+        fields = self._resolve_match_fields(universal_id)
+        raw_name = (info or {}).get("name") or (
+            self.local_performer_index.mapping.get(fields["local_performer_id"], {}).get("name")
+            if fields["local_performer_id"] and self.local_performer_index else None
+        ) or "Unknown"
+
+        try:
+            from settings import get_setting
+            from name_script import resolve_display_name
+            prefer_western_names = bool(get_setting("prefer_western_names"))
+            display_name, original_name = resolve_display_name(
+                universal_id, raw_name, self.aliases, prefer_western_names,
+            )
+        except RuntimeError:
+            display_name, original_name = raw_name, None
+
+        return PerformerMatch(
+            universal_id=universal_id,
+            stashdb_id=fields["stashdb_id"],
+            name=display_name,
+            country=fields["country"],
+            image_url=fields["image_url"],
+            distance=template.distance,
+            combined_score=template.combined_score,
+            local_performer_id=fields["local_performer_id"],
+            source=fields["source"],
+            catalogue_url=fields["catalogue_url"],
+            profile_url=fields["profile_url"],
+            matched_embedding_index=template.matched_embedding_index,
+            original_name=original_name,
+        )
+
     def _endpoint_priority_domains(self) -> list[str]:
         """Current effective stash-box endpoint priority order (Settings >
         ... > Endpoint priority), as a list of domains (e.g. ["stashdb.org",
@@ -459,54 +578,20 @@ class FaceRecognizer:
         # Convert to PerformerMatch format for compatibility
         matches = []
         for candidate in result.matches:
-            id_part = candidate.universal_id.split(":", 1)[1] if ":" in candidate.universal_id else candidate.universal_id
-            category = classify_universal_id(candidate.universal_id)
-
-            source = catalogue_url = profile_url = None
-            if category == "local":
-                # Local-index match: id_part is the local Stash performer
-                # id, not a StashDB uuid. Use the real linked stashdb_id if
-                # this performer has one (so "already tagged" checks and
-                # StashBox linking still work for them), otherwise fall
-                # back to the local id as the identifier.
-                local_info = (self.local_performer_index.mapping.get(id_part, {})
-                              if self.local_performer_index else {})
-                stashdb_id = local_info.get("stashdb_id") or id_part
-                country = None
-                image_url = local_info.get("image_url")
-                local_performer_id = id_part
-                profile_url = _local_match_profile_url(local_info)
-            elif category == "catalogue":
-                # Non-stash-box source (e.g. seekfans) -- id_part is the
-                # internal database performer id, not a StashDB uuid, and
-                # there's no stashbox metadata API to fetch a cover/link
-                # from, so pull everything from performers.json directly.
-                info = self.performers.get(candidate.universal_id, {})
-                stashdb_id = id_part
-                country = info.get("country")
-                image_url = info.get("image_url")
-                local_performer_id = None
-                source = info.get("source")
-                catalogue_url = info.get("catalogue_url")
-                profile_url = info.get("profile_url")
-            else:
-                stashdb_id = id_part
-                country = self.performers.get(candidate.universal_id, {}).get("country")
-                image_url = self.performers.get(candidate.universal_id, {}).get("image_url")
-                local_performer_id = None
+            fields = self._resolve_match_fields(candidate.universal_id)
 
             matches.append(PerformerMatch(
                 universal_id=candidate.universal_id,
-                stashdb_id=stashdb_id,
+                stashdb_id=fields["stashdb_id"],
                 name=candidate.name,
-                country=country,
-                image_url=image_url,
+                country=fields["country"],
+                image_url=fields["image_url"],
                 distance=candidate.distance,
                 combined_score=candidate.combined_distance,
-                local_performer_id=local_performer_id,
-                source=source,
-                catalogue_url=catalogue_url,
-                profile_url=profile_url,
+                local_performer_id=fields["local_performer_id"],
+                source=fields["source"],
+                catalogue_url=fields["catalogue_url"],
+                profile_url=fields["profile_url"],
                 matched_embedding_index=candidate.face_index,
                 original_name=candidate.original_name,
             ))

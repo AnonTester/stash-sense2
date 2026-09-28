@@ -425,6 +425,155 @@ class TestLinkedGroupEndpointPriority:
         assert len(persons) == 1
         assert persons[0].best_match.name == "Elma"
 
+    def test_unlinked_local_wins_over_catalogue_even_with_a_priority_list_configured(self):
+        # The Dianaholiday report (2026-09-28), via hybrid_matching (the
+        # mode every bulk/cached identify call actually uses) rather than
+        # clustered_frequency_matching (already covered in
+        # test_matching_logic.py/TestClusteredFrequencyMatchingLocalCatalogueLink)
+        # -- an UNLINKED local performer (no stash_id, created directly
+        # from a catalogue profile) grouped with her own catalogue entry
+        # via local_catalogue_link_index (matching.build_local_catalogue_
+        # link_index), NOT performer_link_index. Must always win, even
+        # over a much better-scoring catalogue candidate and even with a
+        # stashbox priority list configured (which doesn't include
+        # "local" at all -- the point of this test is that local wins
+        # unconditionally, not by ranking into that list).
+        match_local = _make_match(
+            "2915", 0.40, universal_id="local:2915", local_performer_id="2915",
+        )
+        match_local.name = "Dianaholiday"
+        match_catalogue = _make_match("465878", 0.34, universal_id="babepedia:465878")
+        match_catalogue.name = "Dianaholiday"
+        result_a = _embedded_result([match_local], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([match_catalogue], [0.0, 1.0, 0.0])
+        recognizer = SimpleNamespace(
+            performer_link_index={},
+            local_catalogue_link_index={"local:2915": ["babepedia:465878"], "babepedia:465878": ["local:2915"]},
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+
+        persons = hybrid_matching(
+            [(0, result_a), (1, result_b)], recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.universal_id == "local:2915"
+
+
+class TestLinkedGroupSubstituteWinnerNeverFound:
+    """The "Eden Petty / Lindsey" report (2026-09-28): a matched pornbox
+    candidate's OWN performer_link_index group lists a stashdb.org entry
+    for the same real person, but that stashdb.org entry's own reference
+    photo never independently ranked as a candidate in any frame of this
+    scene at all -- so there's nothing for _pick_priority_match to choose
+    between (only one side was ever found). Without a substitute, a
+    pornbox-only performer would get created in Stash for someone who may
+    already exist there (or get added separately later) as Eden Petty,
+    exactly the duplicate the dataset's own link already knows to avoid.
+    See recognizer.build_linked_substitute_match / scene_matcher.
+    _substitute_linked_priority_winner for the fix."""
+
+    def _lindsey_only(self):
+        match = _make_match("180730", 0.485, universal_id="pornbox:180730")
+        match.name = "Lindsey"
+        result = _embedded_result([match], [1.0, 0.0, 0.0])
+        return [(0, result)]
+
+    def _link_index(self):
+        return {
+            "pornbox:180730": ["stashdb.org:13b6304a-uuid"],
+            "stashdb.org:13b6304a-uuid": ["pornbox:180730"],
+        }
+
+    def _recognizer(self):
+        def build_substitute(universal_id, template):
+            assert universal_id == "stashdb.org:13b6304a-uuid"
+            from recognizer import PerformerMatch
+            return PerformerMatch(
+                universal_id=universal_id, stashdb_id="13b6304a-uuid", name="Eden Petty",
+                country="US", image_url="https://stashdb.org/images/xyz.jpg",
+                distance=template.distance, combined_score=template.combined_score,
+            )
+
+        return SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org", "theporndb.net"],
+            build_linked_substitute_match=build_substitute,
+        )
+
+    def test_hybrid_matching_substitutes_the_never_found_stashdb_entry(self):
+        persons = hybrid_matching(
+            self._lindsey_only(), recognizer=self._recognizer(),
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Eden Petty"
+        assert persons[0].best_match.endpoint == "stashdb.org"
+        # Original detection's own distance is carried over, not fabricated.
+        assert persons[0].best_match.distance == 0.485
+
+    def test_clustered_frequency_matching_substitutes_the_never_found_stashdb_entry(self):
+        persons = clustered_frequency_matching(
+            self._lindsey_only(), self._recognizer(),
+            max_distance=0.5, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Eden Petty"
+
+    def test_no_substitution_without_a_recognizer_with_the_builder(self):
+        # A bare recognizer (e.g. no build_linked_substitute_match, same
+        # shape every OTHER test in this file's SimpleNamespace mocks
+        # already use) must not crash -- falls back to showing whatever
+        # was actually found.
+        recognizer = SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+        )
+
+        persons = hybrid_matching(
+            self._lindsey_only(), recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Lindsey"
+
+    def test_no_substitution_when_the_better_member_was_already_found(self):
+        # Both sides present -- _pick_priority_match alone already picks
+        # the right one; the substitute builder must never even be
+        # consulted (would raise if it were, proving this).
+        lindsey = _make_match("180730", 0.10, universal_id="pornbox:180730")
+        lindsey.name = "Lindsey"
+        eden = _make_match("13b6304a-uuid", 0.50, universal_id="stashdb.org:13b6304a-uuid")
+        eden.name = "Eden Petty"
+        result_a = _embedded_result([lindsey], [1.0, 0.0, 0.0])
+        result_b = _embedded_result([eden], [0.0, 1.0, 0.0])
+
+        def build_substitute(universal_id, template):
+            raise AssertionError("should never be called -- both sides were already found")
+
+        recognizer = SimpleNamespace(
+            performer_link_index=self._link_index(),
+            _endpoint_priority_domains=lambda: ["stashdb.org"],
+            build_linked_substitute_match=build_substitute,
+        )
+
+        persons = hybrid_matching(
+            [(0, result_a), (1, result_b)], recognizer=recognizer,
+            min_appearances=1, min_unique_frames=1, min_confidence=0.0,
+            _match_to_response=_resp, _distance_to_confidence=_conf,
+        )
+
+        assert len(persons) == 1
+        assert persons[0].best_match.name == "Eden Petty"
+
 
 class TestHybridMatchingLocalIndexStashdbLink:
     """End-to-end regression coverage (via hybrid_matching itself, not
