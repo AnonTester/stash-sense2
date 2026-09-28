@@ -141,8 +141,20 @@
       renderSection(container, 'Active Jobs', running, true);
     }
 
-    // Queue (pending)
-    const queued = jobs.filter(j => j.status === 'queued');
+    // Queue (pending) -- `jobs` comes from GET /queue (recommendations_db.
+    // get_jobs), ordered newest-first (created_at DESC) for the History
+    // section's own sake. That's backwards for THIS section: these are
+    // pending jobs, not history, and the top of the list should be
+    // whichever one runs NEXT (the actual dispatch order the queue
+    // manager's own get_queued_jobs() uses: priority ascending, then
+    // created_at ascending, i.e. FIFO within a priority) -- not whichever
+    // was queued most recently. Confirmed live: displaying newest-first
+    // made a just-added job appear above ones that would clearly finish
+    // first, implying it would run before them when it actually runs
+    // last.
+    const queued = jobs
+      .filter(j => j.status === 'queued')
+      .sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0) || new Date(a.created_at) - new Date(b.created_at));
     if (queued.length > 0) {
       renderSection(container, 'Queue', queued, false);
     }

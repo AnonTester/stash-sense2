@@ -1,5 +1,10 @@
 ## 2026-09-28
 
+### 0.28.9 (plugin)
+- Fix: Operations' Queue section now lists pending jobs in run order
+  (oldest queued first), not newest-first -- it was implying a just-added
+  job would run before ones actually ahead of it.
+
 ### 0.37.0 (sidecar)
 - Feature: a fresh install (or forced full re-sync) now finds the most
   recent database release with a full zip and applies any newer deltas
