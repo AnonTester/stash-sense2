@@ -243,16 +243,38 @@ def _resp(m, **overrides):
     # silently broke both the dict-keying (every performer collapsed onto
     # the same key) and endpoint-priority tests (the winning match's own
     # source domain must survive into the response to be checked at all).
+    # Mirrors identification_router._match_to_response's own
+    # `endpoint=_extract_endpoint(uid) or getattr(m, "endpoint", None)`
+    # fallback -- needed for hybrid_matching's "found by both" combine
+    # path, which re-wraps an ALREADY-BUILT PerformerMatchResponse (from
+    # freq_by_id/cluster_by_id) through this same function a second time;
+    # that response has no real universal_id (see below), so without this
+    # fallback its own already-correct .endpoint would silently be
+    # discarded and replaced with the "stashdb.org" default -- confirmed
+    # live, 2026-09-28: this exact gap made
+    # test_unlinked_local_wins_over_catalogue_even_with_a_priority_list_configured
+    # fail even though every earlier stage (frequency_based_matching,
+    # each cluster) already correctly resolved "local".
     default_endpoint = "stashdb.org"
     uid = getattr(m, "universal_id", None)
     if isinstance(uid, str) and ":" in uid:
         default_endpoint = uid.split(":", 1)[0]
+    else:
+        default_endpoint = getattr(m, "endpoint", None) or default_endpoint
     return PerformerMatchResponse(
         stashdb_id=m.stashdb_id, name=m.name,
         endpoint=overrides.get("endpoint", default_endpoint),
         confidence=overrides.get("confidence", 0.0),
         distance=overrides.get("distance", 0.0),
         top_timestamps_sec=overrides.get("top_timestamps_sec", []),
+        # Also mirrors _match_to_response's own `universal_id=uid` --
+        # preserved through a double-wrap the same way `endpoint` is now
+        # (see above), so a THIRD wrap (not currently exercised, but no
+        # reason to leave the same trap for later) would work correctly
+        # too. isinstance-guarded the same way default_endpoint's own uid
+        # check is: a bare Mock's auto-vivified non-string uid must never
+        # reach a str-typed pydantic field.
+        universal_id=uid if isinstance(uid, str) else overrides.get("universal_id"),
         # Must round-trip for _canonical_identity's local-index-link check
         # (match_universal_id() reads this off the response, prioritized
         # over endpoint+stashdb_id) -- a local match's own universal_id
@@ -446,10 +468,36 @@ class TestLinkedGroupEndpointPriority:
         match_catalogue.name = "Dianaholiday"
         result_a = _embedded_result([match_local], [1.0, 0.0, 0.0])
         result_b = _embedded_result([match_catalogue], [0.0, 1.0, 0.0])
+
+        # match_local/match_catalogue's embedding vectors are deliberately
+        # orthogonal (won't cosine-cluster together), so hybrid_matching's
+        # own cluster-mode component sees them as two SEPARATE clusters --
+        # each independently canonicalizes to the same linked-group key
+        # (_canonical_identity), and each independently runs its own
+        # _substitute_linked_priority_winner. A real FaceRecognizer always
+        # has build_linked_substitute_match (added as a bound method), so
+        # both clusters converge on the same "local wins" answer; a mock
+        # missing it would leave one cluster un-substituted and expose a
+        # real but separate ordering quirk in how cluster_by_id collapses
+        # same-key clusters -- not what this test is about, so provide it.
+        def build_substitute(universal_id, template):
+            assert universal_id == "local:2915"
+            return SimpleNamespace(
+                universal_id=universal_id, stashdb_id="2915", name="Dianaholiday",
+                country=None, image_url=None, local_performer_id="2915",
+                source=None, catalogue_url=None, profile_url=None,
+                # template is a Mock (from _make_match) that never had .distance
+                # explicitly set -- reading it back would just auto-vivify
+                # another Mock, not a real number, so use a literal instead
+                # (matches the catalogue candidate's own known score, 0.34).
+                distance=0.34, combined_score=0.34, matched_embedding_index=None, original_name=None,
+            )
+
         recognizer = SimpleNamespace(
             performer_link_index={},
             local_catalogue_link_index={"local:2915": ["babepedia:465878"], "babepedia:465878": ["local:2915"]},
             _endpoint_priority_domains=lambda: ["stashdb.org"],
+            build_linked_substitute_match=build_substitute,
         )
 
         persons = hybrid_matching(
@@ -459,7 +507,13 @@ class TestLinkedGroupEndpointPriority:
         )
 
         assert len(persons) == 1
-        assert persons[0].best_match.universal_id == "local:2915"
+        # PerformerMatchResponse (_resp) has no real universal_id field --
+        # same convention as TestHybridMatchingLocalIndexStashdbLink's own
+        # test_stashdb_entry_wins_display_over_the_local_entry below,
+        # checking .endpoint/.local_performer_id instead.
+        assert persons[0].best_match.endpoint == "local"
+        assert persons[0].best_match.local_performer_id == "2915"
+        assert persons[0].best_match.name == "Dianaholiday"
 
 
 class TestLinkedGroupSubstituteWinnerNeverFound:
@@ -489,12 +543,28 @@ class TestLinkedGroupSubstituteWinnerNeverFound:
 
     def _recognizer(self):
         def build_substitute(universal_id, template):
+            # A plain duck-typed stand-in, not a real recognizer.
+            # PerformerMatch -- this file replaces the whole `recognizer`
+            # module with a Mock() at import time (see the top of this
+            # file) specifically so scene_matcher.py's own module-level
+            # `from recognizer import PerformerMatch` doesn't pull in the
+            # real ML-heavy recognizer.py; importing the real class here
+            # would resolve to that same Mock module and silently return
+            # a MagicMock instead of a real instance (confirmed live,
+            # 2026-09-28: exactly this mistake shipped in this test's
+            # first version, caught by CI, not by local verification).
             assert universal_id == "stashdb.org:13b6304a-uuid"
-            from recognizer import PerformerMatch
-            return PerformerMatch(
+            return SimpleNamespace(
                 universal_id=universal_id, stashdb_id="13b6304a-uuid", name="Eden Petty",
                 country="US", image_url="https://stashdb.org/images/xyz.jpg",
-                distance=template.distance, combined_score=template.combined_score,
+                local_performer_id=None, source=None, catalogue_url=None, profile_url=None,
+                # template is the ORIGINAL (pornbox) match's own Mock --
+                # carrying over its measured score the same way the real
+                # recognizer.build_linked_substitute_match does, but as a
+                # literal (the Mock never had .distance/.combined_score
+                # explicitly set, so reading them back would just yield
+                # more auto-vivified Mocks, not template's real 0.485).
+                distance=0.485, combined_score=0.485, matched_embedding_index=None, original_name=None,
             )
 
         return SimpleNamespace(

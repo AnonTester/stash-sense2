@@ -37,7 +37,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from delta_applier import apply_delta_chain, find_delta_chain, parse_min_sidecar_version
+from delta_applier import apply_delta_chain, find_delta_chain, find_full_bootstrap, parse_min_sidecar_version
 from release_info import compare_versions
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,21 @@ class UpdateStatus(str, Enum):
     FAILED = "failed"
 
 
+# Maps apply_delta_chain's own phase names onto this same enum, so the
+# delta-application path (used by both _run_delta_update and
+# _run_bootstrap_update's own trailing delta phase) reports through
+# get_status() indistinguishably from the plain full-zip path -- "applying"
+# -> SWAPPING since that's this enum's closest existing meaning (mutating
+# the live data files), not because anything is literally being swapped
+# file-for-file the way the full-zip path's own SWAPPING phase is.
+_DELTA_PHASE_STATUS = {
+    "downloading": UpdateStatus.DOWNLOADING,
+    "extracting": UpdateStatus.EXTRACTING,
+    "verifying": UpdateStatus.VERIFYING,
+    "applying": UpdateStatus.SWAPPING,
+}
+
+
 class UpdateState:
     """Mutable state bag tracked by :class:`DatabaseUpdater`."""
 
@@ -143,6 +158,13 @@ class DatabaseUpdater:
         # when choosing delta vs. full. Not part of the cached/returned
         # result dict (that only carries summary fields for the API).
         self._last_delta_chain: Optional[list[dict[str, Any]]] = None
+
+        # Same idea, for find_full_bootstrap()'s own trailing delta chain
+        # (from wherever the most recent full zip was found, up to
+        # latest) — consumed by start_bootstrap_update(). See
+        # check_update()'s own docstring for when this gets populated
+        # instead of/alongside _last_delta_chain above.
+        self._last_bootstrap_chain: Optional[list[dict[str, Any]]] = None
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -217,6 +239,7 @@ class DatabaseUpdater:
             now = time.monotonic()
             if self._cache is not None and (now - self._cache_time) < CACHE_TTL_SECONDS:
                 self._last_delta_chain = self._cache.get("_delta_chain")
+                self._last_bootstrap_chain = self._cache.get("_bootstrap_chain")
                 return self._public_result(self._cache)
 
             # Persistent cache — survives container restarts
@@ -227,6 +250,7 @@ class DatabaseUpdater:
                 self._cache = persistent
                 self._cache_time = time.monotonic()
                 self._last_delta_chain = persistent.get("_delta_chain")
+                self._last_bootstrap_chain = persistent.get("_bootstrap_chain")
                 return self._public_result(persistent)
 
         async with httpx.AsyncClient() as client:
@@ -260,17 +284,45 @@ class DatabaseUpdater:
             except Exception as exc:
                 logger.warning("Delta chain lookup failed, will offer full download only: %s", exc)
 
+        # A full-zip bootstrap lookup (find_full_bootstrap) walks backward
+        # through release history for the most recent release that DOES
+        # carry a full zip -- needed whenever `download_url` above came up
+        # empty, i.e. the latest release is delta-only (see stash-sense2-
+        # data-gen's build/publish.py --delta-only). Two cases need it:
+        #   - current is None (fresh install): find_delta_chain() above was
+        #     never even called (nothing to diff against) -- always need
+        #     SOME full zip to bootstrap from.
+        #   - current is not None but download_url is None: an existing
+        #     install doesn't need this for its own delta-chain update
+        #     (find_delta_chain never requires a full zip on any hop), but
+        #     "force full re-sync" still needs one to point at.
+        bootstrap: Optional[dict[str, Any]] = None
+        if current is None or download_url is None:
+            try:
+                bootstrap = await find_full_bootstrap(GITHUB_REPO)
+            except Exception as exc:
+                logger.warning("Bootstrap full-zip lookup failed: %s", exc)
+
+        bootstrap_full_version: Optional[str] = None
+        bootstrap_chain: Optional[list[dict[str, Any]]] = None
+        if bootstrap is not None:
+            bootstrap_full_version = bootstrap["full_version"]
+            bootstrap_chain = bootstrap["delta_chain"]
+            if download_url is None:
+                download_url = bootstrap["full_download_url"]
+                download_size_mb = bootstrap["full_size_mb"]
+
         # Minimum sidecar version required to safely consume the target
         # release -- parsed from the release notes body (zero extra HTTP
         # cost, already fetched above), plus every delta hop's own marker
-        # as defense in depth (also free -- find_delta_chain() already
-        # parsed these while building the chain). Only ever increases
-        # release-over-release (see stash-sense2-data-gen's
-        # build/manifest.py::MIN_SIDECAR_VERSION), so taking the max
-        # across whatever markers we have is always correct, not just a
-        # safe overestimate.
+        # as defense in depth (also free -- find_delta_chain()/
+        # find_full_bootstrap() already parsed these while building their
+        # own chains). Only ever increases release-over-release (see
+        # stash-sense2-data-gen's build/manifest.py::MIN_SIDECAR_VERSION),
+        # so taking the max across whatever markers we have is always
+        # correct, not just a safe overestimate.
         min_sidecar_version = parse_min_sidecar_version(release.get("body"))
-        for hop in (delta_chain or []):
+        for hop in (delta_chain or []) + (bootstrap_chain or []):
             hop_min = hop.get("min_sidecar_version")
             if hop_min and (min_sidecar_version is None or compare_versions(hop_min, min_sidecar_version) > 0):
                 min_sidecar_version = hop_min
@@ -294,9 +346,16 @@ class DatabaseUpdater:
             "delta_available": bool(delta_chain),
             "delta_chain_length": len(delta_chain) if delta_chain else None,
             "delta_download_size_mb": round(sum(h["size_mb"] for h in delta_chain), 2) if delta_chain else None,
+            # Set only when `download_url` above needed the backward-walk
+            # (the plain latest-release scan came up empty) -- None means
+            # "whatever download_url points at IS latest_version already".
+            # start_database_update() uses this to decide whether the full-
+            # zip download needs a trailing delta chain applied afterward.
+            "bootstrap_full_version": bootstrap_full_version,
             "min_sidecar_version": min_sidecar_version,
             "sidecar_compatible": sidecar_compatible,
             "_delta_chain": delta_chain,
+            "_bootstrap_chain": bootstrap_chain,
         }
 
         # Update both caches (with the internal chain details included —
@@ -305,6 +364,7 @@ class DatabaseUpdater:
         self._cache_time = time.monotonic()
         self._save_persistent_cache(result)
         self._last_delta_chain = delta_chain
+        self._last_bootstrap_chain = bootstrap_chain
         return self._public_result(result)
 
     @staticmethod
@@ -426,25 +486,12 @@ class DatabaseUpdater:
         guarantees the data dir is fully applied or fully rolled back
         before it returns/raises, covering the whole chain as one unit.
         """
-        # Maps apply_delta_chain's phase names onto the same UpdateStatus
-        # enum the full-zip download path already reports through, so the
-        # two update paths look identical to anything reading get_status()
-        # -- "applying" -> SWAPPING since that's this enum's closest
-        # existing meaning (mutating the live data files), not because
-        # anything is literally being swapped file-for-file the way the
-        # full-zip path's own SWAPPING phase is.
-        _PHASE_STATUS = {
-            "downloading": UpdateStatus.DOWNLOADING,
-            "extracting": UpdateStatus.EXTRACTING,
-            "verifying": UpdateStatus.VERIFYING,
-            "applying": UpdateStatus.SWAPPING,
-        }
         try:
             self._state.status = UpdateStatus.DOWNLOADING
             self._state.progress_pct = 0
 
             def _progress(phase: str, pct: int) -> None:
-                self._state.status = _PHASE_STATUS[phase]
+                self._state.status = _DELTA_PHASE_STATUS[phase]
                 self._state.progress_pct = pct
 
             result = await apply_delta_chain(chain, self._data_dir, progress_cb=_progress)
@@ -470,6 +517,127 @@ class DatabaseUpdater:
             logger.warning("Delta update failed (rolled back automatically): %s", exc)
             self._state.status = UpdateStatus.FAILED
             self._state.error = str(exc)
+
+    # ------------------------------------------------------------------
+    # Bootstrap update (fresh install, or "force full" when the latest
+    # release has no full zip of its own -- swap in the most recent
+    # available full zip, then chain-apply deltas the rest of the way)
+    # ------------------------------------------------------------------
+
+    async def start_bootstrap_update(
+        self, download_url: str, full_version: str, delta_chain: list[dict[str, Any]],
+    ) -> str:
+        """Kick off a bootstrap update in a background task. Mirrors
+        start_update()'s single-task guard; returns a job ID.
+        `delta_chain` may be empty (the found full zip already IS
+        latest -- no different from a plain full-zip download, just
+        routed through this same path for one less branch at the call
+        site)."""
+        if self._update_task is not None and not self._update_task.done():
+            raise RuntimeError("Update already running")
+
+        job_id = uuid.uuid4().hex[:12]
+        self._state.target_version = delta_chain[-1]["to_version"] if delta_chain else full_version
+        self._update_task = asyncio.create_task(
+            self._run_bootstrap_update(download_url, full_version, delta_chain),
+        )
+        return job_id
+
+    async def _run_bootstrap_update(
+        self, download_url: str, full_version: str, delta_chain: list[dict[str, Any]],
+    ) -> None:
+        """Swap in the full zip at `full_version` (same download/extract/
+        verify/swap pipeline _run_update() uses), then chain-apply
+        `delta_chain` the rest of the way to latest via apply_delta_chain
+        -- used whenever the latest release itself has no full zip (see
+        stash-sense2-data-gen's build/publish.py --delta-only): a fresh
+        install always needs this (find_delta_chain has nothing to diff
+        against yet), and "force full re-sync" needs it too when latest
+        is delta-only.
+
+        Two backups exist across the two phases -- this method's own
+        (for the full-zip phase) and apply_delta_chain's own internal one
+        (for the delta phase, once it starts). If the delta phase fails,
+        apply_delta_chain has ALREADY rolled itself back to right after
+        the full-zip swap (still a complete, valid dataset at
+        full_version) before re-raising -- this method's own except
+        block must NOT also roll back to `backup_dir` in that case, or it
+        would undo the full-zip swap too and leave nothing behind for a
+        genuine fresh install. `_full_zip_swapped` distinguishes the two:
+        only roll back to `backup_dir` if the full-zip phase itself is
+        what failed."""
+        work_dir = self._data_dir / f"update_{uuid.uuid4().hex[:8]}"
+        zip_path = work_dir / "release.zip"
+        extract_dir = work_dir / "extracted"
+        backup_dir: Optional[Path] = None
+        full_zip_swapped = False
+
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+
+            self._state.status = UpdateStatus.DOWNLOADING
+            self._state.progress_pct = 0
+            await self._download(download_url, zip_path)
+
+            self._state.status = UpdateStatus.EXTRACTING
+            self._state.progress_pct = 20
+            self._extract(zip_path, extract_dir)
+
+            self._state.status = UpdateStatus.VERIFYING
+            self._state.progress_pct = 35
+            self._load_and_verify(extract_dir)
+
+            self._state.status = UpdateStatus.SWAPPING
+            self._state.progress_pct = 50
+            backup_dir = self._swap_files(extract_dir)
+            full_zip_swapped = True
+            self._state.current_version = full_version
+
+            if delta_chain:
+                def _progress(phase: str, pct: int) -> None:
+                    self._state.status = _DELTA_PHASE_STATUS[phase]
+                    self._state.progress_pct = pct
+
+                result = await apply_delta_chain(delta_chain, self._data_dir, progress_cb=_progress)
+                self._state.current_version = result.get("new_version", full_version)
+
+            self._state.status = UpdateStatus.RELOADING
+            self._state.progress_pct = 90
+            self._reload_fn(self._data_dir)
+
+            self._state.status = UpdateStatus.COMPLETE
+            self._state.progress_pct = 100
+
+            self._cache = None
+            self._last_delta_chain = None
+            self._last_bootstrap_chain = None
+            try:
+                self._persistent_cache_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            logger.warning("Bootstrap update to %s complete (full zip at %s + %d delta hop(s))",
+                            self._state.current_version, full_version, len(delta_chain))
+
+        except Exception as exc:
+            logger.warning("Bootstrap update failed: %s", exc)
+            self._state.status = UpdateStatus.FAILED
+            self._state.error = str(exc)
+
+            if not full_zip_swapped and backup_dir is not None and backup_dir.exists():
+                try:
+                    self._rollback(backup_dir)
+                    logger.warning("Rolled back to backup %s", backup_dir.name)
+                except Exception as rb_exc:
+                    logger.error("Rollback also failed: %s", rb_exc)
+            # else: either the full-zip phase failed before backup_dir was
+            # even created (a fresh install -- nothing to roll back to),
+            # or apply_delta_chain already rolled itself back to the
+            # post-full-zip-swap state -- don't double-rollback over it.
+
+        finally:
+            if work_dir.exists():
+                shutil.rmtree(work_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Pipeline stages

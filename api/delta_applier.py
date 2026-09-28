@@ -170,22 +170,11 @@ async def _fetch_releases(github_repo: str, per_page: int = 30) -> list[dict[str
         return resp.json()  # newest first, per GitHub API default
 
 
-async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> Optional[list[dict[str, Any]]]:
-    """Return an ordered (oldest-to-newest) list of delta hops to apply to
-    get from `current_version` to latest, or None if no complete chain
-    exists (caller should fall back to a full download).
-    """
-    if current_version is None:
-        return None  # fresh install — full download is simpler and correct
-
-    releases = await _fetch_releases(github_repo)
-    if not releases:
-        return None
-
-    latest_version = releases[0]["tag_name"].lstrip("v")
-    if latest_version == current_version:
-        return []  # already up to date
-
+def _index_delta_assets(releases: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Every release's own delta asset (if it has one), keyed by its
+    to_version -- shared indexing step between find_delta_chain() and
+    find_full_bootstrap() below, since both walk the exact same hop graph,
+    just from different starting points."""
     by_to_version: dict[str, dict[str, Any]] = {}
     for rel in releases:
         to_version = rel["tag_name"].lstrip("v")
@@ -202,11 +191,25 @@ async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> 
             "size_mb": round(delta_asset.get("size", 0) / 1_000_000, 2),
             "min_sidecar_version": parse_min_sidecar_version(rel.get("body")),
         }
+    return by_to_version
+
+
+def _walk_delta_chain(
+    by_to_version: dict[str, dict[str, Any]], latest_version: str, target_version: str,
+) -> Optional[list[dict[str, Any]]]:
+    """Ordered (oldest-to-newest) list of delta hops from `target_version`
+    to `latest_version`, walking backward through `by_to_version`'s own
+    from_version links, or None on any gap/cycle. Shared core of both
+    find_delta_chain() (target = the version currently installed) and
+    find_full_bootstrap() (target = wherever the most recent full zip
+    is) -- the graph walk itself doesn't care which case it's serving."""
+    if latest_version == target_version:
+        return []  # already there
 
     chain: list[dict[str, Any]] = []
     cursor = latest_version
     seen: set[str] = set()
-    while cursor != current_version:
+    while cursor != target_version:
         if cursor in seen:
             logger.warning("Delta chain has a cycle at version %s — falling back to full download", cursor)
             return None
@@ -214,13 +217,88 @@ async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> 
         hop = by_to_version.get(cursor)
         if hop is None:
             logger.info("No delta chain from %s to %s (gap at %s) — falling back to full download",
-                        current_version, latest_version, cursor)
+                        target_version, latest_version, cursor)
             return None
         chain.append(hop)
         cursor = hop["from_version"]
 
     chain.reverse()
     return chain
+
+
+async def find_delta_chain(github_repo: str, current_version: Optional[str]) -> Optional[list[dict[str, Any]]]:
+    """Return an ordered (oldest-to-newest) list of delta hops to apply to
+    get from `current_version` to latest, or None if no complete chain
+    exists (caller should fall back to a full download).
+    """
+    if current_version is None:
+        return None  # fresh install — see find_full_bootstrap() instead
+
+    releases = await _fetch_releases(github_repo)
+    if not releases:
+        return None
+
+    latest_version = releases[0]["tag_name"].lstrip("v")
+    by_to_version = _index_delta_assets(releases)
+    return _walk_delta_chain(by_to_version, latest_version, current_version)
+
+
+def _find_full_asset(rel: dict[str, Any]) -> Optional[dict[str, Any]]:
+    return next(
+        (a for a in rel.get("assets", [])
+         if a["name"].startswith("stash-sense2-data-") and a["name"].endswith(".zip")),
+        None,
+    )
+
+
+async def find_full_bootstrap(github_repo: str) -> Optional[dict[str, Any]]:
+    """For a fresh install (no local manifest.json at all, so there's no
+    "current version" to diff against): not every release necessarily
+    carries a full-bundle zip going forward (see stash-sense2-data-gen's
+    build/publish.py --delta-only) -- if the latest release doesn't have
+    one, walk backward through release history for the most recent one
+    that does, then build the delta chain from there up to latest (same
+    hop-graph walk find_delta_chain() does, just anchored at "wherever
+    the full zip is" instead of "the version currently installed").
+
+    Returns None only if NO release has a full zip at all (shouldn't
+    happen in practice -- the very first release always ships one, and
+    nothing ever deletes that guarantee) or there are no releases at all.
+    A gap in the delta chain between the found full-zip release and
+    latest degrades to `delta_chain: []` (single most-recent-behind full
+    zip, no worse than today's behavior) rather than failing outright --
+    see the dict's own key for which case applies."""
+    releases = await _fetch_releases(github_repo)
+    if not releases:
+        return None
+
+    latest_version = releases[0]["tag_name"].lstrip("v")
+
+    full_release = None
+    full_asset = None
+    for rel in releases:
+        asset = _find_full_asset(rel)
+        if asset is not None:
+            full_release = rel
+            full_asset = asset
+            break
+    if full_release is None:
+        return None
+
+    full_version = full_release["tag_name"].lstrip("v")
+    by_to_version = _index_delta_assets(releases)
+    delta_chain = _walk_delta_chain(by_to_version, latest_version, full_version)
+
+    return {
+        "full_version": full_version,
+        "full_download_url": full_asset["browser_download_url"],
+        "full_size_mb": round(full_asset.get("size", 0) / 1_000_000),
+        # None (not []) specifically distinguishes "gap in the chain past
+        # the full zip -- caller should just install the full zip alone
+        # and stop there, next check_update() will offer the rest" from
+        # "[] -- the full zip found IS already latest, nothing more to do".
+        "delta_chain": delta_chain,
+    }
 
 
 # ---------------------------------------------------------------------------

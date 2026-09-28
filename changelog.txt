@@ -1,5 +1,12 @@
 ## 2026-09-28
 
+### 0.37.0 (sidecar)
+- Feature: a fresh install (or forced full re-sync) now finds the most
+  recent database release with a full zip and applies any newer deltas
+  on top, instead of requiring the latest release itself to have one.
+- Fix: a linked local match now prefers showing its real stash-box
+  record over the local stand-in when they'd otherwise tie for display.
+
 ### 0.28.8 (plugin)
 - Improvement: Face Recommendations detail's "Open in Stash" link is now a
   small badge in the top-right corner (same style as the deep scan tool's

@@ -172,10 +172,33 @@ def _pick_priority_match(
     configured priority") and the winner ends up decided by raw match
     score alone, which flips unpredictably run to run. Falls back to best
     (lowest) combined_score only when NONE of the candidates is local or
-    resolves to a configured priority endpoint at all."""
+    resolves to a configured priority endpoint at all.
+
+    Secondary tie-break (added 2026-09-28): when two candidates resolve
+    to the SAME rank -- the exact "Marley Brinx" shape, a stash_id-linked
+    local match and the main index's own real stashdb.org record for
+    that same performer, both resolving to "stashdb.org" via
+    _resolve_local_link -- prefer whichever one's own LITERAL
+    universal_id isn't "local:...": the real record has actual
+    image_url/profile-link data the local stand-in doesn't, and "which
+    one happened to be inserted first into this cluster's own matches
+    list" is not a meaningful signal to decide that with. Confirmed live
+    as a real gap, not just a hypothetical: without this, a stable sort
+    on a tied rank silently kept whichever appeared first in iteration
+    order, which for this exact linked-local case is the local stand-in
+    (see tests/test_scene_matcher_logic.py's own
+    test_stashdb_entry_wins_display_over_the_local_entry -- previously
+    passing for an unrelated, accidental reason in this file's own test
+    stand-in, not because this function actually did the right thing)."""
     if len(matches) == 1:
         return matches[0]
-    ranked = sorted(matches, key=lambda m: _endpoint_rank(_resolve_local_link(m), endpoint_priority_domains))
+    ranked = sorted(
+        matches,
+        key=lambda m: (
+            _endpoint_rank(_resolve_local_link(m), endpoint_priority_domains),
+            str(getattr(m, "universal_id", "") or "").startswith("local:"),
+        ),
+    )
     if _endpoint_rank(_resolve_local_link(ranked[0]), endpoint_priority_domains) < len(endpoint_priority_domains):
         return ranked[0]
     return min(matches, key=lambda m: m.combined_score)

@@ -87,6 +87,12 @@ class CheckUpdateResponse(BaseModel):
     delta_available: bool = False
     delta_chain_length: Optional[int] = None
     delta_download_size_mb: Optional[float] = None
+    # Set only when `download_url` needed database_updater.py's own
+    # backward-walk (the latest release itself has no full zip -- see
+    # stash-sense2-data-gen's build/publish.py --delta-only) -- the
+    # version that zip actually is, distinct from latest_version. None
+    # means download_url already points at latest_version directly.
+    bootstrap_full_version: Optional[str] = None
     # Compatibility gate -- see database_updater.py's check_update() and
     # stash-sense2-data-gen's build/manifest.py::MIN_SIDECAR_VERSION.
     min_sidecar_version: Optional[str] = None
@@ -279,8 +285,21 @@ async def start_database_update(method: str = "auto"):
         )
 
     use_delta = method != "full" and check.get("delta_available")
+    # bootstrap_full_version is set only when download_url needed the
+    # backward-walk (the latest release itself has no full zip -- see
+    # check_update()'s own docstring) -- covers both a fresh install
+    # (current_version is None, delta_available is always False so
+    # use_delta above is already False) and "force full re-sync" against
+    # a delta-only latest release. Either way, download_url points at an
+    # OLDER release than latest, so the trailing delta chain from there
+    # must be applied too, not just the plain full-zip swap.
+    bootstrap_full_version = check.get("bootstrap_full_version")
     if use_delta:
         job_id = await _db_updater.start_delta_update(_db_updater._last_delta_chain)
+    elif bootstrap_full_version and bootstrap_full_version != check["latest_version"]:
+        job_id = await _db_updater.start_bootstrap_update(
+            check["download_url"], bootstrap_full_version, _db_updater._last_bootstrap_chain or [],
+        )
     else:
         job_id = await _db_updater.start_update(
             download_url=check["download_url"],

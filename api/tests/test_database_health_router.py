@@ -170,7 +170,9 @@ def client_with_updater(mock_manifest):
     mock_updater.check_update = AsyncMock()
     mock_updater.start_update = AsyncMock(return_value="job-full")
     mock_updater.start_delta_update = AsyncMock(return_value="job-delta")
+    mock_updater.start_bootstrap_update = AsyncMock(return_value="job-bootstrap")
     mock_updater._last_delta_chain = []
+    mock_updater._last_bootstrap_chain = []
 
     dh_mod._recognizer = None
     dh_mod._db_manifest = mock_manifest
@@ -240,6 +242,99 @@ class TestStartDatabaseUpdate:
         resp = client.post("/database/update")
 
         assert resp.status_code == 200
+
+
+class TestStartDatabaseUpdateBootstrapRouting:
+    """bootstrap_full_version (see database_updater.check_update()'s own
+    docstring) routes a fresh install -- or "force full" against a
+    delta-only latest release -- through start_bootstrap_update instead
+    of the plain start_update, since download_url in that case points at
+    an OLDER release than latest and needs the trailing delta chain
+    applied on top. Added 2026-09-28 alongside find_full_bootstrap."""
+
+    def test_bootstrap_full_version_behind_latest_routes_to_bootstrap_update(self, client_with_updater):
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.15",
+            "delta_available": False,
+            "download_url": "https://example.com/full-2026.02.15.zip",
+            "bootstrap_full_version": "2026.02.15",
+            "sidecar_compatible": True,
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 200
+        mock_updater.start_bootstrap_update.assert_called_once_with(
+            "https://example.com/full-2026.02.15.zip", "2026.02.15", [],
+        )
+        mock_updater.start_update.assert_not_called()
+        mock_updater.start_delta_update.assert_not_called()
+
+    def test_bootstrap_full_version_equal_to_latest_uses_plain_full_update(self, client_with_updater):
+        # The common case: the latest release itself has a full zip, so
+        # bootstrap_full_version == latest_version -- no different from a
+        # plain full-zip download, no reason to route through the extra
+        # bootstrap machinery.
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.15",
+            "delta_available": False,
+            "download_url": "https://example.com/full-2026.03.15.zip",
+            "bootstrap_full_version": "2026.03.15",
+            "sidecar_compatible": True,
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 200
+        mock_updater.start_update.assert_called_once_with(
+            download_url="https://example.com/full-2026.03.15.zip", target_version="2026.03.15",
+        )
+        mock_updater.start_bootstrap_update.assert_not_called()
+
+    def test_delta_available_wins_over_bootstrap_when_both_present(self, client_with_updater):
+        # Shouldn't happen in practice (an existing install with a
+        # working delta chain never triggers the bootstrap lookup at
+        # all -- see check_update()'s own condition), but delta must take
+        # priority if it somehow does.
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.15",
+            "delta_available": True,
+            "download_url": None,
+            "bootstrap_full_version": "2026.02.15",
+            "sidecar_compatible": True,
+        }
+
+        resp = client.post("/database/update")
+
+        assert resp.status_code == 200
+        mock_updater.start_delta_update.assert_called_once()
+        mock_updater.start_bootstrap_update.assert_not_called()
+        mock_updater.start_update.assert_not_called()
+
+    def test_force_full_against_delta_only_latest_also_routes_to_bootstrap(self, client_with_updater):
+        # method="full" still needs the bootstrap path when latest itself
+        # has no full zip -- "force full" shouldn't just fail outright.
+        client, mock_updater = client_with_updater
+        mock_updater.check_update.return_value = {
+            "update_available": True,
+            "latest_version": "2026.03.15",
+            "delta_available": True,  # would normally win, but method=full skips it
+            "download_url": "https://example.com/full-2026.02.15.zip",
+            "bootstrap_full_version": "2026.02.15",
+            "sidecar_compatible": True,
+        }
+
+        resp = client.post("/database/update?method=full")
+
+        assert resp.status_code == 200
+        mock_updater.start_bootstrap_update.assert_called_once()
+        mock_updater.start_delta_update.assert_not_called()
 
 
 # ==================== GET /health/rate-limiter ====================
