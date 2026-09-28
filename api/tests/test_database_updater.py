@@ -798,3 +798,72 @@ class TestRunUpdate:
         # Temp download and extract dirs should be cleaned up
         update_dirs = list(data_dir.glob("update_*"))
         assert len(update_dirs) == 0, f"Temp dirs not cleaned up: {update_dirs}"
+
+
+class TestGetRecDbSafe:
+    """DatabaseUpdater._get_rec_db_safe -- the lazy, best-effort lookup
+    apply_delta_chain's own `rec_db` param needs (see this module's
+    docstring on why it can't just be constructor-injected: DatabaseUpdater
+    is created before recommendations_router's own rec_db is, in main.py's
+    startup sequence)."""
+
+    def test_returns_the_db_when_recommendations_router_is_initialized(self, tmp_path, monkeypatch):
+        import sys
+        import types
+
+        fake_db = object()
+        fake_module = types.ModuleType("recommendations_router")
+        fake_module.get_rec_db = lambda: fake_db
+        monkeypatch.setitem(sys.modules, "recommendations_router", fake_module)
+
+        updater = DatabaseUpdater(data_dir=tmp_path, reload_fn=MagicMock(return_value=True))
+        assert updater._get_rec_db_safe() is fake_db
+
+    def test_returns_none_when_recommendations_router_is_not_ready(self, tmp_path, monkeypatch):
+        import sys
+        import types
+        from fastapi import HTTPException
+
+        def _raise():
+            raise HTTPException(status_code=503, detail="Recommendations database not initialized")
+
+        fake_module = types.ModuleType("recommendations_router")
+        fake_module.get_rec_db = _raise
+        monkeypatch.setitem(sys.modules, "recommendations_router", fake_module)
+
+        updater = DatabaseUpdater(data_dir=tmp_path, reload_fn=MagicMock(return_value=True))
+        assert updater._get_rec_db_safe() is None
+
+    def test_returns_none_when_the_module_itself_cannot_be_imported(self, tmp_path, monkeypatch):
+        import builtins
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "recommendations_router":
+                raise ImportError("simulated")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked_import)
+        updater = DatabaseUpdater(data_dir=tmp_path, reload_fn=MagicMock(return_value=True))
+        assert updater._get_rec_db_safe() is None
+
+
+class TestApplyDeltaChainReceivesRecDb:
+    """_run_delta_update / _run_bootstrap_update must actually pass the
+    resolved rec_db through to apply_delta_chain, not just resolve it and
+    drop it."""
+
+    async def test_run_delta_update_passes_rec_db_through(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _write_manifest(data_dir, version="2026.02.12")
+
+        updater = DatabaseUpdater(data_dir=data_dir, reload_fn=MagicMock(return_value=True))
+        fake_db = object()
+        chain = [{"from_version": "2026.02.12", "to_version": "2026.02.15", "download_url": "https://example/d.zip"}]
+
+        with patch.object(updater, "_get_rec_db_safe", return_value=fake_db), \
+             patch("database_updater.apply_delta_chain", AsyncMock(return_value={"new_version": "2026.02.15"})) as mock_apply:
+            await updater._run_delta_update(chain)
+
+        assert mock_apply.call_args.kwargs["rec_db"] is fake_db

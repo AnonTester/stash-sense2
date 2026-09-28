@@ -15,7 +15,17 @@ Lifecycle
 
 Safety guarantees
 -----------------
-* ``stash_sense.db`` (local recommendations DB) is **never** touched.
+* ``stash_sense.db`` (local recommendations DB) is **never** touched, with
+  one narrow, deliberate exception: the delta-apply path (``_run_delta_update``
+  / ``_run_bootstrap_update``'s own trailing delta phase) records which
+  universal_ids/face vectors changed into a few small bookkeeping tables
+  there (see ``delta_applier.apply_delta_chain``'s own ``rec_db`` param and
+  ``recommendations_db.py``'s ``DELTA_SCOPE_SCHEMA``), so Refresh Outdated /
+  Face Recommendations can scope their own work to what a delta actually
+  touched instead of rematching every scene. This never writes to
+  fingerprint/recommendation *content* itself, only this small additive
+  bookkeeping trail -- and it degrades safely (falls back to the old
+  always-rematch behavior) if it's ever unavailable or fails.
 * A timestamped backup of the old data is created before swapping.
 * On any failure the old files are restored from backup (rollback).
 """
@@ -185,6 +195,24 @@ class DatabaseUpdater:
         """Return the current update state as a plain dict."""
         self._state.current_version = self._get_current_version()
         return self._state.to_dict()
+
+    @staticmethod
+    def _get_rec_db_safe():
+        """The initialized RecommendationsDB, or None -- for
+        apply_delta_chain's own optional `rec_db` param (dirty-state
+        recording, see this module's own docstring). Lazy import, same
+        reasoning as check_update()'s own `from main import app` below:
+        DatabaseUpdater is constructed before recommendations_router's own
+        rec_db is initialized (see main.py's startup sequence), so this
+        can only be resolved at call time, not at __init__. None (rec_db
+        not ready yet, or genuinely unavailable) is a normal, safe case --
+        apply_delta_chain simply skips dirty-state recording, same
+        fallback as any other failure there."""
+        try:
+            from recommendations_router import get_rec_db
+            return get_rec_db()
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Check for updates (GitHub API)
@@ -494,7 +522,7 @@ class DatabaseUpdater:
                 self._state.status = _DELTA_PHASE_STATUS[phase]
                 self._state.progress_pct = pct
 
-            result = await apply_delta_chain(chain, self._data_dir, progress_cb=_progress)
+            result = await apply_delta_chain(chain, self._data_dir, progress_cb=_progress, rec_db=self._get_rec_db_safe())
 
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 95
@@ -598,7 +626,7 @@ class DatabaseUpdater:
                     self._state.status = _DELTA_PHASE_STATUS[phase]
                     self._state.progress_pct = pct
 
-                result = await apply_delta_chain(delta_chain, self._data_dir, progress_cb=_progress)
+                result = await apply_delta_chain(delta_chain, self._data_dir, progress_cb=_progress, rec_db=self._get_rec_db_safe())
                 self._state.current_version = result.get("new_version", full_version)
 
             self._state.status = UpdateStatus.RELOADING

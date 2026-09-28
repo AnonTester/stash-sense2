@@ -109,7 +109,10 @@ import httpx
 import numpy as np
 from usearch.index import Index
 
-from export_db_to_json import export_face_yaw_json, export_faces_json, export_performers_json
+from export_db_to_json import (
+    _performer_universal_ids, export_face_yaw_json, export_faces_json, export_performers_json,
+)
+from recommendations_db import RecommendationsDB
 
 logger = logging.getLogger(__name__)
 
@@ -723,18 +726,43 @@ def apply_delta_db(
         return row[name] if name in row.keys() else None
 
     touched_performers: set[int] = set()
+    # Finer-grained parallel tracking for delta_scope.py's dirty-state
+    # capture (see _record_dirty_state, called from apply_delta_chain once
+    # the whole chain is applied) -- kept separate from touched_performers
+    # above (which _sync_face_count still uses unchanged) because a
+    # metadata-only performer edit and a real face-level change need
+    # different downstream treatment (cheap denormalized-field patch vs. a
+    # real rematch -- see DELTA_SCOPE_SCHEMA's own comment on `reason`).
+    face_level_touched_performer_ids: set[int] = set()
+    removed_performer_ids: set[int] = set()
+    metadata_only_performer_ids: set[int] = set()
+    # embedding_index -> (performer_id, vector bytes) for every upserted
+    # face this hop -- the Tier-3 "could this newly match a scene" delta
+    # index is built straight from these vectors (see delta_scope.py).
+    upserted_face_vectors: dict[int, tuple[int, bytes]] = {}
+    removed_embedding_indices: set[int] = set()
     upserted = removed = faces_added = faces_updated = faces_removed = 0
 
     for p in delta_conn.execute("SELECT * FROM performers"):
         if p["action"] == "removed":
+            # Resolved BEFORE _remove_performer runs (which deletes the
+            # stashbox_ids row this lookup depends on) -- its own return
+            # value is None for the common case (no other stashbox link
+            # remains, performer row fully deleted, nothing left to
+            # face-count-sync), which would otherwise silently drop every
+            # ordinary removal from dirty tracking entirely.
+            removed_pid = _get_performer_id(conn, p["endpoint"], p["stashbox_id"])
             pid = _remove_performer(conn, p)
             removed += 1
             if pid is not None:
                 touched_performers.add(pid)
+            if removed_pid is not None:
+                removed_performer_ids.add(removed_pid)
         else:
             pid = _upsert_performer(conn, p)
             upserted += 1
             touched_performers.add(pid)
+            metadata_only_performer_ids.add(pid)
         _tick()
 
     for f in delta_conn.execute("SELECT * FROM faces"):
@@ -752,6 +780,8 @@ def apply_delta_db(
             "embedding": f["embedding"],
         })
         touched_performers.add(performer_id)
+        face_level_touched_performer_ids.add(performer_id)
+        upserted_face_vectors[f["embedding_index"]] = (performer_id, f["embedding"])
         if is_new:
             faces_added += 1
         else:
@@ -766,6 +796,9 @@ def apply_delta_db(
         conn.execute("DELETE FROM faces WHERE embedding_index = ?", (idx,))
         if row is not None:
             touched_performers.add(row[0])
+            face_level_touched_performer_ids.add(row[0])
+        removed_embedding_indices.add(idx)
+        upserted_face_vectors.pop(idx, None)
         faces_removed += 1
         _tick()
 
@@ -778,6 +811,7 @@ def apply_delta_db(
         for p in delta_conn.execute("SELECT * FROM catalogue_performers"):
             _upsert_catalogue_performer(conn, p)
             touched_performers.add(p["id"])
+            metadata_only_performer_ids.add(p["id"])
             catalogue_upserted += 1
             _tick()
 
@@ -795,6 +829,8 @@ def apply_delta_db(
                 "embedding": f["embedding"],
             })
             touched_performers.add(f["performer_id"])
+            face_level_touched_performer_ids.add(f["performer_id"])
+            upserted_face_vectors[f["embedding_index"]] = (f["performer_id"], f["embedding"])
             if is_new:
                 catalogue_faces_added += 1
             else:
@@ -804,11 +840,14 @@ def apply_delta_db(
     # Fully-disabled catalogue performers (see _remove_catalogue_performer's
     # own docstring) -- deliberately last among the catalogue_* tables, and
     # deliberately not added to touched_performers: there's nothing left of
-    # them to face-count-sync.
+    # them to face-count-sync. Still recorded as removed for dirty-state
+    # purposes, though -- a scene can still show them as a stored candidate
+    # even though their faces are gone.
     catalogue_performers_removed = 0
     if catalogue_removals_present:
         for row in delta_conn.execute("SELECT * FROM catalogue_removed_performers"):
             _remove_catalogue_performer(conn, index, row["id"])
+            removed_performer_ids.add(row["id"])
             catalogue_performers_removed += 1
             _tick()
 
@@ -830,6 +869,13 @@ def apply_delta_db(
                 conn.execute("UPDATE faces SET performer_id = ? WHERE embedding_index = ?", (correct_pid, idx))
                 touched_performers.add(current[0])
                 touched_performers.add(correct_pid)
+                # Both the old and new owner's own candidate set changed
+                # (one lost a face, the other gained one) -- neither is a
+                # NEW vector though (it already existed, just re-owned),
+                # so this doesn't add to upserted_face_vectors, only to
+                # the identity-level (Tier 2) set.
+                face_level_touched_performer_ids.add(current[0])
+                face_level_touched_performer_ids.add(correct_pid)
                 owner_repairs_applied += 1
             _tick()
 
@@ -849,6 +895,15 @@ def apply_delta_db(
         "catalogue_faces_added": catalogue_faces_added, "catalogue_faces_updated": catalogue_faces_updated,
         "catalogue_performers_removed": catalogue_performers_removed,
         "face_owner_repairs_applied": owner_repairs_applied,
+        # Consumed by apply_delta_chain's own _record_dirty_state, once
+        # the whole chain is applied and faces.json/performers.json are
+        # regenerated -- see that function's docstring for why identity
+        # resolution happens there, not per-hop, in this function.
+        "face_level_touched_performer_ids": face_level_touched_performer_ids,
+        "removed_performer_ids": removed_performer_ids,
+        "metadata_only_performer_ids": metadata_only_performer_ids,
+        "upserted_face_vectors": upserted_face_vectors,
+        "removed_embedding_indices": removed_embedding_indices,
     }
 
 
@@ -904,9 +959,85 @@ def _rollback(data_dir: Path, backup_dir: Path) -> None:
             shutil.copy2(src, data_dir / fname)
 
 
+def _record_dirty_state(
+    rec_db: RecommendationsDB, conn: sqlite3.Connection, backup_dir: Path, *,
+    face_level_touched_performer_ids: set[int], removed_performer_ids: set[int],
+    metadata_only_performer_ids: set[int], upserted_face_vectors: dict[int, tuple[int, bytes]],
+    from_version: str, to_version: str,
+) -> None:
+    """Resolve every locally-touched performer_id from this whole chain
+    application into the universal_id(s) delta_scope.py actually keys its
+    invalidation off of, and record them into rec_db's dirty_* tables --
+    see DELTA_SCOPE_SCHEMA's own comment for the full shape/purpose.
+
+    Deliberately does NOT try to build universal_id straight from a delta
+    row's own endpoint/stashbox_id (e.g. "stashdb:<uuid>") -- a real
+    universal_id is "<endpoint-domain>:<stashbox_id>" (e.g.
+    "stashdb.org:<uuid>"), AND a performer linked to more than one
+    stashbox endpoint only ever gets ONE universal_id, chosen by
+    export_db_to_json.py's own endpoint-priority rule
+    (_ENDPOINT_PRIORITY_SQL) -- a delta touching that performer via their
+    *lower-priority* endpoint would resolve to the WRONG universal_id if
+    built by hand from that row alone. Reusing _performer_universal_ids
+    (the exact function that already decides this for faces.json/
+    performers.json) is the only way to get this right without
+    duplicating that priority logic a second time.
+
+    Runs `_performer_universal_ids` against both the CURRENT database
+    (`conn`, already updated) and the PRE-CHAIN backup copy
+    (`backup_dir/performers.db`, untouched since before the first hop) so
+    a removed performer/an identity that changed which endpoint "wins"
+    still resolves its OLD universal_id too -- a scene's stored
+    scene_fingerprint_matches row is keyed by whatever universal_id was
+    current when it was last matched, which for a removed/re-prioritized
+    performer is the OLD one, not the new one (if any).
+    """
+    old_conn = sqlite3.connect(f"file:{backup_dir / 'performers.db'}?mode=ro", uri=True)
+    try:
+        old_uids = _performer_universal_ids(old_conn)
+    finally:
+        old_conn.close()
+    new_uids = _performer_universal_ids(conn)
+
+    def _record_both(pid: int, reason: str) -> None:
+        old_uid, new_uid = old_uids.get(pid), new_uids.get(pid)
+        if old_uid:
+            rec_db.record_dirty_universal_id(old_uid, reason, to_version)
+        if new_uid and new_uid != old_uid:
+            rec_db.record_dirty_universal_id(new_uid, reason, to_version)
+
+    for pid in face_level_touched_performer_ids | removed_performer_ids:
+        _record_both(pid, "needs_rematch")
+    for pid in metadata_only_performer_ids:
+        _record_both(pid, "metadata_only")
+
+    for embedding_index, (performer_id, vector) in upserted_face_vectors.items():
+        uid = new_uids.get(performer_id)
+        if uid is None:
+            # Shouldn't happen -- an upserted face's owning performer was
+            # just written by this same chain, so it must resolve. Skip
+            # rather than crash the whole update over a dirty-tracking
+            # gap; Tier 2 (via face_level_touched_performer_ids above)
+            # still covers this performer's existing candidates either way.
+            logger.warning("Delta dirty-tracking: no universal_id for performer_id=%s (embedding_index=%s)",
+                            performer_id, embedding_index)
+            continue
+        rec_db.record_dirty_face_vector(embedding_index, uid, vector, to_version)
+
+    # The marker is the START of this chain (from_version), not its end --
+    # see this function's own docstring on why checking a scene sitting
+    # anywhere >= from_version against this call's dirty rows (which cover
+    # the whole from_version -> to_version span) is always safe, even
+    # though it's a superset of what that specific scene strictly needs.
+    # INSERT OR IGNORE means only the very first call to ever reach this
+    # (across this deployment's whole lifetime) actually sets it.
+    rec_db.set_dirty_tracking_marker_if_unset(from_version)
+
+
 async def apply_delta_chain(
     chain: list[dict[str, Any]], data_dir: Path,
     progress_cb: Optional[Callable[[str, int], None]] = None,
+    rec_db: Optional[RecommendationsDB] = None,
 ) -> dict[str, Any]:
     """Download, verify, and apply every hop in `chain` (oldest-to-newest),
     then regenerate faces.json/performers.json and write a new manifest.
@@ -922,6 +1053,15 @@ async def apply_delta_chain(
     caller (database_updater.py's _run_delta_update) maps `phase` onto
     the same UpdateStatus enum the full-zip download path already uses,
     so the two update paths report progress the same shape.
+
+    `rec_db`, if given, gets the whole chain's dirty-state recorded into
+    it once every hop is applied (see _record_dirty_state) -- the one
+    deliberate, narrow way this function touches stash_sense.db at all
+    (see database_updater.py's module docstring). None (the caller has no
+    initialized recommendations DB yet, e.g. very early startup) simply
+    skips that step -- delta_scope.py's own cold-start fallback already
+    treats "no dirty tracking recorded" as "don't trust it, rematch
+    everything," so skipping it here is always safe, never silently wrong.
     """
     if not chain:
         return {"applied_hops": 0}
@@ -936,6 +1076,17 @@ async def apply_delta_chain(
               "catalogue_faces_added": 0, "catalogue_faces_updated": 0,
               "catalogue_performers_removed": 0,
               "face_owner_repairs_applied": 0}
+
+    # Accumulated across every hop -- see apply_delta_db's own return dict
+    # comment. A face added then later removed within the same multi-hop
+    # chain nets out to "removed" (popped from upserted_face_vectors by
+    # apply_delta_db's own removed_faces loop each hop), so no special
+    # cross-hop reconciliation is needed here beyond a plain union/update.
+    face_level_touched_performer_ids: set[int] = set()
+    removed_performer_ids: set[int] = set()
+    metadata_only_performer_ids: set[int] = set()
+    upserted_face_vectors: dict[int, tuple[int, bytes]] = {}
+    removed_embedding_indices: set[int] = set()
 
     try:
         for i, hop in enumerate(chain):
@@ -998,6 +1149,13 @@ async def apply_delta_chain(
             )
             for k in totals:
                 totals[k] += hop_result[k]
+            face_level_touched_performer_ids |= hop_result["face_level_touched_performer_ids"]
+            removed_performer_ids |= hop_result["removed_performer_ids"]
+            metadata_only_performer_ids |= hop_result["metadata_only_performer_ids"]
+            upserted_face_vectors.update(hop_result["upserted_face_vectors"])
+            for idx in hop_result["removed_embedding_indices"]:
+                upserted_face_vectors.pop(idx, None)
+            removed_embedding_indices |= hop_result["removed_embedding_indices"]
             if progress_cb:
                 progress_cb("applying", 100)
 
@@ -1006,6 +1164,41 @@ async def apply_delta_chain(
             face_count = export_faces_json(conn, data_dir / "faces.json")
             performer_count = export_performers_json(conn, data_dir / "performers.json")
             export_face_yaw_json(conn, data_dir / "face_yaw.json")
+
+            if rec_db is not None:
+                try:
+                    _record_dirty_state(
+                        rec_db, conn, backup_dir,
+                        face_level_touched_performer_ids=face_level_touched_performer_ids,
+                        removed_performer_ids=removed_performer_ids,
+                        metadata_only_performer_ids=metadata_only_performer_ids - face_level_touched_performer_ids - removed_performer_ids,
+                        upserted_face_vectors=upserted_face_vectors,
+                        from_version=chain[0]["from_version"], to_version=chain[-1]["to_version"],
+                    )
+                except Exception:
+                    # Purely additive bookkeeping (see this function's own
+                    # docstring and database_updater.py's module docstring)
+                    # -- a failure here must never roll back an otherwise
+                    # correctly-applied delta chain. But a PARTIAL failure
+                    # (some universal_ids/vectors recorded, others not) is
+                    # dangerous if silently ignored: an already-set marker
+                    # from an earlier, fully-successful chain would make
+                    # delta_scope.py trust this chain's now-incomplete
+                    # dirty state as if it were complete, risking a false
+                    # "safe to bump" for a scene this chain actually did
+                    # affect. Push the marker forward past this chain's own
+                    # to_version instead (never backward) -- every scene
+                    # below it falls back to a real rematch until it
+                    # naturally catches up, the same safe-by-construction
+                    # fallback an unset marker already gets.
+                    logger.warning("Delta dirty-state recording failed (update itself still succeeded) "
+                                    "-- pushing dirty-tracking marker forward past %s as a precaution",
+                                    chain[-1]["to_version"], exc_info=True)
+                    try:
+                        rec_db.push_dirty_tracking_marker_forward(chain[-1]["to_version"])
+                    except Exception:
+                        logger.error("Could not push dirty-tracking marker forward either -- "
+                                      "delta scoping may be unsafe until this is investigated", exc_info=True)
         finally:
             conn.close()
 

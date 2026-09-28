@@ -113,6 +113,17 @@ _define("sprite_detection_enabled", "Use Sprite Tiles For Detection",
         "resuming an in-progress task after changing this takes effect on that resume.",
         "performance", SettingType.BOOL, fallback=True)
 
+_define("refresh_outdated_scoped", "Scope Refresh Outdated To Delta Changes",
+        "When a main-database update was applied as a small delta (not a full "
+        "re-download), limit Refresh Outdated and Face Recommendations' full scan "
+        "to scenes the delta could actually have affected, marking every other "
+        "outdated scene current without a real rematch. Falls back to rematching "
+        "everything on its own (same as turning this off) whenever that can't be "
+        "proven safe -- a fresh/never-updated install, a full-zip update, or a "
+        "gap in delta history. Turn off to always rematch every outdated scene, "
+        "the pre-existing behavior, e.g. while troubleshooting a suspected miss.",
+        "performance", SettingType.BOOL, fallback=True)
+
 # -- Rate Limits --
 _define("stash_api_rate", "Stash API Rate",
         "Maximum requests per second to local Stash instance",

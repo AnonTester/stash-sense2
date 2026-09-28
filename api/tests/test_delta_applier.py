@@ -371,3 +371,107 @@ class TestUpsertCatalogueFace:
         index = Index(ndim=DIM, metric="cos")
         index.load(str(tmp_path / "face_embeddings.usearch"))
         assert np.allclose(np.array(index[200]), new_vec, atol=2e-2)
+
+
+class TestDirtyStateTrackingFields:
+    """apply_delta_db's own return dict additions (face_level_touched_
+    performer_ids, removed_performer_ids, metadata_only_performer_ids,
+    upserted_face_vectors, removed_embedding_indices) -- what
+    apply_delta_chain's _record_dirty_state consumes to populate
+    RecommendationsDB's dirty_* tables. See test_delta_applier_dirty_state.py
+    for the universal_id resolution + full apply_delta_chain wiring on top
+    of this."""
+
+    def test_new_face_upsert_is_face_level_not_metadata_only(self, tmp_path):
+        _make_performers_db(tmp_path / "performers.db", faces=[])
+        conn = sqlite3.connect(tmp_path / "performers.db")
+        conn.execute("INSERT INTO performers (id, canonical_name) VALUES (1, 'p1')")
+        conn.execute("INSERT INTO stashbox_ids (performer_id, endpoint, stashbox_performer_id) VALUES (1, 'stashdb', 'perf-1')")
+        conn.commit()
+        conn.close()
+
+        vec = _vector(10)
+        _make_delta_db(tmp_path / "delta.db", faces=[{
+            "embedding_index": 100, "endpoint": "stashdb", "stashbox_id": "perf-1",
+            "image_url": "http://x/1.jpg", "quality_score": 0.9, "yaw": 0.0,
+            "gender": "FEMALE", "gender_confidence": 0.9, "estimated_age": 25, "image_sha256": "sha1",
+            "embedding": vec.tobytes(),
+        }])
+
+        result = apply_delta_db(tmp_path / "delta.db", tmp_path)
+
+        assert result["face_level_touched_performer_ids"] == {1}
+        assert result["metadata_only_performer_ids"] == set()
+        assert result["removed_performer_ids"] == set()
+        assert result["removed_embedding_indices"] == set()
+        assert set(result["upserted_face_vectors"]) == {100}
+        pid, vec_bytes = result["upserted_face_vectors"][100]
+        assert pid == 1
+        assert vec_bytes == vec.tobytes()
+
+    def test_removed_face_resolves_its_prior_owner_and_pops_any_pending_vector(self, tmp_path):
+        vec = _vector(11)
+        _make_performers_db(tmp_path / "performers.db", faces=[
+            (1, 1, 100, "http://x/1.jpg", "stashdb", 0.9, 0.0, None, None, None, None),
+        ])
+        _seed_usearch_index(tmp_path / "face_embeddings.usearch", {100: vec})
+        delta_path = tmp_path / "delta.db"
+        _make_delta_db(delta_path, faces=[])
+        conn = sqlite3.connect(delta_path)
+        conn.execute("INSERT INTO removed_faces (embedding_index, reason) VALUES (100, 'stale_image')")
+        conn.commit()
+        conn.close()
+
+        result = apply_delta_db(delta_path, tmp_path)
+
+        assert result["removed_embedding_indices"] == {100}
+        assert result["face_level_touched_performer_ids"] == {1}
+        assert 100 not in result["upserted_face_vectors"]
+
+    def test_performer_metadata_only_upsert_is_not_face_level(self, tmp_path):
+        _make_performers_db(tmp_path / "performers.db", faces=[])
+        conn = sqlite3.connect(tmp_path / "performers.db")
+        conn.execute("INSERT INTO performers (id, canonical_name) VALUES (1, 'Old Name')")
+        conn.execute("INSERT INTO stashbox_ids (performer_id, endpoint, stashbox_performer_id) VALUES (1, 'stashdb', 'perf-1')")
+        conn.commit()
+        conn.close()
+
+        delta_path = tmp_path / "delta.db"
+        _make_delta_db(delta_path, faces=[])
+        conn = sqlite3.connect(delta_path)
+        conn.execute(
+            "INSERT INTO performers (id, endpoint, stashbox_id, action, name) "
+            "VALUES (1, 'stashdb', 'perf-1', 'upsert', 'New Name')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = apply_delta_db(delta_path, tmp_path)
+
+        assert result["metadata_only_performer_ids"] == {1}
+        assert result["face_level_touched_performer_ids"] == set()
+        assert result["removed_performer_ids"] == set()
+
+    def test_performer_removed_is_tracked_separately_from_face_level(self, tmp_path):
+        _make_performers_db(tmp_path / "performers.db", faces=[])
+        conn = sqlite3.connect(tmp_path / "performers.db")
+        conn.execute("INSERT INTO performers (id, canonical_name) VALUES (1, 'Gone')")
+        conn.execute("INSERT INTO stashbox_ids (performer_id, endpoint, stashbox_performer_id) VALUES (1, 'stashdb', 'perf-1')")
+        conn.commit()
+        conn.close()
+
+        delta_path = tmp_path / "delta.db"
+        _make_delta_db(delta_path, faces=[])
+        conn = sqlite3.connect(delta_path)
+        conn.execute(
+            "INSERT INTO performers (id, endpoint, stashbox_id, action, name) "
+            "VALUES (1, 'stashdb', 'perf-1', 'removed', 'Gone')"
+        )
+        conn.commit()
+        conn.close()
+
+        result = apply_delta_db(delta_path, tmp_path)
+
+        assert result["removed_performer_ids"] == {1}
+        assert result["metadata_only_performer_ids"] == set()
+        assert result["face_level_touched_performer_ids"] == set()

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -79,6 +79,64 @@ SCENE_SIGNAL_CACHE_SCHEMA = """
         embedding BLOB NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_scene_tattoo_emb_scene ON scene_tattoo_embeddings(stash_scene_id);
+"""
+
+# Delta-scoped Refresh Outdated / Face Recommendations (see delta_scope.py
+# and delta_applier.py's apply_delta_chain). Populated as a *side effect*
+# of applying a delta package -- the only thing this database ever records
+# about a main-database update, and purely additive bookkeeping, not
+# recommendation/fingerprint content itself (see database_updater.py's own
+# "stash_sense.db is never touched" guarantee for why that distinction
+# matters).
+#
+# dirty_universal_ids: every universal_id (see scene_matcher.match_universal_id)
+# whose underlying performer/face data changed since it was last consumed.
+# `reason` is 'needs_rematch' (a face was added/changed/removed for this
+# identity, or the performer itself was removed -- any scene currently
+# showing this identity as a candidate must be re-matched) or
+# 'metadata_only' (a performer field changed with no face change -- the
+# denormalized name/country/image_url already stored in
+# scene_fingerprint_matches/recommendations can just be patched in place,
+# no rematch needed). A universal_id can appear under both reasons across
+# a multi-hop chain; 'needs_rematch' always wins where both matter (see
+# delta_applier._record_dirty_state).
+#
+# dirty_face_vectors: every NEW or CHANGED face embedding since it was
+# last consumed, keyed by embedding_index -- the small "delta index"
+# delta_scope.py checks already-cached scene face embeddings against to
+# decide whether a delta could plausibly introduce a brand new candidate
+# for a scene that doesn't currently reference any dirty universal_id at
+# all. Deliberately excludes removed faces (nothing new to check a scene
+# against for those; a removal only ever needs dirty_universal_ids).
+#
+# dirty_tracking_state: single-row marker recording the main-database
+# version from which dirty_universal_ids/dirty_face_vectors have been
+# CONTINUOUSLY populated (set once, the first time a delta is applied
+# after this feature exists -- never overwritten after that). A scene
+# whose own stored db_version predates this marker was last matched
+# before tracking began, so the dirty tables cannot possibly hold its
+# full history -- delta_scope.py falls back to the old always-rematch
+# behavior for exactly those scenes, self-healing after one pass since a
+# rematch (real or bumped) always advances db_version to current.
+DELTA_SCOPE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS dirty_universal_ids (
+        universal_id TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        since_version TEXT NOT NULL,
+        PRIMARY KEY (universal_id, reason)
+    );
+
+    CREATE TABLE IF NOT EXISTS dirty_face_vectors (
+        embedding_index INTEGER PRIMARY KEY,
+        universal_id TEXT NOT NULL,
+        embedding BLOB NOT NULL,
+        since_version TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS dirty_tracking_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
 """
 
 
@@ -397,6 +455,7 @@ class RecommendationsDB:
             );
         """)
         conn.executescript(SCENE_SIGNAL_CACHE_SCHEMA)
+        conn.executescript(DELTA_SCOPE_SCHEMA)
 
     def _migrate_schema(self, conn: sqlite3.Connection, from_version: int):
         """Migrate schema from older version."""
@@ -828,6 +887,17 @@ class RecommendationsDB:
             if cols and "original_name" not in cols:
                 conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN original_name TEXT")
             conn.execute("UPDATE schema_version SET version = 20")
+
+        if from_version < 21:
+            # Delta-scoped Refresh Outdated / Face Recommendations -- see
+            # DELTA_SCOPE_SCHEMA's own comment above for what these three
+            # tables hold. IF NOT EXISTS guards each CREATE (same reasoning
+            # as SCENE_SIGNAL_CACHE_SCHEMA being shared verbatim between
+            # _create_schema and here): a test fixture that builds a full
+            # current-schema db then rolls schema_version back can already
+            # have them.
+            conn.executescript(DELTA_SCOPE_SCHEMA)
+            conn.execute("UPDATE schema_version SET version = 21")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2280,6 +2350,158 @@ class RecommendationsDB:
                     scene_ids
                 )
             return cursor.rowcount
+
+    # ------------------------------------------------------------------
+    # Delta-scoped Refresh Outdated / Face Recommendations (see
+    # DELTA_SCOPE_SCHEMA's own comment and delta_scope.py). Writers here
+    # are delta_applier.py (as a side effect of applying a delta) and the
+    # bump path below; readers/drainers are delta_scope.py, consumed by
+    # fingerprint_generator.py and analyzers/scene_face_match.py.
+    # ------------------------------------------------------------------
+
+    def record_dirty_universal_id(self, universal_id: str, reason: str, since_version: str) -> None:
+        """Mark `universal_id` as changed as of `since_version`. Idempotent
+        across a multi-hop delta chain (INSERT OR IGNORE) -- the first hop
+        to touch an identity wins the since_version stamp, which is
+        correct: it's been dirty since that point regardless of how many
+        later hops also touch it."""
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO dirty_universal_ids (universal_id, reason, since_version) VALUES (?, ?, ?)",
+                (universal_id, reason, since_version),
+            )
+
+    def record_dirty_face_vector(self, embedding_index: int, universal_id: str, embedding: bytes, since_version: str) -> None:
+        """Record `embedding_index`'s current vector as new/changed as of
+        `since_version`. REPLACE (not IGNORE) -- if the same index is
+        touched more than once across a chain, only the final vector
+        matters for the Tier-3 "could this newly match a scene" check."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO dirty_face_vectors (embedding_index, universal_id, embedding, since_version)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(embedding_index) DO UPDATE SET
+                    universal_id = excluded.universal_id,
+                    embedding = excluded.embedding,
+                    since_version = excluded.since_version
+                """,
+                (embedding_index, universal_id, embedding, since_version),
+            )
+
+    def get_dirty_universal_ids(self, reasons: Optional[list[str]] = None) -> list[str]:
+        """Distinct universal_ids currently marked dirty, optionally
+        filtered to specific reasons (see DELTA_SCOPE_SCHEMA's comment)."""
+        with self._connection() as conn:
+            if reasons is None:
+                rows = conn.execute("SELECT DISTINCT universal_id FROM dirty_universal_ids").fetchall()
+            else:
+                placeholders = ",".join("?" * len(reasons))
+                rows = conn.execute(
+                    f"SELECT DISTINCT universal_id FROM dirty_universal_ids WHERE reason IN ({placeholders})",
+                    reasons,
+                ).fetchall()
+            return [row[0] for row in rows]
+
+    def get_dirty_face_vectors(self) -> list[dict]:
+        """Every currently-dirty (embedding_index, universal_id, embedding
+        bytes) row -- the small "delta index" delta_scope.py matches
+        already-cached scene embeddings against."""
+        with self._connection() as conn:
+            rows = conn.execute("SELECT embedding_index, universal_id, embedding FROM dirty_face_vectors").fetchall()
+            return [dict(row) for row in rows]
+
+    def clear_dirty_state(self, up_to_version: str) -> None:
+        """Drop every dirty_universal_ids/dirty_face_vectors row with
+        since_version <= up_to_version -- called after a full Refresh
+        Outdated pass completes cleanly at that version, having consumed
+        everything up to it. Plain string comparison is correct here: main
+        database versions are zero-padded YYYY.MM.DD release tags (see
+        stash-sense2-data-gen's build/manifest.py), which sort
+        lexicographically in chronological order -- unlike the semver
+        sidecar/plugin versions elsewhere in this codebase, this never
+        needs release_info.compare_versions()."""
+        with self._connection() as conn:
+            conn.execute("DELETE FROM dirty_universal_ids WHERE since_version <= ?", (up_to_version,))
+            conn.execute("DELETE FROM dirty_face_vectors WHERE since_version <= ?", (up_to_version,))
+
+    def get_dirty_tracking_marker(self) -> Optional[str]:
+        """The main-database version dirty tracking has been continuously
+        active since, or None if no delta has ever been applied under this
+        feature's own capture code yet (see DELTA_SCOPE_SCHEMA's comment)."""
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT value FROM dirty_tracking_state WHERE key = 'tracking_active_since_version'"
+            ).fetchone()
+            return row[0] if row else None
+
+    def set_dirty_tracking_marker_if_unset(self, version: str) -> None:
+        """Stamp the tracking-active-since marker the first time it's ever
+        written -- never overwritten afterward (INSERT OR IGNORE)."""
+        with self._connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO dirty_tracking_state (key, value) VALUES ('tracking_active_since_version', ?)",
+                (version,),
+            )
+
+    def push_dirty_tracking_marker_forward(self, version: str) -> None:
+        """Move the tracking-active-since marker forward to `version` if
+        it's currently unset or older -- never backward. Used only when a
+        delta chain's own dirty-state recording fails partway (see
+        delta_applier.apply_delta_chain's own except block around
+        _record_dirty_state): that chain's changes are now of UNKNOWN
+        dirty status, so every scene whose db_version predates `version`
+        must stop being trusted for the bump-without-rematch path until it
+        naturally catches up via a real rematch -- the same safe fallback
+        delta_scope.py already applies to a scene older than the marker
+        for any other reason. Plain string comparison is correct for the
+        same reason clear_dirty_state's docstring explains."""
+        with self._connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO dirty_tracking_state (key, value) VALUES ('tracking_active_since_version', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                WHERE excluded.value > dirty_tracking_state.value
+                """,
+                (version,),
+            )
+
+    def get_scene_ids_with_dirty_matches(self, universal_ids: list[str]) -> set[int]:
+        """Every stash_scene_id whose CURRENT scene_fingerprint_matches
+        already lists one of `universal_ids` as a candidate -- delta_scope.py's
+        Tier 2 (identity) check: a scene's own stored candidates reference
+        a performer/face the delta touched, so it needs a real rematch
+        regardless of what Tier 3's vector check finds."""
+        if not universal_ids:
+            return set()
+        scene_ids: set[int] = set()
+        with self._connection() as conn:
+            for chunk in (universal_ids[i:i + 400] for i in range(0, len(universal_ids), 400)):
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT sf.stash_scene_id
+                    FROM scene_fingerprint_matches sfm
+                    JOIN scene_fingerprints sf ON sf.id = sfm.fingerprint_id
+                    WHERE sfm.universal_id IN ({placeholders})
+                    """,
+                    chunk,
+                ).fetchall()
+                scene_ids.update(row[0] for row in rows)
+        return scene_ids
+
+    def bump_fingerprint_db_version(self, stash_scene_id: int, db_version: str) -> None:
+        """Mark a scene's existing fingerprint current at `db_version`
+        without touching its stored matches -- the "safe to bump" outcome
+        of delta_scope.scenes_needing_rematch: this delta provably cannot
+        have changed anything this scene's stored candidates depend on, so
+        there's nothing to recompute, only the version stamp itself is
+        stale."""
+        with self._connection() as conn:
+            conn.execute(
+                "UPDATE scene_fingerprints SET db_version = ?, updated_at = datetime('now') WHERE stash_scene_id = ?",
+                (db_version, stash_scene_id),
+            )
 
     def reset_scene_fingerprints_with_backup(self) -> dict:
         """Back up scene_fingerprints + scene_fingerprint_matches to

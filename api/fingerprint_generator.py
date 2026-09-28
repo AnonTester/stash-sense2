@@ -273,17 +273,55 @@ class SceneFingerprintGenerator:
             use_sprite = True
         logger.warning("Fingerprint generation: sprite_detection_enabled=%s", use_sprite)
 
+        # Same once-per-run/re-read-on-resume granularity as use_sprite above.
+        try:
+            from settings import get_setting
+            scoped_refresh = bool(get_setting("refresh_outdated_scoped"))
+        except (RuntimeError, KeyError):
+            scoped_refresh = True
+
         try:
             # Total scene count (only drives the paging below)
             _, total = await self._get_scenes_with_retry(limit=1, offset=0)
+
+            all_scene_ids = await self._with_stash_retry(self.stash.get_all_scene_ids)
+
+            # Delta-scoped Refresh Outdated (see delta_scope.py): among the
+            # scenes that are db_version-outdated but already have a
+            # COMPLETE fingerprint, find the ones a recent delta could not
+            # possibly have affected and mark them current in place --
+            # skipped entirely below (never enters pending_ids/_needs_work
+            # for them), instead of every outdated scene paying for a real
+            # rematch just because the version number moved. Only applies
+            # to refresh_outdated=True runs -- Fingerprint Missing
+            # (refresh_outdated=False) never considers outdated-but-complete
+            # scenes in the first place, so there's nothing to scope there.
+            bumped_ids: set[int] = set()
+            if refresh_outdated and scoped_refresh:
+                all_scene_ids_set = set(all_scene_ids)
+                outdated_complete = [
+                    fp for fp in self.rec_db.get_all_scene_fingerprints(status="complete")
+                    if fp["stash_scene_id"] in all_scene_ids_set and fp.get("db_version") != self.db_version
+                ]
+                if outdated_complete:
+                    from delta_scope import scenes_needing_rematch
+                    must_rematch, safe_to_bump = scenes_needing_rematch(self.rec_db, outdated_complete)
+                    for sid in safe_to_bump:
+                        self.rec_db.bump_fingerprint_db_version(sid, self.db_version)
+                    bumped_ids = safe_to_bump
+                    logger.warning(
+                        "Refresh Outdated: delta-scoped %d/%d outdated scene(s) marked current without "
+                        "a rematch (%d still need one), db_version=%s",
+                        len(safe_to_bump), len(outdated_complete), len(must_rematch), self.db_version,
+                    )
 
             # Decide up front which scenes actually need fingerprinting, so progress and its ETA
             # are measured against only those (25 missing -> "x of 25") instead of crawling every
             # scene in the library and only slowing down once it reaches the real work. IDs only,
             # one request; skipped scenes are then passed over without counting as progress.
-            all_scene_ids = await self._with_stash_retry(self.stash.get_all_scene_ids)
             pending_ids = {
-                sid for sid in all_scene_ids if self._needs_work(sid, refresh_outdated, skip_errors)
+                sid for sid in all_scene_ids
+                if sid not in bumped_ids and self._needs_work(sid, refresh_outdated, skip_errors)
             }
             self._remaining_ids = set(pending_ids)
             # Scenes that need nothing this run (already fingerprinted with the current version, or
@@ -498,6 +536,19 @@ class SceneFingerprintGenerator:
                     self._progress.failed,
                     self.db_version,
                 )
+                # A clean (non-paused) refresh_outdated pass with scoping
+                # on means every currently-complete scene is now either
+                # freshly rematched or provably safe-to-bump at
+                # self.db_version -- nothing depends on dirty tracking
+                # older than that anymore, so it's safe to drain (see
+                # delta_scope.finalize_dirty_state's own docstring). Never
+                # drains when scoping was off this run (bumped_ids/the
+                # scoping check above never ran, so nothing was actually
+                # consumed) or on Fingerprint Missing runs (refresh_outdated
+                # =False never looks at dirty state at all).
+                if refresh_outdated and scoped_refresh:
+                    from delta_scope import finalize_dirty_state
+                    finalize_dirty_state(self.rec_db, self.db_version)
 
         except Exception as e:
             self._status = GeneratorStatus.ERROR

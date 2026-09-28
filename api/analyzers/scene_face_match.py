@@ -183,8 +183,38 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
         # use_sprite on that rematch itself is also gated on the setting:
         # a full scan still always rematches, just without requesting new
         # sprite coverage when the setting is off.
+        def _rematch_spec(scene_id: str, scene: dict) -> "SceneBatchSpec":
+            file_info = (scene.get("files") or [{}])[0]
+            return SceneBatchSpec(
+                scene_id=scene_id,
+                width=file_info.get("width"),
+                height=file_info.get("height"),
+                request=SceneIdentifyRequest(
+                    scene_id=scene_id,
+                    matching_mode="hybrid",
+                    top_k=5,
+                    use_cache=True,
+                    use_sprite=use_sprite,
+                ),
+            )
+
+        # Same once-per-run setting read as use_sprite above.
+        try:
+            from settings import get_setting
+            scoped_refresh = bool(get_setting("refresh_outdated_scoped"))
+        except (RuntimeError, KeyError):
+            scoped_refresh = True
+
         stored_scenes: list[tuple[str, dict]] = []  # (scene_id, fingerprint row)
         rematch_specs = []
+        # Delta-scoped full scan (see delta_scope.py): a full scan's own
+        # "always rematch" scenes are collected here first instead of
+        # going straight to rematch_specs, so scenes_needing_rematch can
+        # split off the ones a recent delta provably couldn't have
+        # affected -- served from stored data below instead, same cheap
+        # path incremental scans already use for sprite-covered scenes.
+        full_scan_fp_candidates: list[dict] = []
+        full_scan_scene_by_id: dict[str, dict] = {}
         for scene in scenes_to_scan:
             scene_id = str(scene["id"])
             fp = self.rec_db.get_scene_fingerprint(int(scene_id))
@@ -196,19 +226,30 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
             if incremental and (fp.get("used_sprite") or not use_sprite):
                 stored_scenes.append((scene_id, fp))
                 continue
-            file_info = (scene.get("files") or [{}])[0]
-            rematch_specs.append(SceneBatchSpec(
-                scene_id=scene_id,
-                width=file_info.get("width"),
-                height=file_info.get("height"),
-                request=SceneIdentifyRequest(
-                    scene_id=scene_id,
-                    matching_mode="hybrid",
-                    top_k=5,
-                    use_cache=True,
-                    use_sprite=use_sprite,
-                ),
-            ))
+            if not incremental and scoped_refresh:
+                # stash_scene_id is set explicitly rather than trusted from
+                # fp itself -- real scene_fingerprints rows always carry it
+                # (a plain `SELECT *`), but this loop already has the
+                # authoritative int scene id in hand regardless.
+                full_scan_fp_candidates.append({**fp, "stash_scene_id": int(scene["id"])})
+                full_scan_scene_by_id[scene_id] = scene
+                continue
+            rematch_specs.append(_rematch_spec(scene_id, scene))
+
+        if full_scan_fp_candidates:
+            from delta_scope import scenes_needing_rematch
+            must_rematch, safe = scenes_needing_rematch(self.rec_db, full_scan_fp_candidates)
+            for fp in full_scan_fp_candidates:
+                scene_id = str(fp["stash_scene_id"])
+                if fp["stash_scene_id"] in safe:
+                    stored_scenes.append((scene_id, fp))
+                else:
+                    rematch_specs.append(_rematch_spec(scene_id, full_scan_scene_by_id[scene_id]))
+            logger.warning(
+                "[scene_face_match] Full scan: delta-scoped %d/%d candidate scene(s) served from "
+                "stored data without a rematch (%d still need one)",
+                len(safe), len(full_scan_fp_candidates), len(must_rematch),
+            )
 
         if skipped_no_data:
             logger.warning(

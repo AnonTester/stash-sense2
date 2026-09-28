@@ -1,5 +1,16 @@
 ## 2026-09-28
 
+### 0.38.0 (sidecar)
+- Improvement: Refresh Outdated and Face Recommendations' full scan now
+  scope themselves to what a recently-applied delta update actually
+  touched, instead of rematching every db_version-outdated scene
+  unconditionally -- a scene a delta provably couldn't have affected is
+  marked current (or served from stored data) without a real rematch.
+  Falls back to the previous always-rematch behavior on a fresh/never-
+  updated install, after a full-zip update, or if this can't be proven
+  safe; a new "Scope Refresh Outdated To Delta Changes" setting (on by
+  default) can also turn it off by hand.
+
 ### 0.28.9 (plugin)
 - Fix: Operations' Queue section now lists pending jobs in run order
   (oldest queued first), not newest-first -- it was implying a just-added
