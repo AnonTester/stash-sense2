@@ -162,6 +162,7 @@ def save_scene_fingerprint(
                     "profile_url": match.profile_url,
                     "top_timestamps_sec": match.top_timestamps_sec,
                     "original_name": getattr(match, "original_name", None),
+                    "top_timestamp_boxes": match.top_timestamp_boxes,
                 })
         rec_db.replace_fingerprint_matches(fingerprint_id, match_rows)
 
@@ -729,6 +730,7 @@ def _scene_face_match_candidate(rec: Recommendation) -> dict[str, Any]:
         "catalogue_url": details.get("catalogue_url"),
         "profile_url": details.get("profile_url"),
         "top_timestamps_sec": details.get("top_timestamps_sec") or [],
+        "top_timestamp_boxes": details.get("top_timestamp_boxes") or [],
         "status": rec.status,
         "resolution_action": rec.resolution_action,
         # Only meaningful for a dismissed row -- dismiss_recommendation()
@@ -1986,6 +1988,7 @@ def _match_row_to_response_dict(row: dict) -> dict:
         "catalogue_url": row["catalogue_url"],
         "profile_url": row["profile_url"],
         "top_timestamps_sec": row["top_timestamps_sec"],
+        "top_timestamp_boxes": row.get("top_timestamp_boxes") or [],
     }
 
 

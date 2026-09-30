@@ -465,6 +465,24 @@ def aggregate_matches(
             ...) rather than sharing one sentinel, specifically so they can
             resolve real per-face timestamps here too -- see
             identification_router.py's _process_sprite_frames.
+
+            Each resolved timestamp also gets a same-index top_timestamp_boxes
+            entry (the matched face's own bbox on that frame, for a "show me
+            where" overlay next to the jump button) -- but ONLY for a real
+            extracted video frame (frame_idx >= 0; every sprite/screenshot
+            frame_idx is negative, see above), and only when the winning
+            detection's bbox has no in-plane rotation correction applied
+            (bbox["rotation_applied"] == 0.0). A sprite-tile bbox is in that
+            tile's own small, un-persisted pixel space (not the video's), and
+            a rotation-corrected bbox is relative to a rotated+expanded
+            canvas, not the original frame -- neither can be drawn correctly
+            on the plain <video> element, so both are silently omitted
+            (None) rather than drawn wrong. Video-frame bboxes need no
+            stored resolution to scale correctly: frames are extracted at
+            the source video's own native resolution (FrameExtractionConfig
+            never sets output_width/height for a real identify call), the
+            same pixel space the browser's own video.videoWidth/videoHeight
+            already report.
         performer_link_index: see _link_key -- tallies linked (same real
             person, different catalog record) matches together instead of
             as separate candidates.
@@ -484,14 +502,14 @@ def aggregate_matches(
     # linked-group id (see _link_key) rather than its raw stashdb_id, so a
     # linked duplicate doesn't fork into a second entry here.
     match_scores: dict[str, list[float]] = defaultdict(list)
-    match_frames: dict[str, list[tuple[int, float]]] = defaultdict(list)
+    match_frames: dict[str, list[tuple[int, float, "DetectedFace"]]] = defaultdict(list)
     match_candidates: dict[str, list[PerformerMatch]] = defaultdict(list)
 
     for frame_idx, result in cluster:
         for match in result.matches:
             key = _canonical_identity(match, performer_link_index)
             match_scores[key].append(match.combined_score)
-            match_frames[key].append((frame_idx, match.combined_score))
+            match_frames[key].append((frame_idx, match.combined_score, result.face))
             match_candidates[key].append(match)
 
     # Rank (and display) by: the best single frame's distance, with a
@@ -539,20 +557,49 @@ def aggregate_matches(
         )
 
         top_timestamps_sec: list[float] = []
+        top_timestamp_boxes: list[Optional[dict]] = []
         if frame_timestamps:
             best_frames = sorted(match_frames[link_key], key=lambda fs: fs[1])[:4]
-            timestamps = {
-                frame_timestamps[frame_idx]
-                for frame_idx, _ in best_frames
-                if frame_idx in frame_timestamps
-            }
-            top_timestamps_sec = sorted(timestamps)
+            # Best-scoring frame for a given timestamp wins its bbox slot --
+            # ts_to_bbox is built in best_frames' own (already-sorted-by-
+            # score) order, and a later, worse-scoring frame that happens to
+            # resolve to the same timestamp never overwrites it (`continue`
+            # below skips any timestamp already present as a key, and dict
+            # key presence, not truthiness, is what's checked -- an earlier
+            # frame correctly resolving to bbox=None still blocks a later,
+            # worse one from filling it in).
+            ts_to_bbox: dict[float, Optional[dict]] = {}
+            for frame_idx, _score, face in best_frames:
+                if frame_idx not in frame_timestamps:
+                    continue
+                ts = frame_timestamps[frame_idx]
+                if ts in ts_to_bbox:
+                    continue
+                resolved_bbox = None
+                if frame_idx >= 0 and face.bbox.get("rotation_applied", 0.0) == 0.0:
+                    # Plain dict, not a FaceBox instance -- this module has
+                    # no Pydantic/identification_router dependency (see the
+                    # lazy _match_to_response import above, which exists to
+                    # avoid a circular import), and doesn't need one: the
+                    # key names already match FaceBox's own field names, so
+                    # Pydantic validates/coerces this dict into a real
+                    # FaceBox automatically at PerformerMatchResponse
+                    # construction time, in identification_router.py.
+                    resolved_bbox = {
+                        "x": face.bbox["x"], "y": face.bbox["y"],
+                        "width": face.bbox["w"], "height": face.bbox["h"],
+                        "confidence": face.confidence,
+                    }
+                ts_to_bbox[ts] = resolved_bbox
+            top_timestamps_sec = sorted(ts_to_bbox)
+            top_timestamp_boxes = [ts_to_bbox[t] for t in top_timestamps_sec]
 
         response = _match_to_response(
             match,
             confidence=_distance_to_confidence(min_score),
             distance=min_score,
             top_timestamps_sec=top_timestamps_sec,
+            top_timestamp_boxes=top_timestamp_boxes,
         )
         aggregated.append((response, weighted_score))
 
@@ -1025,6 +1072,7 @@ def hybrid_matching(
                 "distance": aggregated[0].distance,
                 "match": aggregated[0],
                 "top_timestamps_sec": aggregated[0].top_timestamps_sec,
+                "top_timestamp_boxes": aggregated[0].top_timestamp_boxes,
             })
 
     cluster_by_id = {p["stashdb_id"]: p for p in cluster_persons}
@@ -1082,6 +1130,7 @@ def hybrid_matching(
             # both methods doesn't lose jump-to-frame data just because
             # frequency's match object was preferred above.
             "top_timestamps_sec": cluster_result["top_timestamps_sec"] if cluster_result else [],
+            "top_timestamp_boxes": cluster_result["top_timestamp_boxes"] if cluster_result else [],
         })
 
     # Sort by hybrid score (higher is better)
@@ -1107,6 +1156,7 @@ def hybrid_matching(
             confidence=_distance_to_confidence(p["distance"]),
             distance=p["distance"],
             top_timestamps_sec=p["top_timestamps_sec"],
+            top_timestamp_boxes=p["top_timestamp_boxes"],
         )
         persons.append(PersonResult(
             person_id=i,

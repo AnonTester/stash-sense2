@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -344,6 +344,7 @@ class RecommendationsDB:
                 profile_url TEXT,
                 top_timestamps_sec TEXT,
                 original_name TEXT,
+                top_boxes_json TEXT,
                 UNIQUE(fingerprint_id, person_id, match_rank)
             );
             CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
@@ -898,6 +899,20 @@ class RecommendationsDB:
             # have them.
             conn.executescript(DELTA_SCOPE_SCHEMA)
             conn.execute("UPDATE schema_version SET version = 21")
+
+        if from_version < 22:
+            # top_boxes_json: same index/order as top_timestamps_sec (a
+            # JSON list of {x,y,width,height,confidence} dicts, or nulls for
+            # an entry with no drawable bbox -- see aggregate_matches' own
+            # docstring in scene_matcher.py) -- the matched face's own box
+            # on that timestamp's frame, for a "show me where" overlay next
+            # to the scene player's jump-to-frame buttons. Purely additive:
+            # an already-cached row with this column NULL just shows jump
+            # buttons with no overlay, same as it did before this existed.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_fingerprint_matches)")}
+            if cols and "top_boxes_json" not in cols:
+                conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN top_boxes_json TEXT")
+            conn.execute("UPDATE schema_version SET version = 22")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2040,7 +2055,11 @@ class RecommendationsDB:
         distance, country, image_url, endpoint, already_tagged (bool),
         local_performer_id, source, catalogue_url, profile_url,
         top_timestamps_sec (list[float], stored as JSON), original_name
-        (set only when prefer_western_names swapped the stored name).
+        (set only when prefer_western_names swapped the stored name),
+        top_timestamp_boxes (same length/order as top_timestamps_sec, each
+        entry a {x,y,width,height,confidence} dict or None -- see
+        aggregate_matches' own docstring in scene_matcher.py -- stored as
+        JSON in top_boxes_json).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
@@ -2050,8 +2069,9 @@ class RecommendationsDB:
                     fingerprint_id, person_id, frame_count, match_rank, is_best_match,
                     universal_id, stashdb_id, name, confidence, distance, country,
                     image_url, endpoint, already_tagged, local_performer_id,
-                    source, catalogue_url, profile_url, top_timestamps_sec, original_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source, catalogue_url, profile_url, top_timestamps_sec, original_name,
+                    top_boxes_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -2062,6 +2082,7 @@ class RecommendationsDB:
                         m.get("local_performer_id"), m.get("source"), m.get("catalogue_url"),
                         m.get("profile_url"), json.dumps(m.get("top_timestamps_sec") or []),
                         m.get("original_name"),
+                        json.dumps(m.get("top_timestamp_boxes") or []),
                     )
                     for m in matches
                 ],
@@ -2080,6 +2101,7 @@ class RecommendationsDB:
             for row in rows:
                 d = dict(row)
                 d["top_timestamps_sec"] = json.loads(d["top_timestamps_sec"]) if d.get("top_timestamps_sec") else []
+                d["top_timestamp_boxes"] = json.loads(d["top_boxes_json"]) if d.get("top_boxes_json") else []
                 d["is_best_match"] = bool(d["is_best_match"])
                 d["already_tagged"] = bool(d["already_tagged"])
                 results.append(d)

@@ -1,3 +1,19 @@
+## 2026-09-30
+
+### 0.29.0 (plugin)
+- Feature: Face Recommendations' jump-to-frame buttons now draw the
+  matched face's own bounding box over the seeked frame, when available.
+- Fix: jump-to-frame buttons now only seek and pause on that frame,
+  instead of also starting playback.
+
+### 0.39.0 (sidecar)
+- Feature: scene identification now resolves a matched face's own bbox
+  alongside each jump-to-frame timestamp (top_timestamp_boxes), for the
+  plugin's new frame overlay. Only for a real extracted video frame with
+  no in-plane rotation correction applied -- sprite-tile and rotated
+  detections have no recoverable video-native coordinates and are
+  omitted rather than drawn wrong.
+
 ## 2026-09-28
 
 ### 0.28.10 (plugin)

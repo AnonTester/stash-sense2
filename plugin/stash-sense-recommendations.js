@@ -6535,9 +6535,17 @@
     // whether it was a mistake) instead of the pending-only Dismiss button.
     function renderCandidate(c, forDismissedSection = false) {
       const isCandidatePending = c.status === 'pending';
-      const jumpButtons = (c.top_timestamps_sec || []).slice(0, 4).map(t => (
-        `<button type="button" class="ss-btn ss-btn-tiny ss-sfm-jump-btn" data-time="${t}">${formatDuration(t)}</button>`
-      )).join('');
+      const jumpButtons = (c.top_timestamps_sec || []).slice(0, 4).map((t, i) => {
+        // top_timestamp_boxes[i] (same index/order as top_timestamps_sec,
+        // see identification_router.py's PerformerMatchResponse) is the
+        // matched face's own bbox on that frame, or null when unavailable
+        // (a sprite-sourced or rotation-corrected detection -- see that
+        // field's own docstring) -- omit data-bbox entirely rather than
+        // emit a null/empty one the click handler would have to re-check.
+        const box = (c.top_timestamp_boxes || [])[i];
+        const boxAttr = box ? ` data-bbox='${JSON.stringify(box)}'` : '';
+        return `<button type="button" class="ss-btn ss-btn-tiny ss-sfm-jump-btn" data-time="${t}"${boxAttr}>${formatDuration(t)}</button>`;
+      }).join('');
       const linksHtml = sceneFaceMatchLinksHtml(c);
       // Don't pre-select a weak match: 5 or fewer frames, or under 10%
       // confidence, needs a deliberate look before it gets added to a scene.
@@ -6606,7 +6614,10 @@
         </div>
 
         ${videoSourcesHtml
-          ? `<video class="ss-sfm-video" controls preload="metadata"${posterUrl ? ` poster="${escapeHtml(posterUrl)}"` : ''}>${videoSourcesHtml}</video>`
+          ? `<div class="ss-sfm-video-wrap">
+               <video class="ss-sfm-video" controls preload="metadata"${posterUrl ? ` poster="${escapeHtml(posterUrl)}"` : ''}>${videoSourcesHtml}</video>
+               <div class="ss-sfm-bbox-overlay" hidden></div>
+             </div>`
           : '<div class="ss-no-image ss-sfm-no-video">No video preview available</div>'
         }
 
@@ -6638,13 +6649,70 @@
     `;
 
     const videoEl = container.querySelector('.ss-sfm-video');
+    const bboxOverlay = container.querySelector('.ss-sfm-bbox-overlay');
+    let bboxClickedTime = null;
+
+    function hideBboxOverlay() {
+      if (!bboxOverlay) return;
+      bboxOverlay.hidden = true;
+      bboxClickedTime = null;
+    }
+
+    if (videoEl && bboxOverlay) {
+      // The box is only valid for the exact instant it was identified on --
+      // once the reviewer scrubs or plays away from that frame (a little
+      // slack for the currentTime assignment's own seek granularity, not a
+      // real tolerance for "close enough"), it no longer corresponds to
+      // whatever's now showing, so hide it rather than leave a stale box
+      // sitting over the wrong frame.
+      videoEl.addEventListener('timeupdate', () => {
+        if (bboxClickedTime !== null && Math.abs(videoEl.currentTime - bboxClickedTime) > 0.5) {
+          hideBboxOverlay();
+        }
+      });
+    }
+
     container.querySelectorAll('.ss-sfm-jump-btn').forEach(btn => {
       btn.addEventListener('click', () => {
         if (!videoEl) return;
         const t = parseFloat(btn.dataset.time);
         if (!Number.isNaN(t)) {
+          // Seek-only, never autoplay -- this button's whole point is
+          // showing the reviewer the exact identified frame to compare
+          // against the candidate thumbnail, not starting playback.
+          // pause() first so a click while the video is already mid-
+          // playback also lands on that exact frame instead of seeking
+          // and immediately continuing on.
+          videoEl.pause();
           videoEl.currentTime = t;
-          videoEl.play().catch(() => {});
+          bboxClickedTime = t;
+
+          if (bboxOverlay) {
+            const boxJson = btn.dataset.bbox;
+            // data-bbox is only present when identification_router.py's
+            // top_timestamp_boxes had a real entry for this timestamp
+            // (see renderCandidate's own comment) -- native video pixels,
+            // scaled here by the browser's own intrinsic video dimensions
+            // (videoWidth/videoHeight), which always match the frame this
+            // bbox was actually detected against (scene identify's own
+            // ffmpeg extraction never downscales -- see aggregate_matches'
+            // docstring in scene_matcher.py) regardless of the video
+            // element's own displayed CSS size.
+            if (boxJson && videoEl.videoWidth && videoEl.videoHeight) {
+              try {
+                const box = JSON.parse(boxJson);
+                bboxOverlay.style.left = `${(box.x / videoEl.videoWidth) * 100}%`;
+                bboxOverlay.style.top = `${(box.y / videoEl.videoHeight) * 100}%`;
+                bboxOverlay.style.width = `${(box.width / videoEl.videoWidth) * 100}%`;
+                bboxOverlay.style.height = `${(box.height / videoEl.videoHeight) * 100}%`;
+                bboxOverlay.hidden = false;
+              } catch (e) {
+                hideBboxOverlay();
+              }
+            } else {
+              hideBboxOverlay();
+            }
+          }
         }
       });
     });
