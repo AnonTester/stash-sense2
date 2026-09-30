@@ -958,6 +958,42 @@ class RecommendationsDB:
                 # Already exists
                 return None
 
+    def update_pending_recommendation_details(
+        self, type: str, target_type: str, target_id: str, details: dict, confidence: Optional[float] = None,
+    ) -> bool:
+        """Refresh an EXISTING recommendation's own details/confidence in
+        place -- for the case create_recommendation() above just returned
+        None because this exact (type, target_type, target_id) already
+        exists (its UNIQUE constraint has no status component, so this
+        covers pending, resolved AND dismissed alike), and the caller has
+        fresher data worth updating it with (e.g. a rescan recomputing
+        scene_face_match's own top_timestamp_boxes -- see that analyzer's
+        own module docstring for why an already-dismissed/resolved target_id
+        otherwise never gets its stored details touched again, confirmed
+        live 2026-09-30: a Face Recommendations full scan silently never
+        refreshed ANY already-existing row, pending or not).
+
+        Scoped to `status = 'pending'` ONLY -- a dismissed or resolved
+        recommendation already has a human decision recorded against it;
+        overwriting its details afterward would rewrite what that decision
+        was actually made about, which is never appropriate regardless of
+        what changed upstream. A still-pending one hasn't been acted on
+        yet, so refreshing it with the latest computed data before someone
+        actually looks at it is exactly what a rescan should do.
+
+        Returns whether a row was actually updated (False if no pending
+        row exists for this target at all, or it's already resolved/
+        dismissed -- either is just as valid a "left alone" outcome)."""
+        with self._connection() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE recommendations SET details = ?, confidence = ?, updated_at = datetime('now')
+                WHERE type = ? AND target_type = ? AND target_id = ? AND status = 'pending'
+                """,
+                (json.dumps(details), confidence, type, target_type, target_id),
+            )
+            return cursor.rowcount > 0
+
     def get_recommendation(self, rec_id: int) -> Optional[Recommendation]:
         """Get a recommendation by ID."""
         with self._connection() as conn:

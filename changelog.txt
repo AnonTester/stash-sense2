@@ -1,5 +1,16 @@
 ## 2026-09-30
 
+### 0.39.2 (sidecar)
+- Fix: Face Recommendations' scan never refreshed an already-existing
+  recommendation's stored details (pending, resolved or dismissed alike
+  -- create_recommendation()'s own uniqueness has no status component),
+  so a rescan only ever picked up genuinely brand-new candidates.
+  Confirmed live: running a full scan specifically to backfill
+  top_timestamp_boxes only refreshed a handful of scenes, not the bulk
+  of already-recommended ones. Now refreshes a still-pending target's
+  details on every rescan; an already-resolved/dismissed one is
+  untouched, a human decision already stands.
+
 ### 0.39.1 (sidecar)
 - Fix: top_timestamp_boxes (0.39.0) silently failed to persist -- a
   FaceBox Pydantic instance isn't JSON-serializable, so the save raised

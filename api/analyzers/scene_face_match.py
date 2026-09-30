@@ -28,6 +28,7 @@ scan-scope logic for how each gets triggered):
 """
 
 import logging
+from typing import Optional
 
 from fastapi import HTTPException
 
@@ -74,6 +75,37 @@ def _make_details(
 
 class SceneFaceMatchAnalyzer(BaseAnalyzer):
     type = "scene_face_match"
+
+    def _create_or_refresh_recommendation(
+        self, target_type: str, target_id: str, details: dict, confidence: Optional[float] = None,
+    ) -> Optional[int]:
+        """create_recommendation()'s own UNIQUE(type, target_type, target_id)
+        constraint means it silently returns None for a target this analyzer
+        has EVER created before, pending, resolved or dismissed alike -- so
+        a rescan of a scene whose candidates were all already recommended
+        at some point (the overwhelming common case once a scene has been
+        through this analyzer once) never touched their stored details
+        again, no matter how many times it reran. Confirmed live
+        2026-09-30: a Face Recommendations full scan run specifically to
+        pick up scene_matcher.py's new top_timestamp_boxes only actually
+        refreshed the handful of genuinely-new-target-id candidates; every
+        pre-existing one (the large majority) kept its old, box-less
+        details forever.
+
+        Falls back to update_pending_recommendation_details() when create
+        was skipped as a duplicate -- still a no-op for an already-
+        resolved/dismissed target (a human decision stands), but a still-
+        pending one now picks up the freshest computed data on every
+        rescan, same as if it were being created for the first time."""
+        rec_id = self.create_recommendation(
+            target_type=target_type, target_id=target_id, details=details, confidence=confidence,
+        )
+        if rec_id is not None:
+            return rec_id
+        self.rec_db.update_pending_recommendation_details(
+            type=self.type, target_type=target_type, target_id=target_id, details=details, confidence=confidence,
+        )
+        return None
 
     async def run(self, incremental: bool = True) -> AnalysisResult:
         # Lazy import to avoid a circular dependency: recommendations_router
@@ -269,7 +301,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     row["source"], row["catalogue_url"], row["profile_url"], row["top_timestamps_sec"],
                     row.get("original_name"), row.get("top_timestamp_boxes"),
                 )
-                rec_id = self.create_recommendation(
+                rec_id = self._create_or_refresh_recommendation(
                     target_type="scene", target_id=f"{scene_id}|{row['universal_id']}",
                     details=details, confidence=row["confidence"],
                 )
@@ -326,7 +358,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                         # via create_recommendation's own details column).
                         [b.model_dump() if b is not None else None for b in match.top_timestamp_boxes],
                     )
-                    rec_id = self.create_recommendation(
+                    rec_id = self._create_or_refresh_recommendation(
                         target_type="scene", target_id=f"{scene_id}|{universal_id}",
                         details=details, confidence=match.confidence,
                     )
