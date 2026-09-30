@@ -318,7 +318,13 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                         match.confidence, match.distance, match.country, match.image_url, match.endpoint,
                         match.local_performer_id, match.source, match.catalogue_url, match.profile_url,
                         match.top_timestamps_sec, getattr(match, "original_name", None),
-                        match.top_timestamp_boxes,
+                        # Plain dicts, not FaceBox Pydantic instances -- see
+                        # recommendations_router.py's save_scene_fingerprint
+                        # for the json.dumps TypeError this avoids (a real,
+                        # confirmed-live bug this mirrors exactly, same
+                        # root cause: this dict ends up json.dumps()'d too,
+                        # via create_recommendation's own details column).
+                        [b.model_dump() if b is not None else None for b in match.top_timestamp_boxes],
                     )
                     rec_id = self.create_recommendation(
                         target_type="scene", target_id=f"{scene_id}|{universal_id}",

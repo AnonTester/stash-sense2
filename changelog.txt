@@ -1,5 +1,12 @@
 ## 2026-09-30
 
+### 0.39.1 (sidecar)
+- Fix: top_timestamp_boxes (0.39.0) silently failed to persist -- a
+  FaceBox Pydantic instance isn't JSON-serializable, so the save raised
+  and was swallowed, leaving an already-cached recommendation's jump
+  buttons with no bbox overlay no matter how many times it was
+  rematched. Convert to a plain dict before writing.
+
 ### 0.29.0 (plugin)
 - Feature: Face Recommendations' jump-to-frame buttons now draw the
   matched face's own bounding box over the seeked frame, when available.

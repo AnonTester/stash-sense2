@@ -162,7 +162,19 @@ def save_scene_fingerprint(
                     "profile_url": match.profile_url,
                     "top_timestamps_sec": match.top_timestamps_sec,
                     "original_name": getattr(match, "original_name", None),
-                    "top_timestamp_boxes": match.top_timestamp_boxes,
+                    # Plain dicts, not FaceBox Pydantic instances -- the
+                    # latter broke json.dumps() inside replace_fingerprint_
+                    # matches with a silent-to-the-caller TypeError (caught
+                    # by this function's own try/except below), which
+                    # rolled back the WHOLE match_rows write, not just this
+                    # field -- confirmed live 2026-09-30, a real identify
+                    # call's fingerprint save failing entirely while
+                    # returning what looked like a normal, successful
+                    # response (the in-memory `persons` this function's
+                    # caller returns were never touched by the failed save).
+                    "top_timestamp_boxes": [
+                        b.model_dump() if b is not None else None for b in match.top_timestamp_boxes
+                    ],
                 })
         rec_db.replace_fingerprint_matches(fingerprint_id, match_rows)
 
