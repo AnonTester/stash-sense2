@@ -1,5 +1,14 @@
 ## 2026-09-30
 
+### 0.39.3 (sidecar)
+- Fix: matched_embedding_index leaked a local performer's own Stash id
+  as if it were a main-database embedding_index whenever a live match
+  came from the local performer index -- its own docstring says this
+  should be None for a local match (no such index exists there).
+  Confirmed live: local performer id 512 displayed as
+  "matched_embedding_index: 512", which actually pointed at an unrelated
+  main-database performer's face 512 when looked up.
+
 ### 0.39.2 (sidecar)
 - Fix: Face Recommendations' scan never refreshed an already-existing
   recommendation's stored details (pending, resolved or dismissed alike

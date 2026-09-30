@@ -592,7 +592,21 @@ class FaceRecognizer:
                 source=fields["source"],
                 catalogue_url=fields["catalogue_url"],
                 profile_url=fields["profile_url"],
-                matched_embedding_index=candidate.face_index,
+                # candidate.face_index is a real usearch embedding_index
+                # ONLY for a main-index candidate -- for a local-index one,
+                # matching.py's fuse_local_results() sets face_index to the
+                # local Stash performer's own id instead (there's no usearch
+                # index for local performers at all -- see this field's own
+                # docstring in identification_router.py's PerformerMatch-
+                # Response, "None for a local-index match"). Blindly copying
+                # it regardless leaked the local performer id as if it were
+                # a main-database embedding_index whenever the two numbers
+                # happened to coincide -- confirmed live 2026-09-30: local
+                # performer id 512 displayed as "matched_embedding_index:
+                # 512", which actually pointed at an unrelated main-
+                # database performer's own face 512 when looked up, not
+                # the real (local, single-cover-photo) match at all.
+                matched_embedding_index=candidate.face_index if not fields["local_performer_id"] else None,
                 original_name=candidate.original_name,
             ))
 
