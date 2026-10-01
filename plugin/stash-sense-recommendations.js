@@ -6578,15 +6578,46 @@
       // 2026-10-01) serves a tight bbox+margin crop of the detected face
       // within this performer's cover photo when one's been captured
       // (re-synced since that field was added), falling back to the
-      // whole cover image server-side otherwise -- either way, this is
-      // always the right thing to point at once a bbox exists, so it's
-      // used unconditionally rather than only when c.image_url happens to
-      // be set (the route resolves the image itself from the local
-      // index, it doesn't need this candidate's own copy of the URL).
-      const sidecarUrl = SS.getCachedSidecarUrl ? SS.getCachedSidecarUrl() : '';
-      if (!sidecarUrl) return '';
-      const src = escapeHtml(`${sidecarUrl}/local-performer-crop/${encodeURIComponent(c.local_performer_id)}`);
-      return `<a class="ss-sfm-crop-slot" href="/performers/${encodeURIComponent(c.local_performer_id)}" target="_blank" title="Local performer's own reference photo"><img src="${src}" alt="" loading="lazy" /></a>`;
+      // whole cover image server-side otherwise. Rendered as an empty
+      // placeholder here and filled in by fillLocalPerformerCrops() below
+      // via the Python backend (base64 data URI), NOT a direct <img src>
+      // pointing at the sidecar's own address -- that address is Stash's
+      // own server-to-server setting, not guaranteed browser-reachable
+      // (e.g. Stash reached over an external reverse-proxied hostname
+      // while the sidecar is only LAN-reachable). Confirmed live
+      // 2026-10-01: a direct sidecar <img src> broke for exactly that
+      // setup. Every other sidecar call already goes through this same
+      // CSP-bypass backend proxy; this is the first one serving binary
+      // image data instead of JSON, hence the extra fill step.
+      return `<a class="ss-sfm-crop-slot ss-local-performer-crop" data-local-performer-id="${encodeURIComponent(c.local_performer_id)}" href="/performers/${encodeURIComponent(c.local_performer_id)}" target="_blank" title="Local performer's own reference photo"></a>`;
+    }
+
+    // Fills in every not-yet-loaded .ss-local-performer-crop placeholder
+    // under `root` with its actual crop image, one backend call per
+    // distinct performer id (a performer can appear in several timestamp
+    // slots on the same card). Call after the HTML containing these
+    // placeholders has been inserted into the DOM.
+    async function fillLocalPerformerCrops(root) {
+      const anchors = Array.from(root.querySelectorAll('.ss-local-performer-crop:not([data-ss-loaded])'));
+      const ids = [...new Set(anchors.map(a => a.dataset.localPerformerId))];
+      await Promise.all(ids.map(async (id) => {
+        let dataUri;
+        try {
+          const result = await apiCall('local_performer_crop', { performer_id: id });
+          dataUri = result.data_uri;
+        } catch (e) {
+          console.error('[Stash Sense] Failed to load local performer crop:', e);
+        }
+        root.querySelectorAll(`.ss-local-performer-crop[data-local-performer-id="${CSS.escape(id)}"]`).forEach(a => {
+          a.dataset.ssLoaded = '1';
+          if (!dataUri) return;
+          const img = document.createElement('img');
+          img.src = dataUri;
+          img.alt = '';
+          img.loading = 'lazy';
+          a.appendChild(img);
+        });
+      }));
     }
 
     // Shared by both the per-timestamp loop and the no-cluster fallback:
@@ -6737,6 +6768,8 @@
         `}
       </div>
     `;
+
+    fillLocalPerformerCrops(container);
 
     const videoEl = container.querySelector('.ss-sfm-video');
     const bboxOverlay = container.querySelector('.ss-sfm-bbox-overlay');

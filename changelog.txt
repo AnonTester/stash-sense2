@@ -1,5 +1,10 @@
 ## 2026-10-01
 
+### 0.33.1 (plugin)
+- Fix: a local performer's crop image now loads through the existing
+  CSP-bypass proxy instead of a direct browser->sidecar URL, which broke
+  when Stash is reached through a different address than the sidecar's.
+
 ### 0.44.1 (sidecar)
 - Fix: local performer sync could deadlock two separate ways -- an
   unlocked GPU inference race, and a circular wait between its two

@@ -3,6 +3,7 @@
 
 Proxies requests to the Stash Sense sidecar API to bypass browser CSP restrictions.
 """
+import base64
 import json
 import os
 import sys
@@ -98,6 +99,8 @@ def main():
         result = sidecar_get(sidecar_url, "/database/update/status")
     elif mode == "local_performer_stats":
         result = sidecar_get(sidecar_url, "/recommendations/local-performers/stats", timeout=10)
+    elif mode == "local_performer_crop":
+        result = local_performer_crop(sidecar_url, args.get("performer_id"))
     elif mode == "search_performers":
         query = args.get("query", "")
         result = sidecar_post(sidecar_url, "/stash/search-performers", {"query": query})
@@ -439,6 +442,31 @@ def database_info(sidecar_url):
         if response.ok:
             return response.json()
         return {"error": f"Failed to get database info: HTTP {response.status_code}"}
+    except requests.RequestException as e:
+        return {"error": f"Request failed: {e}"}
+
+
+def local_performer_crop(sidecar_url, performer_id):
+    """Fetch a local performer's face crop from the sidecar and return it
+    as a base64 data URI, via this same server-side proxy every other
+    sidecar call already uses. `sidecar_url` is Stash's own address for
+    reaching the sidecar, not necessarily one the browser can reach
+    directly -- the two can differ (e.g. Stash reached over an external
+    reverse-proxied hostname while the sidecar is only LAN-reachable),
+    confirmed live 2026-10-01 when an earlier version of this feature set
+    the crop <img> src straight to the sidecar's own address and broke
+    for exactly that setup."""
+    try:
+        response = requests.get(f"{sidecar_url}/local-performer-crop/{performer_id}", timeout=15)
+        if not response.ok:
+            return {"error": f"HTTP {response.status_code}"}
+        content_type = response.headers.get("content-type", "image/jpeg")
+        encoded = base64.b64encode(response.content).decode("ascii")
+        return {"data_uri": f"data:{content_type};base64,{encoded}"}
+    except requests.ConnectionError:
+        return {"error": "Connection refused - is Stash Sense running?"}
+    except requests.Timeout:
+        return {"error": "Request timed out"}
     except requests.RequestException as e:
         return {"error": f"Request failed: {e}"}
 

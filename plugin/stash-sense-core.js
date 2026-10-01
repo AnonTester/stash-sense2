@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.33.0';
+  const PLUGIN_VERSION = '0.33.1';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -120,18 +120,6 @@
 
   function clearSettingsCache() {
     cachedSettings = null;
-  }
-
-  // Synchronous counterpart to getSettings() -- for a render path that
-  // builds plain HTML strings (no async/await) and needs the sidecar's
-  // own base URL right now, not after a round-trip. Safe to call anytime
-  // after the very first getSettings() resolves (page init already does
-  // this before any UI that would need it renders) -- falls back to
-  // DEFAULTS.sidecarUrl on the narrow chance it's called any earlier than
-  // that, same fallback getSettings() itself uses on its own fetch
-  // failure.
-  function getCachedSidecarUrl() {
-    return (cachedSettings || DEFAULTS).sidecarUrl;
   }
 
   // ==================== Sidecar API Client ====================
@@ -850,7 +838,6 @@
     // Settings
     getSettings,
     clearSettingsCache,
-    getCachedSidecarUrl,
 
     // Sidecar API
     sidecarFetch,
