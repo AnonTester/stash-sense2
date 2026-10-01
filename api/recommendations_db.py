@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -346,6 +346,7 @@ class RecommendationsDB:
                 original_name TEXT,
                 top_boxes_json TEXT,
                 top_embedding_indices_json TEXT,
+                matched_embedding_index INTEGER,
                 UNIQUE(fingerprint_id, person_id, match_rank)
             );
             CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
@@ -928,6 +929,22 @@ class RecommendationsDB:
             if cols and "top_embedding_indices_json" not in cols:
                 conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN top_embedding_indices_json TEXT")
             conn.execute("UPDATE schema_version SET version = 23")
+
+        if from_version < 24:
+            # matched_embedding_index: this match's own single, overall
+            # reference embedding_index (PerformerMatchResponse's own field
+            # of the same name) -- was never persisted here at all, unlike
+            # every per-timestamp field above. Confirmed live 2026-10-01: a
+            # frequency-mode-only candidate (no per-frame cluster, so
+            # top_timestamps_sec/top_embedding_indices_json are genuinely
+            # empty -- see frequency_based_matching's own docstring) still
+            # resolves this one field, but Face Recommendations' own
+            # stored details never carried it, so that candidate showed no
+            # way at all to see which reference face it was even based on.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_fingerprint_matches)")}
+            if cols and "matched_embedding_index" not in cols:
+                conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN matched_embedding_index INTEGER")
+            conn.execute("UPDATE schema_version SET version = 24")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2112,7 +2129,10 @@ class RecommendationsDB:
         aggregate_matches' own docstring in scene_matcher.py -- stored as
         JSON in top_boxes_json), top_timestamp_embedding_indices (same
         length/order too, each entry an int reference embedding_index or
-        None -- stored as JSON in top_embedding_indices_json).
+        None -- stored as JSON in top_embedding_indices_json),
+        matched_embedding_index (this match's own single, overall
+        reference embedding_index -- the only one a frequency-mode-only
+        match, with no per-timestamp data at all, ever resolves).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
@@ -2123,8 +2143,8 @@ class RecommendationsDB:
                     universal_id, stashdb_id, name, confidence, distance, country,
                     image_url, endpoint, already_tagged, local_performer_id,
                     source, catalogue_url, profile_url, top_timestamps_sec, original_name,
-                    top_boxes_json, top_embedding_indices_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    top_boxes_json, top_embedding_indices_json, matched_embedding_index
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -2137,6 +2157,7 @@ class RecommendationsDB:
                         m.get("original_name"),
                         json.dumps(m.get("top_timestamp_boxes") or []),
                         json.dumps(m.get("top_timestamp_embedding_indices") or []),
+                        m.get("matched_embedding_index"),
                     )
                     for m in matches
                 ],

@@ -6,6 +6,7 @@ using face recognition.
 
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
@@ -16,7 +17,8 @@ from typing import Optional
 
 import httpx
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from PIL import Image
 from pydantic import BaseModel, Field
 
 import face_config
@@ -749,6 +751,7 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
 def _cluster_and_match(
     all_results: list[tuple[int, RecognitionResult]], request: "SceneIdentifyRequest",
     frame_timestamps: Optional[dict[int, float]] = None,
+    frame_native_size: Optional[tuple[int, int]] = None,
 ) -> list["PersonResult"]:
     """Run the configured matching_mode (hybrid/frequency/cluster) over
     already-detected+embedded+matched results. Shared by the cache
@@ -763,13 +766,22 @@ def _cluster_and_match(
     internal cluster component -- see its docstring); "frequency" mode has
     no per-frame-cluster concept to resolve timestamps from, so it's not
     threaded there. See aggregate_matches's own docstring for why this is
-    live-extraction-only in the first place."""
+    live-extraction-only in the first place.
+
+    frame_native_size (the original, unrotated frame's own (width, height))
+    is threaded the exact same way, for de-rotating a rotation-corrected
+    detection's bbox back to this frame's own coordinate space -- see
+    _derotate_bbox's own docstring in scene_matcher.py. Not available from
+    every caller (the cache fast-path fetches it separately, the sprite-
+    only path never has a video frame at all to size), hence Optional all
+    the way down; a caller without it just gets the pre-existing "omit a
+    rotation-corrected bbox" behavior, not an error."""
     if request.matching_mode == "hybrid":
         return hybrid_matching(
             all_results, _recognizer,
             cluster_threshold=request.cluster_threshold,
             top_k=request.top_k * 2, max_distance=request.max_distance,
-            frame_timestamps=frame_timestamps,
+            frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
         )
     elif request.matching_mode == "frequency":
         return clustered_frequency_matching(
@@ -785,7 +797,9 @@ def _cluster_and_match(
     used_performers: set[str] = set()
     all_persons = []
     for person_id, cluster in enumerate(clusters):
-        aggregated_matches = aggregate_matches(cluster, top_k=request.top_k, frame_timestamps=frame_timestamps)
+        aggregated_matches = aggregate_matches(
+            cluster, top_k=request.top_k, frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
+        )
         all_persons.append((len(cluster), PersonResult(
             person_id=person_id, frame_count=len(cluster),
             best_match=aggregated_matches[0] if aggregated_matches else None,
@@ -944,6 +958,35 @@ async def _process_sprite_frames(
     return extra_results, cache_rows
 
 
+async def _fetch_scene_native_size(scene_id: str) -> Optional[tuple[int, int]]:
+    """The original video file's own (width, height), for de-rotating a
+    rotation-corrected detection's bbox back to the frame it was actually
+    extracted from (see _derotate_bbox's own docstring in scene_matcher.py)
+    -- needed only by the cache fast-path below, which otherwise never
+    fetches scene file metadata at all (the whole point of that path is
+    skipping everything _extract_scene_frames already paid for on a prior
+    run). Best-effort: returns None on any failure (scene not found,
+    network hiccup, missing files) rather than raising -- the caller
+    already treats a missing frame_native_size as "just omit the
+    rotation-corrected box," not an error, same as before this existed."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            gql_query = {
+                "query": f'{{ findScene(id: "{scene_id}") {{ files {{ width height }} }} }}'
+            }
+            headers = {"ApiKey": _stash_api_key, "Content-Type": "application/json"}
+            response = await client.post(f"{_stash_url.rstrip('/')}/graphql", json=gql_query, headers=headers)
+            response.raise_for_status()
+            files = response.json().get("data", {}).get("findScene", {}).get("files") or []
+            if not files:
+                return None
+            width, height = files[0].get("width"), files[0].get("height")
+            return (width, height) if width and height else None
+    except Exception:
+        logger.warning("Could not fetch native size for scene %s", scene_id, exc_info=True)
+        return None
+
+
 async def _identify_scene_from_cache(
     request: "SceneIdentifyRequest",
     cache_meta: dict,
@@ -1012,7 +1055,10 @@ async def _identify_scene_from_cache(
 
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    persons = _cluster_and_match(all_results, request, frame_timestamps=frame_timestamps)
+    frame_native_size = await _fetch_scene_native_size(request.scene_id)
+    persons = _cluster_and_match(
+        all_results, request, frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
+    )
 
     top_names = [p.best_match.name for p in persons[:3] if p.best_match]
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] === DONE (cache) === Top matches: {', '.join(top_names)}")
@@ -1385,7 +1431,13 @@ async def _identify_scene_compute(
     t_match_end = 0.0
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    persons = _cluster_and_match(all_results, request, frame_timestamps=frame_timestamps)
+    frame_native_size = (
+        (file_info.get("width"), file_info.get("height"))
+        if file_info.get("width") and file_info.get("height") else None
+    )
+    persons = _cluster_and_match(
+        all_results, request, frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
+    )
     print(f"[identify_scene] [{time.time()-t_start:.1f}s] Matching ({request.matching_mode}): {len(persons)} persons in {time.time()-t_match:.1f}s")
 
     t_match_end = time.time()
@@ -1646,3 +1698,68 @@ async def get_scene_identify_progress(scene_id: str):
     if not entry:
         return SceneIdentifyProgressResponse()
     return SceneIdentifyProgressResponse(stage=entry["stage"], updated_at=entry["updated_at"])
+
+
+@router.get("/local-performer-crop/{performer_id}")
+async def local_performer_crop(performer_id: int):
+    """Tightly-cropped (bbox + margin) preview of a local Stash performer's
+    own detected face within their cover photo -- the local-match
+    counterpart to stash-sense2-data-gen's review_app's own
+    /crop/{sha256}/{embedding_index} route for main-database faces (same
+    rotate-then-slice-with-margin convention, same 0.3 margin fraction,
+    mirrored here independently since review_app has no visibility into
+    local-only performers at all -- they're never in the main database it
+    reads. This sidecar is the only thing that both knows this Stash
+    instance's own local performers AND can reach their cover image.
+
+    Falls back to the whole, uncropped cover image when no bbox is stored
+    yet (not (re-)synced since bbox capture was added 2026-10-01, or a
+    genuinely bbox-less legacy entry) or the recognizer/local index isn't
+    currently loaded at all -- same "right or absent, never confidently
+    wrong" policy this project already applies elsewhere, not a hard
+    error. Likewise falls back to the full image if the stored bbox turns
+    out stale against the actual current cover image (e.g. its own
+    dimensions no longer match -- the cover changed through some path
+    that didn't go through a re-embed) rather than crop against the wrong
+    frame."""
+    if _recognizer is None or _recognizer.local_performer_index is None:
+        raise HTTPException(status_code=404, detail="Local performer index not loaded")
+    index = _recognizer.local_performer_index
+    image_url = index.get_image_url(performer_id)
+    if not image_url:
+        raise HTTPException(status_code=404, detail="Local performer not indexed")
+
+    full_url = f"{_stash_url.rstrip('/')}{image_url}"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(full_url, headers={"ApiKey": _stash_api_key})
+        resp.raise_for_status()
+        image_bytes = resp.content
+
+    bbox = index.get_bbox(performer_id)
+    if not bbox:
+        return Response(content=image_bytes, media_type="image/jpeg")
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        rotation_applied = bbox.get("rotation_applied", 0.0) or 0.0
+        if rotation_applied:
+            img = img.rotate(rotation_applied, expand=True, resample=Image.BICUBIC)
+
+        x, y, w, h = bbox["x"], bbox["y"], bbox["w"], bbox["h"]
+        cx, cy = x + w / 2, y + h / 2
+        margin = 0.3
+        final_w, final_h = w * (1 + margin), h * (1 + margin)
+        crop_box = (
+            round(cx - final_w / 2), round(cy - final_h / 2),
+            round(cx + final_w / 2), round(cy + final_h / 2),
+        )
+        sub = img.crop(crop_box)  # PIL pads an out-of-bounds crop with black
+        buf = io.BytesIO()
+        sub.save(buf, format="JPEG", quality=85)
+        return Response(content=buf.getvalue(), media_type="image/jpeg")
+    except Exception:
+        logger.warning(
+            "local_performer_crop: failed to crop performer %d, serving full image",
+            performer_id, exc_info=True,
+        )
+        return Response(content=image_bytes, media_type="image/jpeg")

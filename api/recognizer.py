@@ -306,10 +306,30 @@ class FaceRecognizer:
         """Builds a full PerformerMatch for `universal_id` -- a linked-
         group member that was NEVER itself found by a vector search this
         scene/frame -- carrying over `template`'s own distance/
-        combined_score/matched_embedding_index (there's no independent
-        measurement for `universal_id` to use instead; `template` IS what
-        was actually detected, this is just displaying it under its
-        linked group's own preferred identity).
+        combined_score (there's no independent measurement for
+        `universal_id` to use instead; `template` IS what was actually
+        detected, this is just displaying it under its linked group's own
+        preferred identity).
+
+        matched_embedding_index is deliberately NOT carried over, unlike
+        those two fields -- confirmed live 2026-10-01: a local performer
+        ("Emma White", no main-database embedding of her own at all) was
+        displayed with matched_embedding_index pointing at an entirely
+        unrelated performer's ("Baby Bells") real reference photo, because
+        template (the match that was actually independently detected,
+        here a catalogue candidate for Baby Bells) got outranked by Emma
+        White's own linked-group priority and substituted in by name --
+        but this function kept template's own embedding_index along for
+        the ride regardless. That field's whole purpose is "the specific
+        reference photo of THIS displayed performer that triggered the
+        match" (see its own docstring in identification_router.py); a
+        substitute, by this function's own definition, was never
+        independently detected under its own identity at all, so it has
+        no such photo to point to -- same reasoning the one other
+        matched_embedding_index call site already applies for a local
+        match specifically (see recognizer.py's other construction site),
+        generalized here to every substitute regardless of whether the
+        substituted-in identity happens to be local or not.
 
         Added 2026-09-28 for scene_matcher.py's own linked-group display
         substitution (see that module's _substitute_linked_priority_winner):
@@ -366,7 +386,7 @@ class FaceRecognizer:
             source=fields["source"],
             catalogue_url=fields["catalogue_url"],
             profile_url=fields["profile_url"],
-            matched_embedding_index=template.matched_embedding_index,
+            matched_embedding_index=None,
             original_name=original_name,
         )
 

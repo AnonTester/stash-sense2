@@ -176,6 +176,7 @@ def save_scene_fingerprint(
                         b.model_dump() if b is not None else None for b in match.top_timestamp_boxes
                     ],
                     "top_timestamp_embedding_indices": match.top_timestamp_embedding_indices,
+                    "matched_embedding_index": match.matched_embedding_index,
                 })
         rec_db.replace_fingerprint_matches(fingerprint_id, match_rows)
 
@@ -745,6 +746,7 @@ def _scene_face_match_candidate(rec: Recommendation) -> dict[str, Any]:
         "top_timestamps_sec": details.get("top_timestamps_sec") or [],
         "top_timestamp_boxes": details.get("top_timestamp_boxes") or [],
         "top_timestamp_embedding_indices": details.get("top_timestamp_embedding_indices") or [],
+        "matched_embedding_index": details.get("matched_embedding_index"),
         "status": rec.status,
         "resolution_action": rec.resolution_action,
         # Only meaningful for a dismissed row -- dismiss_recommendation()
@@ -2004,6 +2006,7 @@ def _match_row_to_response_dict(row: dict) -> dict:
         "top_timestamps_sec": row["top_timestamps_sec"],
         "top_timestamp_boxes": row.get("top_timestamp_boxes") or [],
         "top_timestamp_embedding_indices": row.get("top_timestamp_embedding_indices") or [],
+        "matched_embedding_index": row.get("matched_embedding_index"),
     }
 
 

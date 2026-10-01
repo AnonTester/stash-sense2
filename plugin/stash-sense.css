@@ -4422,6 +4422,11 @@ a.ss-detail-entity-link:hover {
    unfilled slot from taking up any visible space rather than showing a
    blank placeholder box forever. */
 .ss-sfm-crop-slot {
+  /* inline-block, not the div default's block -- this class is also
+     reused on an <a> (the local-performer cover-photo fallback, an
+     inline element by default), where width/height would otherwise be
+     silently ignored. */
+  display: inline-block;
   width: 40px;
   height: 40px;
   border-radius: 4px;

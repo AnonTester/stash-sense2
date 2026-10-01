@@ -8,6 +8,7 @@ Provides algorithms for identifying performers across multiple video frames:
 """
 
 import logging
+import math
 from collections import defaultdict
 from typing import Optional
 
@@ -434,12 +435,80 @@ def merge_clusters_by_match(
     return list(groups.values()) + unidentified
 
 
+def _derotate_bbox(bbox: dict, video_width: int, video_height: int) -> Optional[dict]:
+    """Maps a rotation-corrected detection's bbox (in its own rotated+
+    expanded canvas's own coordinate space -- see detect_faces()'s own
+    docstring in embeddings.py) back to the ORIGINAL video frame's native
+    pixel space, so it can be drawn directly on the plain <video> element
+    instead of being silently omitted (see aggregate_matches' own
+    docstring on why this used to always return None for a rotated
+    detection).
+
+    Inverse of PIL's own Image.rotate(angle_deg, expand=True): that
+    rotates a (video_width x video_height) canvas around its own center by
+    angle_deg degrees (PIL's own counter-clockwise convention), growing
+    the canvas to the rotated rectangle's own bounding box. Recomputes
+    that exact expanded size by actually rotating a same-sized blank
+    canvas through PIL (not a closed-form bounding-box formula -- confirmed
+    empirically that PIL's own internal rounding doesn't match one
+    exactly, off by 1-2px in each dimension across a range of sizes/
+    angles, which matters here since it feeds the rotated canvas's own
+    center point). Then maps each of the bbox's 4 corners back through the
+    inverse rotation and takes their axis-aligned enclosing box -- a
+    rotated rectangle's own corners don't map back to another axis-aligned
+    rectangle, so the enclosing box of the 4 mapped corners (not a single
+    transformed point) is the correct result here.
+
+    Clamped to the original frame's own bounds afterward: a face detected
+    near the rotated canvas's own edge can map to a corner slightly
+    outside the original frame (the expanded canvas has blank padding the
+    unrotated frame never had), which would otherwise render as a
+    partially off-screen overlay. Returns None if the inputs don't make
+    sense (no rotation recorded, a non-positive frame size, or a
+    degenerate -- zero-area -- result after clamping) rather than ever
+    returning a nonsensical box."""
+    try:
+        rotation_deg = bbox.get("rotation_applied", 0.0)
+        if not rotation_deg or video_width <= 0 or video_height <= 0:
+            return None
+        from PIL import Image
+        canvas_w, canvas_h = Image.new("L", (video_width, video_height)).rotate(rotation_deg, expand=True).size
+
+        theta = math.radians(rotation_deg)
+        cos_t, sin_t = math.cos(theta), math.sin(theta)
+        cx, cy = video_width / 2.0, video_height / 2.0
+        cx2, cy2 = canvas_w / 2.0, canvas_h / 2.0
+
+        x, y, w, h = bbox["x"], bbox["y"], bbox["w"], bbox["h"]
+        corners = [(x, y), (x + w, y), (x, y + h), (x + w, y + h)]
+        orig_xs, orig_ys = [], []
+        for px, py in corners:
+            dx2, dy2 = px - cx2, py - cy2
+            orig_xs.append(dx2 * cos_t - dy2 * sin_t + cx)
+            orig_ys.append(dx2 * sin_t + dy2 * cos_t + cy)
+
+        ox0 = max(0.0, min(orig_xs))
+        oy0 = max(0.0, min(orig_ys))
+        ox1 = min(float(video_width), max(orig_xs))
+        oy1 = min(float(video_height), max(orig_ys))
+        if ox1 <= ox0 or oy1 <= oy0:
+            return None
+        return {
+            "x": round(ox0), "y": round(oy0),
+            "width": round(ox1 - ox0), "height": round(oy1 - oy0),
+        }
+    except Exception:
+        logger.warning("Failed to de-rotate bbox %s for a %sx%s frame", bbox, video_width, video_height, exc_info=True)
+        return None
+
+
 def aggregate_matches(
     cluster: list[tuple[int, RecognitionResult]],
     top_k: int = 3,
     _match_to_response=None,
     _distance_to_confidence=None,
     frame_timestamps: Optional[dict[int, float]] = None,
+    frame_native_size: Optional[tuple[int, int]] = None,
     performer_link_index: Optional[dict[str, list[str]]] = None,
     endpoint_priority_domains: Optional[list[str]] = None,
     recognizer=None,
@@ -470,19 +539,27 @@ def aggregate_matches(
             entry (the matched face's own bbox on that frame, for a "show me
             where" overlay next to the jump button) -- but ONLY for a real
             extracted video frame (frame_idx >= 0; every sprite/screenshot
-            frame_idx is negative, see above), and only when the winning
-            detection's bbox has no in-plane rotation correction applied
-            (bbox["rotation_applied"] == 0.0). A sprite-tile bbox is in that
-            tile's own small, un-persisted pixel space (not the video's), and
-            a rotation-corrected bbox is relative to a rotated+expanded
-            canvas, not the original frame -- neither can be drawn correctly
-            on the plain <video> element, so both are silently omitted
-            (None) rather than drawn wrong. Video-frame bboxes need no
-            stored resolution to scale correctly: frames are extracted at
-            the source video's own native resolution (FrameExtractionConfig
-            never sets output_width/height for a real identify call), the
-            same pixel space the browser's own video.videoWidth/videoHeight
-            already report.
+            frame_idx is negative, see above). A sprite-tile bbox is in that
+            tile's own small, un-persisted pixel space (not the video's), so
+            it's always silently omitted (None) rather than drawn wrong --
+            there's no stored tile size/sheet-offset to map it back with.
+            Video-frame bboxes need no stored resolution to scale correctly:
+            frames are extracted at the source video's own native resolution
+            (FrameExtractionConfig never sets output_width/height for a real
+            identify call), the same pixel space the browser's own
+            video.videoWidth/videoHeight already report.
+
+            A rotation-corrected detection's bbox (bbox["rotation_applied"]
+            != 0.0) is relative to a rotated+expanded canvas, not the
+            original frame, so it ALSO used to be silently omitted here --
+            now de-rotated back to the original frame's own coordinate
+            space via _derotate_bbox() instead, when frame_native_size is
+            given (the ORIGINAL, unrotated frame's own (width, height) --
+            same pixel space as the plain, non-rotated case above). Omitted
+            (None) only when frame_native_size isn't available at all (a
+            caller that doesn't have it, e.g. no scene-file GraphQL fetch
+            for this particular code path) or _derotate_bbox() itself
+            can't produce a sane result.
 
             Each resolved timestamp also gets a same-index
             top_timestamp_embedding_indices entry: the *specific* reference
@@ -611,6 +688,10 @@ def aggregate_matches(
                         "width": face.bbox["w"], "height": face.bbox["h"],
                         "confidence": face.confidence,
                     }
+                elif frame_idx >= 0 and frame_native_size is not None:
+                    derotated = _derotate_bbox(face.bbox, *frame_native_size)
+                    if derotated is not None:
+                        resolved_bbox = {**derotated, "confidence": face.confidence}
                 ts_to_bbox[ts] = resolved_bbox
                 ts_to_embedding_index[ts] = frame_embedding_index
             top_timestamps_sec = sorted(ts_to_bbox)
@@ -999,6 +1080,7 @@ def hybrid_matching(
     min_unique_frames: int = 2,
     min_confidence: float = 0.35,
     frame_timestamps: Optional[dict[int, float]] = None,
+    frame_native_size: Optional[tuple[int, int]] = None,
     _match_to_response=None,
     _distance_to_confidence=None,
 ) -> list:
@@ -1033,6 +1115,10 @@ def hybrid_matching(
             cluster component's timestamps (if any) are kept even though
             the frequency component's match object wins for display
             fields -- see the "found_by" branch below.
+        frame_native_size: Optional (video_width, video_height) of the
+            ORIGINAL, unrotated frame -- see aggregate_matches's own
+            docstring. Same cluster-mode-only threading as frame_timestamps
+            above.
     """
     # Lazy import to avoid circular dependency
     if _match_to_response is None:
@@ -1081,7 +1167,7 @@ def hybrid_matching(
     cluster_persons = []
     for cluster in clusters:
         aggregated = aggregate_matches(
-            cluster, top_k=3, frame_timestamps=frame_timestamps,
+            cluster, top_k=3, frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
             _match_to_response=_match_to_response,
             _distance_to_confidence=_distance_to_confidence,
             performer_link_index=performer_link_index,

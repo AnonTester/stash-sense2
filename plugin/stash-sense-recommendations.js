@@ -6533,9 +6533,81 @@
     // dismissal timestamp, since that's the whole point of surfacing these
     // at all: the user can see *when* they dismissed something and decide
     // whether it was a mistake) instead of the pending-only Dismiss button.
+    // A frequency-mode-only match (found by counting frame-level top-K
+    // appearances, never clustered into its own tracked person -- see
+    // frequency_based_matching's own docstring in scene_matcher.py) has
+    // no per-frame data at all: top_timestamps_sec is genuinely empty,
+    // not just missing a few entries. Before this, that meant the card
+    // showed NOTHING to indicate which reference face the match was even
+    // based on, or a way to open it for review -- unlike every cluster-
+    // backed candidate's jump buttons, which always carry at least the
+    // per-timestamp crop even when the timestamp's own bbox is
+    // unavailable. This single fallback slot reuses this candidate's one
+    // overall matched_embedding_index (the only reference face a
+    // frequency-only match ever resolves to) in the exact same crop-slot
+    // markup/position a timestamp entry uses, just with no jump button
+    // beneath it -- there's no specific video moment to seek to, only a
+    // face to review.
+    function renderNoClusterCropSlot(c) {
+      const slot = renderCropSlotContent(c, c.matched_embedding_index);
+      return slot ? `<div class="ss-sfm-jump-item">${slot}</div>` : '';
+    }
+
+    // A local-library performer (c.local_performer_id set) has a real,
+    // independently-detected embedding of their own -- the local
+    // performer index (local_performer_index.py) embeds their own Stash
+    // cover photo and matches against it exactly like any main-index
+    // reference photo -- so "no reference embedding exists" was simply
+    // wrong. What's actually missing is a storable face *crop*: unlike
+    // the main pipeline, sync_one_performer() never persists the
+    // detected face's own bbox, only the whole cover image + embedding
+    // vector (see that function's own module). review_app has no idea
+    // about local-only performers at all regardless (they're not in the
+    // main database it reads), so this can never route through the
+    // existing embedding_index-based crop slot either way.
+    //
+    // This still renders *something* genuinely useful in the exact same
+    // slot/position: the performer's own Stash cover photo (c.image_url,
+    // already fetched for the candidate's own top-level thumbnail) linked
+    // to their Stash performer page -- not a tight face crop, but a real,
+    // meaningful reference image a reviewer can actually check against,
+    // instead of an empty slot implying no match data exists at all.
+    function renderLocalCoverCrop(c) {
+      if (!c.local_performer_id) return '';
+      // The sidecar's own /local-performer-crop/{id} route (added
+      // 2026-10-01) serves a tight bbox+margin crop of the detected face
+      // within this performer's cover photo when one's been captured
+      // (re-synced since that field was added), falling back to the
+      // whole cover image server-side otherwise -- either way, this is
+      // always the right thing to point at once a bbox exists, so it's
+      // used unconditionally rather than only when c.image_url happens to
+      // be set (the route resolves the image itself from the local
+      // index, it doesn't need this candidate's own copy of the URL).
+      const sidecarUrl = SS.getCachedSidecarUrl ? SS.getCachedSidecarUrl() : '';
+      if (!sidecarUrl) return '';
+      const src = escapeHtml(`${sidecarUrl}/local-performer-crop/${encodeURIComponent(c.local_performer_id)}`);
+      return `<a class="ss-sfm-crop-slot" href="/performers/${encodeURIComponent(c.local_performer_id)}" target="_blank" title="Local performer's own reference photo"><img src="${src}" alt="" loading="lazy" /></a>`;
+    }
+
+    // Shared by both the per-timestamp loop and the no-cluster fallback:
+    // prefer an embedding_index-based crop slot (filled in externally --
+    // see data-ss-embedding-index's own convention above) when one is
+    // actually available for this entry, otherwise fall back to the local
+    // performer's own cover photo when this candidate is a local match,
+    // otherwise render nothing (no data of any kind to show).
+    function renderCropSlotContent(c, embIdx) {
+      const uid = SS.reviewableUniversalId ? SS.reviewableUniversalId(c) : (c.universal_id || '');
+      if (embIdx !== null && embIdx !== undefined && uid) {
+        return `<div class="ss-sfm-crop-slot" data-ss-universal-id="${escapeHtml(uid)}" data-ss-embedding-index="${embIdx}"></div>`;
+      }
+      return renderLocalCoverCrop(c);
+    }
+
     function renderCandidate(c, forDismissedSection = false) {
       const isCandidatePending = c.status === 'pending';
-      const jumpButtons = (c.top_timestamps_sec || []).slice(0, 4).map((t, i) => {
+      const jumpButtons = (c.top_timestamps_sec || []).length === 0
+        ? renderNoClusterCropSlot(c)
+        : (c.top_timestamps_sec || []).slice(0, 4).map((t, i) => {
         // top_timestamp_boxes[i] (same index/order as top_timestamps_sec,
         // see identification_router.py's PerformerMatchResponse) is the
         // matched face's own bbox on that frame, or null when unavailable
@@ -6554,15 +6626,14 @@
         // plugin never resolves or links to that reference face itself --
         // same data-* convention as _reviewDataAttrs above (stash-sense.js),
         // just carried per-timestamp here too, for a third-party plugin to
-        // read without reconstructing it. Omitted entirely (not an empty-
-        // attribute slot) when this specific timestamp has no resolved
-        // embedding_index at all (e.g. a local-library-only match) --
-        // nothing for a reader to cross-reference.
+        // read without reconstructing it. None for this specific timestamp
+        // when its own winning frame matched via the local index rather
+        // than the main one (a local match has no main-index
+        // embedding_index at all) -- renderCropSlotContent falls back to
+        // the local performer's own cover photo in that case (same single
+        // reference image in every such slot, there's only one).
         const embIdx = (c.top_timestamp_embedding_indices || [])[i];
-        const uid = SS.reviewableUniversalId ? SS.reviewableUniversalId(c) : (c.universal_id || '');
-        const cropSlot = (embIdx !== null && embIdx !== undefined && uid)
-          ? `<div class="ss-sfm-crop-slot" data-ss-universal-id="${escapeHtml(uid)}" data-ss-embedding-index="${embIdx}"></div>`
-          : '';
+        const cropSlot = renderCropSlotContent(c, embIdx);
         return `<div class="ss-sfm-jump-item">${cropSlot}${btn}</div>`;
       }).join('');
       const linksHtml = sceneFaceMatchLinksHtml(c);

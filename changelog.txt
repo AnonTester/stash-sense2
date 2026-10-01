@@ -1,5 +1,42 @@
 ## 2026-10-01
 
+### 0.44.1 (sidecar)
+- Fix: local performer sync could deadlock two separate ways -- an
+  unlocked GPU inference race, and a circular wait between its two
+  internal work queues once one of them filled up.
+
+### 0.33.0 (plugin)
+- Feature: a local performer's crop slot now points at the sidecar's own
+  tight face crop instead of their whole cover photo, once one's been
+  captured (re-sync needed for any performer indexed before this).
+
+### 0.44.0 (sidecar)
+- Feature: local performer sync now stores the detected face's bbox, and
+  a new /local-performer-crop/{id} route serves a tight crop from it.
+
+### 0.32.0 (plugin)
+- Feature: a local-library match's own crop slot(s) now show that
+  performer's actual Stash cover photo instead of staying empty.
+
+### 0.43.0 (sidecar)
+- Fix: a linked-group display substitution no longer carries over the
+  original candidate's matched_embedding_index, which pointed at an
+  unrelated performer's reference photo. Same issue as 0.39.3, 2nd site.
+
+### 0.42.0 (sidecar)
+- Fix: a match's overall matched_embedding_index is now persisted into
+  Face Recommendations' stored details -- it never was before.
+
+### 0.31.0 (plugin)
+- Feature: a frequency-mode-only match (no per-frame cluster at all) now
+  shows a single crop slot for its one overall matched reference face,
+  with no jump button, instead of showing nothing at all.
+
+### 0.41.0 (sidecar)
+- Feature: a rotation-corrected detection's bbox is now de-rotated back
+  to its original video frame and drawn, instead of always being omitted.
+  Sprite-sourced detections still have no box (no stored tile geometry).
+
 ### 0.40.0 (sidecar)
 - Feature: each jump-to-frame timestamp now also reports the specific
   reference embedding_index it nearest-matched against, which can differ

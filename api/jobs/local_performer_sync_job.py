@@ -213,20 +213,35 @@ def _embed_worker(embed_queue: "queue.Queue", event_queue: "queue.Queue") -> Non
             # other _embed_worker threads -- confirmed live, an in-flight
             # GPU job's detection concurrent with a live identify request
             # produced real ROCm/MIOpen failures on this hardware.
+            #
+            # select_local_performer_face() must stay inside this same
+            # lock, not just detect_faces() -- it can itself run a second,
+            # independent GPU inference (CR-FIQA quality scoring, via
+            # generator.score_face_quality()) whenever a cover photo has
+            # 2+ detected faces. Left unlocked, that let two
+            # EMBED_WORKERS threads race concurrent GPU inference calls
+            # against each other -- confirmed live 2026-10-01: reproduced
+            # a full deadlock (0% CPU/GPU, every thread sleeping) on two
+            # separate runs, including one with the buffalo_l model
+            # already warm/cached, ruling out the model-download race as
+            # the actual cause.
             with GPU_COMPUTE_LOCK:
                 faces = generator.detect_faces(image, min_confidence=0.5)
+                if not faces:
+                    best_face = None
+                else:
+                    best_face = select_local_performer_face(faces, generator)
         except Exception as e:
             logger.warning("Local performer sync: decode/detect failed for performer %d: %s", performer_id, e)
             event_queue.put(("embed_error", performer_id, position, None))
             continue
 
-        if not faces:
+        if best_face is None:
             event_queue.put(("no_face", performer_id, position, None))
             continue
 
-        best_face = select_local_performer_face(faces, generator)
         embedding = generator.get_embedding(best_face)
-        event_queue.put(("embedded", performer_id, position, (embedding.embedding, fingerprint, meta)))
+        event_queue.put(("embedded", performer_id, position, (embedding.embedding, fingerprint, meta, best_face.bbox)))
 
     event_queue.put(("worker_done", None, None, None))
 
@@ -297,7 +312,20 @@ class LocalPerformerSyncJob(BaseJob):
             return None
 
         event_queue: "queue.Queue" = queue.Queue(maxsize=500)
-        embed_queue: "queue.Queue" = queue.Queue(maxsize=200)
+        # Unbounded: the coordinator loop below both drains event_queue
+        # (producer "needs_embed" events + worker result events share that
+        # one queue) and, inline in the same loop, pushes onto embed_queue
+        # for "needs_embed". A bounded embed_queue created a real circular
+        # deadlock -- confirmed live 2026-10-01: once embed_queue filled,
+        # the coordinator blocked trying to push the next item onto it and
+        # stopped draining event_queue, while both _embed_worker threads
+        # (already done, holding real results) blocked trying to push
+        # those results onto the now-full event_queue, forever. Unbounded
+        # removes the coordinator's one blocking write, which is what
+        # closes the cycle -- memory cost is negligible (a queue of
+        # already-downloaded image byte buffers for however many
+        # performers are pending this run).
+        embed_queue: "queue.Queue" = queue.Queue()
         stop_event = threading.Event()
 
         embed_threads = [
@@ -381,12 +409,12 @@ class LocalPerformerSyncJob(BaseJob):
                 else:
                     skipped_no_image += 1
             elif kind == "embedded":
-                embedding, fingerprint, meta = payload
+                embedding, fingerprint, meta, bbox = payload
                 was_present = performer_id in index
                 index.upsert(
                     performer_id=performer_id, name=meta["name"], stashdb_id=meta["stashdb_id"],
                     image_hash=fingerprint, image_url=meta["image_url"], embedding=embedding,
-                    urls=meta["urls"],
+                    urls=meta["urls"], bbox=bbox,
                 )
                 if was_present:
                     updated += 1

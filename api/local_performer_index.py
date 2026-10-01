@@ -59,7 +59,7 @@ class LocalPerformerIndex:
     def upsert(
         self, performer_id: int, name: str, stashdb_id: Optional[str],
         image_hash: str, image_url: Optional[str], embedding: np.ndarray,
-        urls: Optional[list[str]] = None,
+        urls: Optional[list[str]] = None, bbox: Optional[dict] = None,
     ) -> None:
         """Add or replace this performer's embedding (delete-then-add for
         clarity/consistency with the main build pipeline's convention,
@@ -72,13 +72,25 @@ class LocalPerformerIndex:
         (seekfans/pornbox) main-index candidate's profile/catalogue url
         against this local performer, catching a same-person duplicate
         that a stash_id-only comparison can't (catalogue sources have no
-        stash_id to link)."""
+        stash_id to link).
+
+        `bbox` -- the detected face's own region within the cover image
+        (the same {x, y, w, h, rotation_applied} shape DetectedFace.bbox
+        always carries), added 2026-10-01. Unlike the main pipeline's own
+        faces, this was never persisted before -- only the embedding
+        vector and the whole cover image survived sync_one_performer(),
+        so a local match's own crop slot had no tight face region to show,
+        only the full (often non-square, often multi-subject) cover photo.
+        Optional and may be None for a performer indexed before this
+        existed, or if a future caller genuinely has no bbox to give --
+        consumers (the new local-performer-crop route) fall back to the
+        whole cover image in that case, same as before this existed."""
         self.remove(performer_id)
         self.index.add(performer_id, embedding.astype(np.float32))
         self.mapping[str(performer_id)] = {
             "name": name, "stashdb_id": stashdb_id,
             "image_hash": image_hash, "image_url": image_url,
-            "urls": urls or [],
+            "urls": urls or [], "bbox": bbox,
         }
 
     def remove(self, performer_id: int) -> None:
@@ -89,6 +101,14 @@ class LocalPerformerIndex:
     def get_image_hash(self, performer_id: int) -> Optional[str]:
         entry = self.mapping.get(str(performer_id))
         return entry["image_hash"] if entry else None
+
+    def get_bbox(self, performer_id: int) -> Optional[dict]:
+        entry = self.mapping.get(str(performer_id))
+        return entry.get("bbox") if entry else None
+
+    def get_image_url(self, performer_id: int) -> Optional[str]:
+        entry = self.mapping.get(str(performer_id))
+        return entry.get("image_url") if entry else None
 
     def update_urls(self, performer_id: int, urls: list[str]) -> bool:
         """Refreshes just the stored `urls` for an already-indexed
@@ -223,5 +243,6 @@ async def sync_one_performer(
         image_url=_relative_image_url(image_path),
         embedding=embedding.embedding,
         urls=current_urls,
+        bbox=best_face.bbox,
     )
     return "updated" if was_present else "added"
