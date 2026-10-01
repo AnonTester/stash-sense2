@@ -45,7 +45,7 @@ def _make_details(
     scene_id: str, scene_title: str, person_id: int, frame_count: int, is_best_match: bool,
     universal_id: str, stashdb_id, name, confidence, distance, country, image_url, endpoint,
     local_performer_id, source, catalogue_url, profile_url, top_timestamps_sec,
-    original_name=None, top_timestamp_boxes=None,
+    original_name=None, top_timestamp_boxes=None, top_timestamp_embedding_indices=None,
 ) -> dict:
     """Shared recommendation `details` shape -- built the same way whether
     the match came from stored data or a fresh top-up identify."""
@@ -70,6 +70,7 @@ def _make_details(
         "top_timestamps_sec": top_timestamps_sec,
         "original_name": original_name,
         "top_timestamp_boxes": top_timestamp_boxes or [],
+        "top_timestamp_embedding_indices": top_timestamp_embedding_indices or [],
     }
 
 
@@ -300,6 +301,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     row["country"], row["image_url"], row["endpoint"], row["local_performer_id"],
                     row["source"], row["catalogue_url"], row["profile_url"], row["top_timestamps_sec"],
                     row.get("original_name"), row.get("top_timestamp_boxes"),
+                    row.get("top_timestamp_embedding_indices"),
                 )
                 rec_id = self._create_or_refresh_recommendation(
                     target_type="scene", target_id=f"{scene_id}|{row['universal_id']}",
@@ -357,6 +359,7 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                         # root cause: this dict ends up json.dumps()'d too,
                         # via create_recommendation's own details column).
                         [b.model_dump() if b is not None else None for b in match.top_timestamp_boxes],
+                        match.top_timestamp_embedding_indices,
                     )
                     rec_id = self._create_or_refresh_recommendation(
                         target_type="scene", target_id=f"{scene_id}|{universal_id}",

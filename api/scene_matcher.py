@@ -483,6 +483,21 @@ def aggregate_matches(
             never sets output_width/height for a real identify call), the
             same pixel space the browser's own video.videoWidth/videoHeight
             already report.
+
+            Each resolved timestamp also gets a same-index
+            top_timestamp_embedding_indices entry: the *specific* reference
+            embedding_index that frame's own per-frame match nearest-matched
+            against, which can genuinely differ frame-to-frame (different
+            frames of the same tracked person can each resolve best against
+            a different reference photo of that performer) -- unlike the
+            single matched_embedding_index on the returned match object
+            itself, which is only ever one representative value picked
+            across the whole cluster (see _pick_priority_match). This lets a
+            reviewer jump straight to the exact reference face responsible
+            for one specific timestamp, not just "some face of this
+            performer". None when that frame's own match has no embedding
+            index at all (e.g. a local-library performer match -- see
+            recognizer.py's own matched_embedding_index field docs).
         performer_link_index: see _link_key -- tallies linked (same real
             person, different catalog record) matches together instead of
             as separate candidates.
@@ -502,14 +517,14 @@ def aggregate_matches(
     # linked-group id (see _link_key) rather than its raw stashdb_id, so a
     # linked duplicate doesn't fork into a second entry here.
     match_scores: dict[str, list[float]] = defaultdict(list)
-    match_frames: dict[str, list[tuple[int, float, "DetectedFace"]]] = defaultdict(list)
+    match_frames: dict[str, list[tuple[int, float, "DetectedFace", Optional[int]]]] = defaultdict(list)
     match_candidates: dict[str, list[PerformerMatch]] = defaultdict(list)
 
     for frame_idx, result in cluster:
         for match in result.matches:
             key = _canonical_identity(match, performer_link_index)
             match_scores[key].append(match.combined_score)
-            match_frames[key].append((frame_idx, match.combined_score, result.face))
+            match_frames[key].append((frame_idx, match.combined_score, result.face, match.matched_embedding_index))
             match_candidates[key].append(match)
 
     # Rank (and display) by: the best single frame's distance, with a
@@ -558,6 +573,7 @@ def aggregate_matches(
 
         top_timestamps_sec: list[float] = []
         top_timestamp_boxes: list[Optional[dict]] = []
+        top_timestamp_embedding_indices: list[Optional[int]] = []
         if frame_timestamps:
             best_frames = sorted(match_frames[link_key], key=lambda fs: fs[1])[:4]
             # Best-scoring frame for a given timestamp wins its bbox slot --
@@ -567,9 +583,14 @@ def aggregate_matches(
             # below skips any timestamp already present as a key, and dict
             # key presence, not truthiness, is what's checked -- an earlier
             # frame correctly resolving to bbox=None still blocks a later,
-            # worse one from filling it in).
+            # worse one from filling it in). ts_to_embedding_index follows
+            # the exact same one-winner-per-timestamp rule, in lockstep with
+            # ts_to_bbox -- both are keyed and filled from the same
+            # best_frames iteration so they can never disagree on which
+            # frame "won" a given timestamp.
             ts_to_bbox: dict[float, Optional[dict]] = {}
-            for frame_idx, _score, face in best_frames:
+            ts_to_embedding_index: dict[float, Optional[int]] = {}
+            for frame_idx, _score, face, frame_embedding_index in best_frames:
                 if frame_idx not in frame_timestamps:
                     continue
                 ts = frame_timestamps[frame_idx]
@@ -591,8 +612,10 @@ def aggregate_matches(
                         "confidence": face.confidence,
                     }
                 ts_to_bbox[ts] = resolved_bbox
+                ts_to_embedding_index[ts] = frame_embedding_index
             top_timestamps_sec = sorted(ts_to_bbox)
             top_timestamp_boxes = [ts_to_bbox[t] for t in top_timestamps_sec]
+            top_timestamp_embedding_indices = [ts_to_embedding_index[t] for t in top_timestamps_sec]
 
         response = _match_to_response(
             match,
@@ -600,6 +623,7 @@ def aggregate_matches(
             distance=min_score,
             top_timestamps_sec=top_timestamps_sec,
             top_timestamp_boxes=top_timestamp_boxes,
+            top_timestamp_embedding_indices=top_timestamp_embedding_indices,
         )
         aggregated.append((response, weighted_score))
 
@@ -1073,6 +1097,7 @@ def hybrid_matching(
                 "match": aggregated[0],
                 "top_timestamps_sec": aggregated[0].top_timestamps_sec,
                 "top_timestamp_boxes": aggregated[0].top_timestamp_boxes,
+                "top_timestamp_embedding_indices": aggregated[0].top_timestamp_embedding_indices,
             })
 
     cluster_by_id = {p["stashdb_id"]: p for p in cluster_persons}
@@ -1131,6 +1156,7 @@ def hybrid_matching(
             # frequency's match object was preferred above.
             "top_timestamps_sec": cluster_result["top_timestamps_sec"] if cluster_result else [],
             "top_timestamp_boxes": cluster_result["top_timestamp_boxes"] if cluster_result else [],
+            "top_timestamp_embedding_indices": cluster_result["top_timestamp_embedding_indices"] if cluster_result else [],
         })
 
     # Sort by hybrid score (higher is better)
@@ -1157,6 +1183,7 @@ def hybrid_matching(
             distance=p["distance"],
             top_timestamps_sec=p["top_timestamps_sec"],
             top_timestamp_boxes=p["top_timestamp_boxes"],
+            top_timestamp_embedding_indices=p["top_timestamp_embedding_indices"],
         )
         persons.append(PersonResult(
             person_id=i,

@@ -6544,7 +6544,26 @@
         // emit a null/empty one the click handler would have to re-check.
         const box = (c.top_timestamp_boxes || [])[i];
         const boxAttr = box ? ` data-bbox='${JSON.stringify(box)}'` : '';
-        return `<button type="button" class="ss-btn ss-btn-tiny ss-sfm-jump-btn" data-time="${t}"${boxAttr}>${formatDuration(t)}</button>`;
+        const btn = `<button type="button" class="ss-btn ss-btn-tiny ss-sfm-jump-btn" data-time="${t}"${boxAttr}>${formatDuration(t)}</button>`;
+
+        // top_timestamp_embedding_indices[i] (same index/order again) is
+        // the specific reference embedding_index that frame's own match
+        // nearest-matched against -- can genuinely differ per timestamp,
+        // unlike this candidate's one overall matched_embedding_index (see
+        // that field's own docstring in identification_router.py). This
+        // plugin never resolves or links to that reference face itself --
+        // same data-* convention as _reviewDataAttrs above (stash-sense.js),
+        // just carried per-timestamp here too, for a third-party plugin to
+        // read without reconstructing it. Omitted entirely (not an empty-
+        // attribute slot) when this specific timestamp has no resolved
+        // embedding_index at all (e.g. a local-library-only match) --
+        // nothing for a reader to cross-reference.
+        const embIdx = (c.top_timestamp_embedding_indices || [])[i];
+        const uid = SS.reviewableUniversalId ? SS.reviewableUniversalId(c) : (c.universal_id || '');
+        const cropSlot = (embIdx !== null && embIdx !== undefined && uid)
+          ? `<div class="ss-sfm-crop-slot" data-ss-universal-id="${escapeHtml(uid)}" data-ss-embedding-index="${embIdx}"></div>`
+          : '';
+        return `<div class="ss-sfm-jump-item">${cropSlot}${btn}</div>`;
       }).join('');
       const linksHtml = sceneFaceMatchLinksHtml(c);
       // Don't pre-select a weak match: 5 or fewer frames, or under 10%

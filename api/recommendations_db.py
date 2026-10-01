@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -345,6 +345,7 @@ class RecommendationsDB:
                 top_timestamps_sec TEXT,
                 original_name TEXT,
                 top_boxes_json TEXT,
+                top_embedding_indices_json TEXT,
                 UNIQUE(fingerprint_id, person_id, match_rank)
             );
             CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
@@ -913,6 +914,20 @@ class RecommendationsDB:
             if cols and "top_boxes_json" not in cols:
                 conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN top_boxes_json TEXT")
             conn.execute("UPDATE schema_version SET version = 22")
+
+        if from_version < 23:
+            # top_embedding_indices_json: same index/order as
+            # top_timestamps_sec/top_boxes_json (a JSON list of ints or
+            # nulls) -- the specific reference embedding_index that
+            # timestamp's own frame nearest-matched against, letting a
+            # caller jump straight to the exact reference face responsible
+            # for one specific timestamp instead of just this match's one
+            # representative matched_embedding_index. Purely additive, same
+            # reasoning as top_boxes_json above.
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_fingerprint_matches)")}
+            if cols and "top_embedding_indices_json" not in cols:
+                conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN top_embedding_indices_json TEXT")
+            conn.execute("UPDATE schema_version SET version = 23")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2095,7 +2110,9 @@ class RecommendationsDB:
         top_timestamp_boxes (same length/order as top_timestamps_sec, each
         entry a {x,y,width,height,confidence} dict or None -- see
         aggregate_matches' own docstring in scene_matcher.py -- stored as
-        JSON in top_boxes_json).
+        JSON in top_boxes_json), top_timestamp_embedding_indices (same
+        length/order too, each entry an int reference embedding_index or
+        None -- stored as JSON in top_embedding_indices_json).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
@@ -2106,8 +2123,8 @@ class RecommendationsDB:
                     universal_id, stashdb_id, name, confidence, distance, country,
                     image_url, endpoint, already_tagged, local_performer_id,
                     source, catalogue_url, profile_url, top_timestamps_sec, original_name,
-                    top_boxes_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    top_boxes_json, top_embedding_indices_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -2119,6 +2136,7 @@ class RecommendationsDB:
                         m.get("profile_url"), json.dumps(m.get("top_timestamps_sec") or []),
                         m.get("original_name"),
                         json.dumps(m.get("top_timestamp_boxes") or []),
+                        json.dumps(m.get("top_timestamp_embedding_indices") or []),
                     )
                     for m in matches
                 ],
@@ -2138,6 +2156,9 @@ class RecommendationsDB:
                 d = dict(row)
                 d["top_timestamps_sec"] = json.loads(d["top_timestamps_sec"]) if d.get("top_timestamps_sec") else []
                 d["top_timestamp_boxes"] = json.loads(d["top_boxes_json"]) if d.get("top_boxes_json") else []
+                d["top_timestamp_embedding_indices"] = (
+                    json.loads(d["top_embedding_indices_json"]) if d.get("top_embedding_indices_json") else []
+                )
                 d["is_best_match"] = bool(d["is_best_match"])
                 d["already_tagged"] = bool(d["already_tagged"])
                 results.append(d)

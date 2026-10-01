@@ -1,3 +1,15 @@
+## 2026-10-01
+
+### 0.40.0 (sidecar)
+- Feature: each jump-to-frame timestamp now also reports the specific
+  reference embedding_index it nearest-matched against, which can differ
+  per timestamp. Purely additive.
+
+### 0.30.0 (plugin)
+- Feature: Face Recommendations' jump-to-frame buttons now also carry a
+  per-timestamp embedding-index data attribute, for a third-party plugin
+  to resolve the exact matched reference face.
+
 ## 2026-09-30
 
 ### 0.39.3 (sidecar)
