@@ -95,6 +95,7 @@ class TestStoredDataPath:
             stashdb_id="xyz", name="Someone New", confidence=0.95, distance=0.05, country=None,
             image_url=None, endpoint="stashdb.org", local_performer_id=None, source=None,
             catalogue_url=None, profile_url=None, top_timestamps_sec=[],
+            top_timestamp_boxes=[], top_timestamp_embedding_indices=[],
         )
         person = SimpleNamespace(person_id=0, frame_count=20, best_match=match, all_matches=[match])
         response = SimpleNamespace(persons=[person])
@@ -166,6 +167,7 @@ class TestRematchPath:
             stashdb_id="abc", name="Performer", confidence=0.9, distance=0.1, country=None,
             image_url=None, endpoint="stashdb.org", local_performer_id=None, source=None,
             catalogue_url=None, profile_url=None, top_timestamps_sec=[],
+            top_timestamp_boxes=[], top_timestamp_embedding_indices=[],
         )
         person = SimpleNamespace(person_id=0, frame_count=12, best_match=match, all_matches=[match])
         response = SimpleNamespace(persons=[person])
@@ -249,6 +251,7 @@ class TestUseSpriteGatedBySetting:
             stashdb_id="xyz", name="Someone", confidence=0.9, distance=0.1, country=None,
             image_url=None, endpoint="stashdb.org", local_performer_id=None, source=None,
             catalogue_url=None, profile_url=None, top_timestamps_sec=[],
+            top_timestamp_boxes=[], top_timestamp_embedding_indices=[],
         )
         person = SimpleNamespace(person_id=0, frame_count=20, best_match=match, all_matches=[match])
         response = SimpleNamespace(persons=[person])

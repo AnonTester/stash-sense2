@@ -55,12 +55,19 @@ def _make_match(stashdb_id, combined_score, universal_id=None, local_performer_i
     dataclass default) -- a bare Mock() would otherwise auto-vivify a
     truthy attribute here, which _canonical_identity's local-index-link
     check reads as "this looks like a stash_id-linked local match" even
-    for a match never meant to simulate one."""
+    for a match never meant to simulate one. matched_embedding_index
+    defaults to None the same way -- aggregate_matches reads it straight
+    off each match into top_timestamp_embedding_indices, which _resp
+    below validates through a real PerformerMatchResponse (a Pydantic
+    list[Optional[int]] field); an auto-vivified Mock there fails that
+    validation instead of a plain AttributeError, same risk as
+    local_performer_id already guards against."""
     match = Mock()
     match.stashdb_id = stashdb_id
     match.combined_score = combined_score
     match.universal_id = universal_id or f"stashdb.org:{stashdb_id}"
     match.local_performer_id = local_performer_id
+    match.matched_embedding_index = None
     return match
 
 
@@ -290,8 +297,22 @@ def _conf(distance):
 def _embedded_result(matches, vector):
     """Like _make_result, but with a real embedding vector so
     cluster_faces_by_person's cosine-distance clustering has something
-    real to compare (a bare Mock() would fail the np.mean/dot math)."""
-    return SimpleNamespace(matches=matches, embedding=SimpleNamespace(embedding=np.array(vector)))
+    real to compare (a bare Mock() would fail the np.mean/dot math).
+
+    Also carries a minimal `.face` (aggregate_matches reads result.face
+    unconditionally, not just when frame_timestamps is given, to pair
+    each frame with its own bbox/matched_embedding_index) -- a bare
+    SimpleNamespace with no such attribute raises AttributeError the
+    instant any test here exercises more than one frame, which every
+    multi-result test in this file does. rotation_applied=0.0 keeps the
+    bbox on the plain (non-rotated) path; no test in this file exercises
+    _derotate_bbox itself, that's test_scene_matcher_logic's own
+    rotation-specific coverage if/when added."""
+    face = SimpleNamespace(
+        bbox={"x": 0, "y": 0, "w": 10, "h": 10, "rotation_applied": 0.0},
+        confidence=0.9,
+    )
+    return SimpleNamespace(matches=matches, face=face, embedding=SimpleNamespace(embedding=np.array(vector)))
 
 
 class TestHybridMatchingFrameTimestamps:
