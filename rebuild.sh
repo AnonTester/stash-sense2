@@ -21,10 +21,13 @@ PLUGIN_DEST="${PLUGIN_DEST:-/opt/stash-storage/config/plugins/stash-sense2}"
 case "$PLUGIN_DEST" in
   *:*)
     rsync -t plugin/*.js plugin/*.css plugin/*.py "$PLUGIN_DEST/"
+    rsync -t plugin/userscripts/*.js "$PLUGIN_DEST/userscripts/"
     rsync -t plugin/stash-sense.yml "$PLUGIN_DEST/stash-sense2.yml"
     ;;
   *)
     cp plugin/*.js plugin/*.css plugin/*.py "$PLUGIN_DEST/" --preserve 2>&1 | grep -v 'plugin/__pycache__'
+    mkdir -p "$PLUGIN_DEST/userscripts"
+    cp plugin/userscripts/*.js "$PLUGIN_DEST/userscripts/" --preserve
     cp plugin/stash-sense.yml "$PLUGIN_DEST/stash-sense2.yml" --preserve
     ;;
 esac

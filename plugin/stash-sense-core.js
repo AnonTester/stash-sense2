@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.33.1';
+  const PLUGIN_VERSION = '0.35.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -343,6 +343,7 @@
           performers {
             id
             name
+            disambiguation
             image_path
           }
         }
@@ -368,6 +369,7 @@
         findPerformer(id: $id) {
           id
           name
+          disambiguation
           image_path
           scene_count
         }
@@ -599,6 +601,15 @@
   /**
    * Escape a string for safe insertion into HTML
    */
+  /**
+   * The light-grey " (disambiguation)" suffix shown behind a performer name, so
+   * same-name performers can be told apart. Empty string when there is none.
+   */
+  function disambHtml(disambiguation) {
+    const text = (disambiguation || '').trim();
+    return text ? ` <span class="ss-disamb">(${escapeHtml(text)})</span>` : '';
+  }
+
   function escapeHtml(str) {
     const div = document.createElement('div');
     div.appendChild(document.createTextNode(String(str)));
@@ -874,6 +885,7 @@
     distanceToConfidence,
     getConfidenceClass,
     escapeHtml,
+    disambHtml,
     relativeUrl,
     reviewableUniversalId,
     thumbnailUrl,

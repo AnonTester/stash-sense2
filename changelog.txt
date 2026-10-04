@@ -1,3 +1,22 @@
+## 2026-10-04
+
+### 0.45.0 (sidecar)
+- Feature: every performer match now carries the performer's `disambiguation`, resolved from the database at
+  response time (so stored scene results and Face Recommendations pick it up too, no rescan needed).
+
+### 0.35.0 (plugin)
+- Feature: the disambiguation is shown in light grey behind a matched performer's name in Identify results
+  (scene, frame, selection, image, gallery), "In library as" lines and Face Recommendations, to tell same-name performers apart.
+- Feature: the userscript's identify popup shows it too (userscript 0.2.9).
+
+## 2026-10-03
+
+### 0.34.0 (plugin)
+- Feature: new userscript (plugin/userscripts/stash-sense2-identify.user.js) to identify an image or a drawn
+  area on any web page via the sidecar's /identify; installable and auto-updating from Stash itself
+  (the manifest now serves userscripts/ as plugin assets; rebuild.sh deploys it).
+- Improvement: the userscript also reads images from Cloudflare-protected sites (via a briefly opened background tab).
+
 ## 2026-10-01
 
 ### 0.33.1 (plugin)

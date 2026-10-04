@@ -40,6 +40,7 @@ from scene_matcher import (
     hybrid_matching,
 )
 from stashbox_utils import _get_stashbox_client, _extract_endpoint
+from performer_disambiguation import get_disambiguation
 from sprite_parser import fetch_sprite_from_stash
 from recommendations_router import (
     save_scene_fingerprint,
@@ -171,6 +172,7 @@ class PerformerMatchResponse(BaseModel):
     top_timestamp_embedding_indices: list[Optional[int]] = Field(default_factory=list, description="Same length and order as top_timestamps_sec -- top_timestamp_embedding_indices[i] is the specific reference embedding_index that timestamp's own frame nearest-matched against, or None (e.g. a local-library match, which has no such index). Unlike this response's single top-level matched_embedding_index (one representative value for the whole match), this can genuinely differ per timestamp -- different frames of the same tracked person can each resolve best against a different reference photo -- letting a caller jump straight to the exact reference face responsible for one specific timestamp.")
     universal_id: Optional[str] = Field(None, description="This match's own universal_id (e.g. 'stashdb.org:<uuid>', 'local:<id>', or '<source>:<id>' for a catalogue match), for callers that need to cross-reference a match without reconstructing endpoint+stashdb_id themselves.")
     matched_embedding_index: Optional[int] = Field(None, description="The usearch index position of the one specific reference face that won this match -- None for a local-index match (no such index) or if unavailable. Distinct from any StashDB performer id: this points at exactly which photo of that performer was matched.")
+    disambiguation: Optional[str] = Field(None, description="The performer's disambiguation (e.g. a year or studio), shown after the name to tell same-name performers apart. Resolved from performers.db at response time; None for a local-library match (the plugin reads that one from Stash) or when the performer has none.")
     original_name: Optional[str] = Field(None, description="Set only when the 'Prefer Western Names' setting swapped `name` for a western-script alias -- this is the original (usually non-Latin-script) name, for an 'aka ...' display line.")
 
 
@@ -216,6 +218,7 @@ class GalleryPerformerResult(BaseModel):
     image_url: Optional[str] = Field(None, description="StashDB profile image URL")
     endpoint: Optional[str] = Field(None, description="StashBox endpoint domain")
     local_performer_id: Optional[str] = Field(None, description="Local Stash performer id, set only for local-index matches")
+    disambiguation: Optional[str] = Field(None, description="The performer's disambiguation, shown after the name (see PerformerMatchResponse.disambiguation)")
 
 
 class GalleryIdentifyRequest(BaseModel):
@@ -324,6 +327,7 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         universal_id=uid,
         matched_embedding_index=getattr(m, "matched_embedding_index", None),
         original_name=getattr(m, "original_name", None),
+        disambiguation=get_disambiguation(uid),
     )
     defaults.update(overrides)
     return PerformerMatchResponse(**defaults)
@@ -693,6 +697,7 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
                                 "image_url": best.image_url,
                                 "endpoint": _extract_endpoint(best.universal_id),
                                 "local_performer_id": getattr(best, "local_performer_id", None),
+                                "disambiguation": get_disambiguation(best.universal_id),
                             }
 
                 if (i + 1) % 10 == 0:
@@ -728,6 +733,7 @@ async def identify_gallery(request: GalleryIdentifyRequest, _=Depends(require_db
             image_url=info.get("image_url"),
             endpoint=info.get("endpoint"),
             local_performer_id=info.get("local_performer_id"),
+            disambiguation=info.get("disambiguation"),
         ))
 
     # Sort by image count desc, then best distance asc

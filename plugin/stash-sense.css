@@ -342,6 +342,12 @@
 /* "aka <original name>" -- settings.py's prefer_western_names swapped
    the display name for a western alias; shown so the original (usually
    non-Latin-script) name isn't hidden entirely. */
+/* Disambiguation behind a performer name, e.g. "Linda (GGG 2002)" -- see SS.disambHtml. */
+.ss-disamb {
+  color: var(--bs-secondary-color, #888);
+  font-weight: normal;
+}
+
 .ss-match-original-name {
   font-size: 12px;
   font-style: italic;

@@ -2392,7 +2392,7 @@
       const candidateCount = d.candidate_count || (d.candidates || []).length;
       const topNames = (d.candidates || [])
         .filter(c => c.is_best_match)
-        .map(c => c.name)
+        .map(c => (c.name && c.disambiguation) ? `${c.name} (${c.disambiguation})` : c.name)
         .filter(Boolean);
 
       return SS.createElement('div', {
@@ -6691,7 +6691,7 @@
               }
             </div>
           </label>
-          <div class="ss-sfm-candidate-name">${escapeHtmlBreakable(c.name || 'Unknown')}</div>
+          <div class="ss-sfm-candidate-name">${escapeHtmlBreakable(c.name || 'Unknown')}${SS.disambHtml(c.disambiguation)}</div>
           ${c.original_name ? `<div class="ss-sfm-candidate-original-name">aka ${escapeHtmlBreakable(c.original_name)}</div>` : ''}
           <div class="ss-sfm-candidate-meta">
             ${Math.round((c.confidence || 0) * 100)}% match

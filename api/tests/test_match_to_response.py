@@ -55,3 +55,15 @@ class TestMatchToResponseIdentityPassthrough:
         resp = _match_to_response(_match(distance=0.9), distance=0.05, confidence=0.95)
         assert resp.distance == 0.05
         assert resp.confidence == 0.95
+
+
+class TestMatchToResponseDisambiguation:
+    def test_disambiguation_is_resolved_from_the_universal_id(self, monkeypatch):
+        import identification_router
+        monkeypatch.setattr(identification_router, "get_disambiguation", lambda uid: "GGG 2002")
+        assert _match_to_response(_match()).disambiguation == "GGG 2002"
+
+    def test_no_disambiguation_defaults_to_none(self, monkeypatch):
+        import identification_router
+        monkeypatch.setattr(identification_router, "get_disambiguation", lambda uid: None)
+        assert _match_to_response(_match()).disambiguation is None

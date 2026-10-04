@@ -927,7 +927,16 @@
       // by its linked stash_id.
       async _resolveLibraryPerformer(match, graphqlUrl) {
         if (match.local_performer_id) {
-          return { id: match.local_performer_id, name: match.name };
+          // A local-library match's disambiguation lives in Stash, not in the
+          // sidecar's database -- fetch it so the match shows it like any other.
+          if (!match.disambiguation) {
+            try {
+              match.disambiguation = (await SS.getPerformer(match.local_performer_id))?.disambiguation || null;
+            } catch (e) {
+              match.disambiguation = null;
+            }
+          }
+          return { id: match.local_performer_id, name: match.name, disambiguation: match.disambiguation };
         }
         if (match.source) {
           // Catalogue match: match.stashdb_id is the internal database id,
@@ -980,7 +989,7 @@
                     data-scene-id="${sceneId}">
               Add to Scene
             </button>
-            <span class="ss-local-status">In library as: ${localPerformer.name}</span>`;
+            <span class="ss-local-status">In library as: ${localPerformer.name}${SS.disambHtml(localPerformer.disambiguation)}</span>`;
         } else {
           actionsHtml = `
             <button class="ss-btn ss-btn-create"
@@ -1009,7 +1018,7 @@
               ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
             </div>
             <div class="ss-match-info">
-              <h4>${match.name}</h4>
+              <h4>${match.name}${SS.disambHtml(match.disambiguation)}</h4>
               ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
               <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
               ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
@@ -1054,7 +1063,7 @@
                         data-scene-id="${sceneId}">
                   Add to Scene
                 </button>
-                <span class="ss-local-status">In library as: ${altLocalPerformer.name}</span>`;
+                <span class="ss-local-status">In library as: ${altLocalPerformer.name}${SS.disambHtml(altLocalPerformer.disambiguation)}</span>`;
             } else {
               altActionsHtml = `
                 <button class="ss-btn ss-btn-create ss-btn-sm"
@@ -1080,7 +1089,7 @@
                   ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
-                  <h4>${m.name}</h4>
+                  <h4>${m.name}${SS.disambHtml(m.disambiguation)}</h4>
                   ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                   <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                   ${altShowAlreadyTagged ? '<span class="ss-tagged-badge ss-tagged-badge-sm">Tagged</span>' : ''}
@@ -1805,7 +1814,7 @@
                   ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
-                  <h4>${match.name}</h4>
+                  <h4>${match.name}${SS.disambHtml(match.disambiguation)}</h4>
                   ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
@@ -1821,7 +1830,7 @@
                                  data-image-id="${imageId}">
                            Add to Image
                          </button>
-                         <span class="ss-local-status">In library as: ${localPerformer.name}</span>`
+                         <span class="ss-local-status">In library as: ${localPerformer.name}${SS.disambHtml(localPerformer.disambiguation)}</span>`
                       : `<button class="ss-btn ss-btn-create"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
@@ -1862,7 +1871,7 @@
                       ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
-                      <h4>${m.name}</h4>
+                      <h4>${m.name}${SS.disambHtml(m.disambiguation)}</h4>
                       ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
@@ -1878,7 +1887,7 @@
                                      data-image-id="${imageId}">
                                Add to Image
                              </button>
-                             <span class="ss-local-status">In library as: ${altLocalPerformer.name}</span>`
+                             <span class="ss-local-status">In library as: ${altLocalPerformer.name}${SS.disambHtml(altLocalPerformer.disambiguation)}</span>`
                           : `<button class="ss-btn ss-btn-create ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
@@ -2125,7 +2134,7 @@
                   ${match.image_url ? `<img src="${SS.thumbnailUrl(match.image_url)}" alt="${match.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                 </div>
                 <div class="ss-match-info">
-                  <h4>${match.name}</h4>
+                  <h4>${match.name}${SS.disambHtml(match.disambiguation)}</h4>
                   ${match.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(match.original_name) : match.original_name}</div>` : ''}
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
@@ -2143,7 +2152,7 @@
                                  data-scene-id="${sceneId}">
                            Add to Scene
                          </button>
-                         <span class="ss-local-status">In library as: ${localPerformer.name}</span>`
+                         <span class="ss-local-status">In library as: ${localPerformer.name}${SS.disambHtml(localPerformer.disambiguation)}</span>`
                       : `<button class="ss-btn ss-btn-create"
                                  data-endpoint="${imgEndpoint}"
                                  data-stashdb-id="${match.stashdb_id}"
@@ -2187,7 +2196,7 @@
                       ${m.image_url ? `<img src="${SS.thumbnailUrl(m.image_url)}" alt="${m.name}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" />` : '<div class="ss-no-image">No image</div>'}
                     </div>
                     <div class="ss-match-info">
-                      <h4>${m.name}</h4>
+                      <h4>${m.name}${SS.disambHtml(m.disambiguation)}</h4>
                       ${m.original_name ? `<div class="ss-match-original-name">aka ${SS.escapeHtml ? SS.escapeHtml(m.original_name) : m.original_name}</div>` : ''}
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
@@ -2205,7 +2214,7 @@
                                      data-scene-id="${sceneId}">
                                Add to Scene
                              </button>
-                             <span class="ss-local-status">In library as: ${altLocalPerformer.name}</span>`
+                             <span class="ss-local-status">In library as: ${altLocalPerformer.name}${SS.disambHtml(altLocalPerformer.disambiguation)}</span>`
                           : `<button class="ss-btn ss-btn-create ss-btn-sm"
                                      data-endpoint="${altEp}"
                                      data-stashdb-id="${m.stashdb_id}"
@@ -2684,13 +2693,13 @@
           const galStashboxUrl = this._stashboxPerformerUrl(galEndpoint, performer.performer_id);
           const galGraphqlUrl = this._stashboxGraphqlUrl(galEndpoint);
           const localPerformer = await this._resolveLibraryPerformer(
-            { local_performer_id: performer.local_performer_id, stashdb_id: performer.performer_id, name: performer.name },
+            { local_performer_id: performer.local_performer_id, stashdb_id: performer.performer_id, name: performer.name, disambiguation: performer.disambiguation },
             galGraphqlUrl,
           );
 
           personDiv.innerHTML = `
             <div class="ss-person-header">
-              <span class="ss-person-label">${performer.name}</span>
+              <span class="ss-person-label">${performer.name}${SS.disambHtml(performer.disambiguation || localPerformer?.disambiguation)}</span>
               <span class="ss-person-frames">Found in ${performer.image_count}/${results.total_images} images</span>
             </div>
             <div class="ss-match">
@@ -2723,7 +2732,7 @@
                               data-image-ids='${JSON.stringify(performer.image_ids)}'>
                         Add to Gallery
                       </button>
-                      <span class="ss-local-status">In library as: ${localPerformer.name}</span>
+                      <span class="ss-local-status">In library as: ${localPerformer.name}${SS.disambHtml(localPerformer.disambiguation)}</span>
                     </div>
                   </div>
                 ` : `

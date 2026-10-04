@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 import face_config
 from recommendations_db import Recommendation, RecommendationsDB
+from performer_disambiguation import get_disambiguation
 from stash_client_unified import StashClientUnified
 from analyzers import DuplicatePerformerAnalyzer, DuplicateSceneFilesAnalyzer, DuplicateScenesAnalyzer, UpstreamPerformerAnalyzer, UpstreamTagAnalyzer, UpstreamStudioAnalyzer, UpstreamSceneAnalyzer
 from analyzers.scene_fingerprint_match import SceneFingerprintMatchAnalyzer
@@ -734,6 +735,7 @@ def _scene_face_match_candidate(rec: Recommendation) -> dict[str, Any]:
         "universal_id": details.get("universal_id"),
         "stashdb_id": details.get("stashdb_id"),
         "name": details.get("name"),
+        "disambiguation": get_disambiguation(details.get("universal_id")),
         "confidence": rec.confidence if rec.confidence is not None else details.get("confidence"),
         "distance": details.get("distance"),
         "country": details.get("country"),
@@ -1993,6 +1995,7 @@ def _match_row_to_response_dict(row: dict) -> dict:
     return {
         "stashdb_id": row["stashdb_id"],
         "name": row["name"],
+        "disambiguation": get_disambiguation(row.get("universal_id")),
         "confidence": row["confidence"],
         "distance": row["distance"],
         "country": row["country"],

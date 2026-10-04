@@ -97,6 +97,39 @@ Navigate to `/plugins/stash-sense2` in Stash to open the Stash Sense 2 dashboard
 1. **Database** — Click **Download Database** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
 2. **Models** — Click **Download All** to download the required ONNX models (buffalo_l face recognition, ~200 MB)
 
+### Optional: identify from any web page (userscript)
+
+`plugin/userscripts/stash-sense2-identify.user.js` is a [Violentmonkey](https://violentmonkey.github.io/) / Tampermonkey userscript that brings the plugin's face identification to any website: right-click an image, or draw an area over a face, and the matches appear in a modal like the plugin's, including each performer's disambiguation. Results are read-only — outside Stash there is no scene or image to attach them to.
+
+**Install**
+
+Stash serves the script itself, so there is nothing to host. With the plugin installed, open this URL in the browser that has the userscript manager (use your own Stash address) and confirm the install:
+
+```
+http://<stash-host>:9999/plugin/stash-sense2/assets/userscripts/stash-sense2-identify.user.js
+```
+
+The manager re-checks that same URL for a newer `@version`, so updating the plugin install (or running `rebuild.sh`) also updates the userscript. The script asks for cross-origin access (`@connect *`) because it has to reach your sidecar and download images from arbitrary sites; the manager prompts for this.
+
+**Settings**
+
+On first use the script opens its settings (afterwards: the userscript manager's toolbar menu → *Settings*). They are stored by the userscript manager, not in the file.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Sidecar URL | — (required) | The Stash Sense 2 API, e.g. `http://your-host:6961` — the same address as the plugin's API URL. A **Test** button checks `/health`. |
+| Stash URL | — (optional) | Only used to link matches that are in your library to their Stash performer page. |
+| Menu trigger | Ctrl | Key to hold while right-clicking to open the menu: Ctrl, Alt, Shift, or none (plain right-click, replacing the browser's own menu). |
+| Matches per face | 5 | Number of candidate performers shown per detected face (1–20). |
+| Area-select margin (%) | 100 | Context added on each side of a drawn area, as a share of the box size (neutral gray where the image ends). The face detector finds nothing if the face fills the whole picture; 100 suits a box drawn tight on the face. |
+
+**Use**
+
+- **Ctrl + right-click** (or your chosen trigger) shows a small menu: *Identify this image* and *Select area to identify…*. The same actions are in the manager's toolbar menu. A userscript cannot add entries to the browser's own context menu, so it shows its own.
+- *Select area*: drag a box over the face, move it or drag its handles until it fits, then **Use for identify** (or Enter; Esc cancels). The box is cut out of the image or video underneath at its native resolution with the margin above added around it. If no face is found it retries with wider and then narrower margins.
+- Images are downloaded through the userscript manager, so sites that block cross-origin image access still work. Sites behind bot protection (e.g. Cloudflare) refuse that download; the script then opens the image URL in a background tab for a moment — exactly what "open image in new tab" does — reads it there and closes the tab again. A `<video>` is identified from its current frame; a video or canvas that the site protects against cross-origin reads cannot be.
+- A match that is in your own Stash library is marked *in your library*.
+
 ## Configuration
 
 | Variable | Required | Default | Description |
