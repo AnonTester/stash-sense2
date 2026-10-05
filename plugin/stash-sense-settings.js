@@ -709,6 +709,7 @@
     extracting: 'Extracting',
     verifying: 'Verifying',
     swapping: 'Applying',
+    finalizing: 'Finalizing',
     reloading: 'Reloading',
   };
 
@@ -717,6 +718,11 @@
     const POLL_TIMEOUT_MS = 30 * 60 * 1000; // large full downloads can take a while
     const pollStart = Date.now();
     let pollErrors = 0;
+    // A single failed poll is not a failed update: the sidecar can be too busy to answer for a while mid-update
+    // (and a server-side failure is reported by status 'failed', not by a poll error). Keep polling and say so;
+    // only give up after several minutes of silence, and then without claiming the update failed.
+    const POLL_ERRORS_BEFORE_NOTICE = 5;
+    const POLL_ERRORS_BEFORE_GIVING_UP = 150; // ~5 minutes at 2 s
 
     const interval = setInterval(async () => {
       // The section may have been replaced from under us (e.g. user hit
@@ -740,11 +746,13 @@
         pollErrors = 0;
       } catch (e) {
         pollErrors++;
-        if (pollErrors >= 5) {
+        if (pollErrors >= POLL_ERRORS_BEFORE_GIVING_UP) {
           clearInterval(interval);
-          btn.textContent = 'Error';
+          btn.textContent = 'No response - refresh to check';
           btn.className = 'ss-btn ss-btn-danger ss-btn-sm ss-download-db-btn';
           btn.disabled = false;
+        } else if (pollErrors >= POLL_ERRORS_BEFORE_NOTICE) {
+          btn.textContent = 'Waiting for the sidecar\u2026 (update may still be running)';
         }
         return;
       }

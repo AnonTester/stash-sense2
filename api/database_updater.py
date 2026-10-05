@@ -97,6 +97,7 @@ class UpdateStatus(str, Enum):
     EXTRACTING = "extracting"
     VERIFYING = "verifying"
     SWAPPING = "swapping"
+    FINALIZING = "finalizing"
     RELOADING = "reloading"
     COMPLETE = "complete"
     FAILED = "failed"
@@ -114,6 +115,8 @@ _DELTA_PHASE_STATUS = {
     "extracting": UpdateStatus.EXTRACTING,
     "verifying": UpdateStatus.VERIFYING,
     "applying": UpdateStatus.SWAPPING,
+    # regenerating faces.json/performers.json, recording dirty state, checksumming (delta_applier._finalize_chain)
+    "finalizing": UpdateStatus.FINALIZING,
 }
 
 
@@ -458,7 +461,7 @@ class DatabaseUpdater:
             # 5. Reload
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 90
-            self._reload_fn(self._data_dir)
+            await asyncio.to_thread(self._reload_fn, self._data_dir)
 
             # 6. Complete
             self._state.status = UpdateStatus.COMPLETE
@@ -526,7 +529,7 @@ class DatabaseUpdater:
 
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 95
-            self._reload_fn(self._data_dir)
+            await asyncio.to_thread(self._reload_fn, self._data_dir)
 
             self._state.status = UpdateStatus.COMPLETE
             self._state.progress_pct = 100
@@ -631,7 +634,7 @@ class DatabaseUpdater:
 
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 90
-            self._reload_fn(self._data_dir)
+            await asyncio.to_thread(self._reload_fn, self._data_dir)
 
             self._state.status = UpdateStatus.COMPLETE
             self._state.progress_pct = 100

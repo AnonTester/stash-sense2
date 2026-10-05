@@ -867,3 +867,47 @@ class TestApplyDeltaChainReceivesRecDb:
             await updater._run_delta_update(chain)
 
         assert mock_apply.call_args.kwargs["rec_db"] is fake_db
+
+
+class TestDeltaProgressStaysTruthful:
+    """After the hops, apply_delta_chain still exports JSON, records dirty state and checksums gigabytes -- minutes of
+    work that used to run on the event loop with progress stuck at 100% "Applying", so the plugin's polls timed out and
+    showed an error for an update that was still going. It now reports its own "finalizing" phase, and the reload runs on
+    a worker thread too."""
+
+    async def test_finalizing_phase_is_reported_with_its_own_status(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _write_manifest(data_dir, version="2026.02.12")
+        updater = DatabaseUpdater(data_dir=data_dir, reload_fn=MagicMock(return_value=True))
+        chain = [{"from_version": "2026.02.12", "to_version": "2026.02.15", "download_url": "https://example/d.zip"}]
+        seen = []
+
+        async def fake_apply(chain, data_dir, progress_cb=None, rec_db=None):
+            progress_cb("applying", 100)
+            seen.append(updater.get_status())
+            progress_cb("finalizing", 40)
+            seen.append(updater.get_status())
+            return {"new_version": "2026.02.15"}
+
+        with patch.object(updater, "_get_rec_db_safe", return_value=None), \
+             patch("database_updater.apply_delta_chain", fake_apply):
+            await updater._run_delta_update(chain)
+
+        assert (seen[0]["status"], seen[0]["progress_pct"]) == ("swapping", 100)
+        assert (seen[1]["status"], seen[1]["progress_pct"]) == ("finalizing", 40)
+        assert updater.get_status()["status"] == "complete"
+
+    async def test_reload_runs_off_the_event_loop(self, tmp_path):
+        import threading
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        _write_manifest(data_dir, version="2026.02.12")
+        reload_threads = []
+        updater = DatabaseUpdater(
+            data_dir=data_dir, reload_fn=lambda d: reload_threads.append(threading.current_thread()) or True)
+        chain = [{"from_version": "2026.02.12", "to_version": "2026.02.15", "download_url": "https://example/d.zip"}]
+        with patch.object(updater, "_get_rec_db_safe", return_value=None), \
+             patch("database_updater.apply_delta_chain", AsyncMock(return_value={"new_version": "2026.02.15"})):
+            await updater._run_delta_update(chain)
+        assert reload_threads and reload_threads[0] is not threading.main_thread()

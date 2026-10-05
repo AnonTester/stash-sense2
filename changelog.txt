@@ -1,3 +1,14 @@
+## 2026-10-05
+
+### 0.45.1 (sidecar)
+- Fix: applying a database delta no longer blocks the sidecar for minutes (status polls timed out mid-update);
+  the steps after the apply run off the main loop and report their own "finalizing" phase.
+- Improvement: a large delta applies about 10x faster (50 MB / 44k faces: ~10 min -> under a minute).
+
+### 0.35.1 (plugin)
+- Fix: a few failed status polls during a database update no longer show "Error" while it is still running;
+  it shows "Waiting for the sidecar..." and the new "Finalizing" phase.
+
 ## 2026-10-04
 
 ### 0.45.0 (sidecar)

@@ -97,6 +97,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -615,6 +616,52 @@ def _remove_catalogue_performer(conn: sqlite3.Connection, index: Index, performe
     conn.execute("DELETE FROM performers WHERE id = ?", (performer_id,))
 
 
+class _BatchedIndex:
+    """A usearch Index whose add() is queued and flushed in multi-threaded batches.
+
+    Adding vectors one at a time cost ~1.9 ms each against the ~1M-vector HNSW index (84 s of the 94 s apply step for a
+    44k-face delta); one batched call with a few threads is ~7x faster (12.8 s on the same delta). Only the operations
+    apply_delta_db uses are provided, with the semantics it relies on: `key in index` also sees queued keys, remove()
+    drops a queued vector (a key added then removed within one delta), and save() flushes first. Threads are capped
+    (usearch's default is every core, which only oversubscribes a CPU-capped container and measured SLOWER).
+    """
+
+    # Small on purpose: the native batched add holds the GIL for its whole duration, so the batch size is also the longest
+    # the server (event loop, status polls) can stall; 2000 vectors is well under a second.
+    MAX_PENDING = 2000
+    MAX_THREADS = 8
+
+    def __init__(self, index: Index):
+        self._index = index
+        self._pending: dict[int, np.ndarray] = {}
+        self._threads = max(1, min(self.MAX_THREADS, os.cpu_count() or 1))
+
+    def __contains__(self, key) -> bool:
+        return int(key) in self._pending or key in self._index
+
+    def add(self, key, vector) -> None:
+        self._pending[int(key)] = np.asarray(vector, dtype=np.float32)
+        if len(self._pending) >= self.MAX_PENDING:
+            self.flush()
+
+    def remove(self, key) -> None:
+        self._pending.pop(int(key), None)
+        if key in self._index:
+            self._index.remove(key)
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        keys = np.fromiter(self._pending.keys(), dtype=np.uint64, count=len(self._pending))
+        vectors = np.stack(list(self._pending.values()))
+        self._index.add(keys, vectors, threads=self._threads)
+        self._pending.clear()
+
+    def save(self, path: str) -> None:
+        self.flush()
+        self._index.save(path)
+
+
 def _upsert_face(conn: sqlite3.Connection, index: Index, fields: dict) -> bool:
     """Insert or update one face row + its usearch vector, keyed by
     embedding_index. Returns True for a brand-new face, False for an
@@ -695,6 +742,7 @@ def apply_delta_db(
     index_path = data_dir / "face_embeddings.usearch"
     if index_path.exists():
         index.load(str(index_path))
+    index = _BatchedIndex(index)
 
     delta_conn = sqlite3.connect(f"file:{delta_db_path}?mode=ro", uri=True)
     delta_conn.row_factory = sqlite3.Row
@@ -964,6 +1012,7 @@ def _record_dirty_state(
     face_level_touched_performer_ids: set[int], removed_performer_ids: set[int],
     metadata_only_performer_ids: set[int], upserted_face_vectors: dict[int, tuple[int, bytes]],
     from_version: str, to_version: str,
+    on_progress: Optional[Callable[[int], None]] = None,
 ) -> None:
     """Resolve every locally-touched performer_id from this whole chain
     application into the universal_id(s) delta_scope.py actually keys its
@@ -999,18 +1048,26 @@ def _record_dirty_state(
         old_conn.close()
     new_uids = _performer_universal_ids(conn)
 
+    # Collected, then written in one transaction each: this used to be one connection + commit per row (~60k rows for
+    # a catalogue-heavy delta = ~8 minutes). First writer of a (universal_id, reason) wins, as INSERT OR IGNORE did.
+    uid_rows: dict[tuple[str, str], tuple[str, str, str]] = {}
+
     def _record_both(pid: int, reason: str) -> None:
         old_uid, new_uid = old_uids.get(pid), new_uids.get(pid)
         if old_uid:
-            rec_db.record_dirty_universal_id(old_uid, reason, to_version)
+            uid_rows.setdefault((old_uid, reason), (old_uid, reason, to_version))
         if new_uid and new_uid != old_uid:
-            rec_db.record_dirty_universal_id(new_uid, reason, to_version)
+            uid_rows.setdefault((new_uid, reason), (new_uid, reason, to_version))
 
     for pid in face_level_touched_performer_ids | removed_performer_ids:
         _record_both(pid, "needs_rematch")
     for pid in metadata_only_performer_ids:
         _record_both(pid, "metadata_only")
+    rec_db.record_dirty_universal_ids(list(uid_rows.values()))
+    if on_progress:
+        on_progress(50)
 
+    vector_rows: list[tuple[int, str, bytes, str]] = []
     for embedding_index, (performer_id, vector) in upserted_face_vectors.items():
         uid = new_uids.get(performer_id)
         if uid is None:
@@ -1022,7 +1079,10 @@ def _record_dirty_state(
             logger.warning("Delta dirty-tracking: no universal_id for performer_id=%s (embedding_index=%s)",
                             performer_id, embedding_index)
             continue
-        rec_db.record_dirty_face_vector(embedding_index, uid, vector, to_version)
+        vector_rows.append((embedding_index, uid, vector, to_version))
+    rec_db.record_dirty_face_vectors(vector_rows)
+    if on_progress:
+        on_progress(100)
 
     # The marker is the START of this chain (from_version), not its end --
     # see this function's own docstring on why checking a scene sitting
@@ -1032,6 +1092,79 @@ def _record_dirty_state(
     # INSERT OR IGNORE means only the very first call to ever reach this
     # (across this deployment's whole lifetime) actually sets it.
     rec_db.set_dirty_tracking_marker_if_unset(from_version)
+
+
+def _finalize_chain(
+    data_dir: Path, backup_dir: Path, chain: list[dict[str, Any]], rec_db: Optional[RecommendationsDB],
+    face_level_touched_performer_ids: set[int], removed_performer_ids: set[int],
+    metadata_only_performer_ids: set[int], upserted_face_vectors: dict[int, tuple[int, bytes]],
+    progress_cb: Optional[Callable[[str, int], None]],
+) -> tuple[int, int]:
+    """The synchronous tail of apply_delta_chain, run on a worker thread: regenerate faces.json/performers.json/
+    face_yaw.json, record the dirty state, write the new manifest (with fresh checksums). Reports "finalizing"
+    progress 0-100 (exports 0-30, dirty state 30-70, checksums 70-100) through `progress_cb` -- plain attribute
+    writes on the other side, safe from a thread (see the "applying" callback above). Returns (face_count,
+    performer_count)."""
+    def _report(pct: int) -> None:
+        if progress_cb:
+            progress_cb("finalizing", pct)
+
+    conn = sqlite3.connect(data_dir / "performers.db")
+    try:
+        face_count = export_faces_json(conn, data_dir / "faces.json")
+        _report(10)
+        performer_count = export_performers_json(conn, data_dir / "performers.json")
+        _report(20)
+        export_face_yaw_json(conn, data_dir / "face_yaw.json")
+        _report(30)
+
+        if rec_db is not None:
+            try:
+                _record_dirty_state(
+                    rec_db, conn, backup_dir,
+                    face_level_touched_performer_ids=face_level_touched_performer_ids,
+                    removed_performer_ids=removed_performer_ids,
+                    metadata_only_performer_ids=metadata_only_performer_ids - face_level_touched_performer_ids - removed_performer_ids,
+                    upserted_face_vectors=upserted_face_vectors,
+                    from_version=chain[0]["from_version"], to_version=chain[-1]["to_version"],
+                    on_progress=lambda pct: _report(30 + int(pct * 0.4)),
+                )
+            except Exception:
+                # Purely additive bookkeeping (see apply_delta_chain's docstring and database_updater.py's module
+                # docstring) -- a failure here must never roll back an otherwise correctly-applied delta chain. But
+                # a PARTIAL failure (some universal_ids/vectors recorded, others not) is dangerous if silently
+                # ignored: an already-set marker from an earlier, fully-successful chain would make delta_scope.py
+                # trust this chain's now-incomplete dirty state as if it were complete, risking a false "safe to
+                # bump" for a scene this chain actually did affect. Push the marker forward past this chain's own
+                # to_version instead (never backward) -- every scene below it falls back to a real rematch until it
+                # naturally catches up, the same safe-by-construction fallback an unset marker already gets.
+                logger.warning("Delta dirty-state recording failed (update itself still succeeded) "
+                                "-- pushing dirty-tracking marker forward past %s as a precaution",
+                                chain[-1]["to_version"], exc_info=True)
+                try:
+                    rec_db.push_dirty_tracking_marker_forward(chain[-1]["to_version"])
+                except Exception:
+                    logger.error("Could not push dirty-tracking marker forward either -- "
+                                  "delta scoping may be unsafe until this is investigated", exc_info=True)
+    finally:
+        conn.close()
+    _report(70)
+
+    old_manifest = json.loads((backup_dir / "manifest.json").read_text())
+    checksum_files = ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "face_yaw.json")
+    checksums = {}
+    for i, fname in enumerate(checksum_files):
+        checksums[fname] = f"sha256:{_sha256(data_dir / fname)}"
+        _report(70 + int(30 * (i + 1) / len(checksum_files)))
+    new_manifest = {
+        **old_manifest,
+        "version": chain[-1]["to_version"],
+        "performer_count": performer_count,
+        "face_count": face_count,
+        "checksums": checksums,
+    }
+    (data_dir / "manifest.json").write_text(json.dumps(new_manifest, indent=2))
+    return face_count, performer_count
 
 
 async def apply_delta_chain(
@@ -1159,61 +1292,20 @@ async def apply_delta_chain(
             if progress_cb:
                 progress_cb("applying", 100)
 
-        conn = sqlite3.connect(data_dir / "performers.db")
-        try:
-            face_count = export_faces_json(conn, data_dir / "faces.json")
-            performer_count = export_performers_json(conn, data_dir / "performers.json")
-            export_face_yaw_json(conn, data_dir / "face_yaw.json")
-
-            if rec_db is not None:
-                try:
-                    _record_dirty_state(
-                        rec_db, conn, backup_dir,
-                        face_level_touched_performer_ids=face_level_touched_performer_ids,
-                        removed_performer_ids=removed_performer_ids,
-                        metadata_only_performer_ids=metadata_only_performer_ids - face_level_touched_performer_ids - removed_performer_ids,
-                        upserted_face_vectors=upserted_face_vectors,
-                        from_version=chain[0]["from_version"], to_version=chain[-1]["to_version"],
-                    )
-                except Exception:
-                    # Purely additive bookkeeping (see this function's own
-                    # docstring and database_updater.py's module docstring)
-                    # -- a failure here must never roll back an otherwise
-                    # correctly-applied delta chain. But a PARTIAL failure
-                    # (some universal_ids/vectors recorded, others not) is
-                    # dangerous if silently ignored: an already-set marker
-                    # from an earlier, fully-successful chain would make
-                    # delta_scope.py trust this chain's now-incomplete
-                    # dirty state as if it were complete, risking a false
-                    # "safe to bump" for a scene this chain actually did
-                    # affect. Push the marker forward past this chain's own
-                    # to_version instead (never backward) -- every scene
-                    # below it falls back to a real rematch until it
-                    # naturally catches up, the same safe-by-construction
-                    # fallback an unset marker already gets.
-                    logger.warning("Delta dirty-state recording failed (update itself still succeeded) "
-                                    "-- pushing dirty-tracking marker forward past %s as a precaution",
-                                    chain[-1]["to_version"], exc_info=True)
-                    try:
-                        rec_db.push_dirty_tracking_marker_forward(chain[-1]["to_version"])
-                    except Exception:
-                        logger.error("Could not push dirty-tracking marker forward either -- "
-                                      "delta scoping may be unsafe until this is investigated", exc_info=True)
-        finally:
-            conn.close()
-
-        old_manifest = json.loads((backup_dir / "manifest.json").read_text())
-        new_manifest = {
-            **old_manifest,
-            "version": chain[-1]["to_version"],
-            "performer_count": performer_count,
-            "face_count": face_count,
-            "checksums": {
-                fname: f"sha256:{_sha256(data_dir / fname)}"
-                for fname in ("performers.db", "face_embeddings.usearch", "faces.json", "performers.json", "face_yaw.json")
-            },
-        }
-        (data_dir / "manifest.json").write_text(json.dumps(new_manifest, indent=2))
+        # Everything after the hops -- the JSON exports, the dirty-state bookkeeping, the checksums -- is plain
+        # synchronous work (a gigabyte-scale sha256, a million-face export). Run on the event loop it blocked the
+        # whole server for minutes with progress sitting at its last value, so the plugin's status polls timed out and
+        # showed an error for an update that was still going and then succeeded. Threaded, with its own progress
+        # phase ("finalizing"), like the apply step above.
+        if progress_cb:
+            progress_cb("finalizing", 0)
+        face_count, performer_count = await asyncio.to_thread(
+            _finalize_chain, data_dir, backup_dir, chain, rec_db,
+            face_level_touched_performer_ids, removed_performer_ids, metadata_only_performer_ids,
+            upserted_face_vectors, progress_cb,
+        )
+        if progress_cb:
+            progress_cb("finalizing", 100)
 
         return {"applied_hops": len(chain), **totals, "new_version": chain[-1]["to_version"]}
 

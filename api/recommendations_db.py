@@ -2489,6 +2489,36 @@ class RecommendationsDB:
                 (embedding_index, universal_id, embedding, since_version),
             )
 
+    def record_dirty_universal_ids(self, rows: "list[tuple[str, str, str]]") -> None:
+        """Bulk form of record_dirty_universal_id: `rows` = (universal_id, reason, since_version), all in ONE
+        transaction. A delta chain records tens of thousands of these; one connection + commit (fsync) per row
+        took ~8 minutes for a 50 MB delta."""
+        if not rows:
+            return
+        with self._connection() as conn:
+            conn.executemany(
+                "INSERT OR IGNORE INTO dirty_universal_ids (universal_id, reason, since_version) VALUES (?, ?, ?)",
+                rows,
+            )
+
+    def record_dirty_face_vectors(self, rows: "list[tuple[int, str, bytes, str]]") -> None:
+        """Bulk form of record_dirty_face_vector: `rows` = (embedding_index, universal_id, embedding, since_version),
+        one transaction, same replace-on-conflict semantics."""
+        if not rows:
+            return
+        with self._connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO dirty_face_vectors (embedding_index, universal_id, embedding, since_version)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(embedding_index) DO UPDATE SET
+                    universal_id = excluded.universal_id,
+                    embedding = excluded.embedding,
+                    since_version = excluded.since_version
+                """,
+                rows,
+            )
+
     def get_dirty_universal_ids(self, reasons: Optional[list[str]] = None) -> list[str]:
         """Distinct universal_ids currently marked dirty, optionally
         filtered to specific reasons (see DELTA_SCOPE_SCHEMA's comment)."""
