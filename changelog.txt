@@ -1,5 +1,11 @@
 ## 2026-10-05
 
+### 0.46.0 (sidecar)
+- Fix: performer link groups and aliases now follow every database release. No update path ever installed them, so new
+  links were ignored by an updated sidecar (one person shown as two) and a fresh install had none.
+- Improvement: they ship as a small release asset checked against the release notes, so an install that already applied
+  releases is repaired at startup without a database download; scenes matched under old links are marked for re-matching.
+
 ### 0.45.2 (sidecar)
 - Fix: starting Refresh Outdated (or a full Face Recommendations scan) after a large database update no longer
   spins every core and freezes the sidecar for 10-15 s; the scoping step runs on a worker thread with capped CPU use.

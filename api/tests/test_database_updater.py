@@ -21,6 +21,16 @@ from database_updater import (
 # Helpers
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _no_real_link_sync(monkeypatch):
+    """Every update flow now ends with a link/alias sync that lists GitHub releases -- never do that for real in
+    these tests (links_sync.py has its own tests)."""
+    monkeypatch.setattr(
+        DatabaseUpdater, "_sync_link_files",
+        AsyncMock(return_value={"status": "skipped", "reason": "test", "changed": []}),
+    )
+
+
 def _sha256(data: bytes) -> str:
     """Compute sha256 hex digest."""
     return hashlib.sha256(data).hexdigest()

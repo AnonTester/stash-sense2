@@ -346,6 +346,18 @@ async def lifespan(app: FastAPI):
     # same in-flight load rather than double-loading.
     asyncio.create_task(asyncio.to_thread(resource_mgr.require, FACE_RECOGNITION_RESOURCE))
 
+    # Repair performer_links.json / aliases.json if they do not match the release this database is at (updates used
+    # to leave them behind -- see links_sync.py). After the load above finishes, so a changed file is never swapped
+    # under a load in progress; reloads only if something changed. Never blocks or breaks startup.
+    async def _links_repair_after_load() -> None:
+        try:
+            await asyncio.to_thread(resource_mgr.require, FACE_RECOGNITION_RESOURCE)
+            await db_updater.sync_links_if_stale()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Link/alias repair at startup skipped: %s", exc)
+
+    asyncio.create_task(_links_repair_after_load())
+
     # Load stash-box endpoint config from Stash
     if STASH_URL:
         try:
@@ -434,7 +446,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.45.2",
+    version="0.46.0",
     lifespan=lifespan,
 )
 

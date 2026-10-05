@@ -47,7 +47,10 @@ from typing import Any, Callable, Optional
 
 import httpx
 
-from delta_applier import apply_delta_chain, find_delta_chain, find_full_bootstrap, parse_min_sidecar_version
+from delta_applier import (
+    _fetch_releases, apply_delta_chain, find_delta_chain, find_full_bootstrap, parse_min_sidecar_version,
+)
+from links_sync import sync_link_files
 from release_info import compare_versions
 
 logger = logging.getLogger(__name__)
@@ -72,6 +75,10 @@ RELEASE_FILES = {
     "performers.json",
     "manifest.json",
     "face_yaw.json",
+    # Optional, like face_yaw.json: performer link groups and aliases. They were missing from this list, so a full-zip
+    # swap never installed them and no update path ever refreshed them -- see links_sync.py.
+    "performer_links.json",
+    "aliases.json",
 }
 
 # Subset of RELEASE_FILES that *must* be present for a valid release.
@@ -398,6 +405,50 @@ class DatabaseUpdater:
         self._last_bootstrap_chain = bootstrap_chain
         return self._public_result(result)
 
+    async def _sync_link_files(self, *, reload: bool) -> dict[str, Any]:
+        """Make performer_links.json / aliases.json match the release the local database is at (links_sync.py).
+        Never raises. `reload` re-loads the face-recognition data when the files changed (callers that reload
+        anyway pass False)."""
+        local = self._get_current_version()
+        try:
+            releases = await _fetch_releases(GITHUB_REPO, per_page=10)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Link/alias sync: could not list releases: %s", exc)
+            return {"status": "failed", "reason": str(exc), "changed": []}
+        release = next((r for r in releases if (r.get("tag_name") or "").lstrip("v") == local), None)
+        if release is None:
+            return {"status": "skipped", "reason": f"no release found for local version {local}", "changed": []}
+        result = await sync_link_files(self._data_dir, release, local)
+        if result.get("link_uids"):
+            await asyncio.to_thread(self._mark_scenes_for_link_changes, result["link_uids"])
+        if reload and result["status"] == "updated":
+            await asyncio.to_thread(self._reload_fn, self._data_dir)
+        return result
+
+    def _mark_scenes_for_link_changes(self, universal_ids: list[str]) -> None:
+        """Scenes whose stored matches mention an identity in a changed link group were matched under the old links
+        (two records of one person counted as two people): clear their db_version so the next Refresh Outdated
+        re-matches exactly those, and nothing else. Best-effort."""
+        try:
+            rec_db = self._get_rec_db_safe()
+            if rec_db is None:
+                return
+            scene_ids = sorted(rec_db.get_scene_ids_with_dirty_matches(universal_ids))
+            marked = 0
+            for i in range(0, len(scene_ids), 500):
+                marked += rec_db.mark_fingerprints_for_refresh(scene_ids[i:i + 500])
+            logger.warning("Link groups changed (%d identities): %d scene(s) marked for re-matching on the next "
+                           "Refresh Outdated", len(universal_ids), marked)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not mark scenes for re-matching after a link change", exc_info=True)
+
+    async def sync_links_if_stale(self) -> dict[str, Any]:
+        """Startup repair: an install that already applied releases without these files updating gets them
+        corrected without a database download. A no-op (one release-list call) when they already match."""
+        if self._update_task is not None and not self._update_task.done():
+            return {"status": "skipped", "reason": "an update is running", "changed": []}
+        return await self._sync_link_files(reload=True)
+
     @staticmethod
     def _public_result(result: dict[str, Any]) -> dict[str, Any]:
         """Strip internal-only keys (full delta hop details) before this
@@ -457,6 +508,11 @@ class DatabaseUpdater:
             self._state.status = UpdateStatus.SWAPPING
             self._state.progress_pct = 70
             backup_dir = self._swap_files(extract_dir)
+
+            # Link/alias files must match this release (the zip carries them; a release published before they were
+            # in the swap list, or a stale copy, is brought in line from the release's links asset). No reload here:
+            # the one below picks them up.
+            await self._sync_link_files(reload=False)
 
             # 5. Reload
             self._state.status = UpdateStatus.RELOADING
@@ -526,6 +582,10 @@ class DatabaseUpdater:
                 self._state.progress_pct = pct
 
             result = await apply_delta_chain(chain, self._data_dir, progress_cb=_progress, rec_db=self._get_rec_db_safe())
+
+            # A delta does not carry the performer link groups / aliases into the data dir -- bring them in line
+            # with this release (links_sync.py). Failure here never fails the update.
+            await self._sync_link_files(reload=False)
 
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 95
@@ -631,6 +691,8 @@ class DatabaseUpdater:
 
                 result = await apply_delta_chain(delta_chain, self._data_dir, progress_cb=_progress, rec_db=self._get_rec_db_safe())
                 self._state.current_version = result.get("new_version", full_version)
+
+            await self._sync_link_files(reload=False)
 
             self._state.status = UpdateStatus.RELOADING
             self._state.progress_pct = 90

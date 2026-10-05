@@ -97,6 +97,8 @@ Navigate to `/plugins/stash-sense2` in Stash to open the Stash Sense 2 dashboard
 1. **Database** — Click **Download Database** to download the face recognition database (~150,000+ performers) from [stash-sense2-data](https://github.com/AnonTester/stash-sense2-data)
 2. **Models** — Click **Download All** to download the required ONNX models (buffalo_l face recognition, ~200 MB)
 
+The database also includes performer link groups (records of the same person from different sources, which the matcher merges into one person) and aliases. Every release ships these two files (`performer_links.json`, `aliases.json`) as a small extra asset with their checksums in the release notes. After each update — and once at startup — the sidecar compares its copies with the release it is at and replaces them if they differ, so a delta update or an older install ends up with the same links and aliases as the release. Scenes that were matched under outdated links are marked for re-matching on the next **Refresh Outdated** run.
+
 ### Optional: identify from any web page (userscript)
 
 `plugin/userscripts/stash-sense2-identify.user.js` is a [Violentmonkey](https://violentmonkey.github.io/) / Tampermonkey userscript that brings the plugin's face identification to any website: right-click an image, or draw an area over a face, and the matches appear in a modal like the plugin's, including each performer's disambiguation. Results are read-only — outside Stash there is no scene or image to attach them to.
