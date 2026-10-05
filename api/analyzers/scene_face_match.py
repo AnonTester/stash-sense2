@@ -27,6 +27,7 @@ scan-scope logic for how each gets triggered):
   happened; running this task (scheduled or by hand) is what picks them up.
 """
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -274,7 +275,8 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
 
         if full_scan_fp_candidates:
             from delta_scope import scenes_needing_rematch
-            must_rematch, safe = scenes_needing_rematch(self.rec_db, full_scan_fp_candidates)
+            # off the event loop: thousands of scenes of clustering + vector comparison (see delta_scope.py)
+            must_rematch, safe = await asyncio.to_thread(scenes_needing_rematch, self.rec_db, full_scan_fp_candidates)
             for fp in full_scan_fp_candidates:
                 scene_id = str(fp["stash_scene_id"])
                 if fp["stash_scene_id"] in safe:

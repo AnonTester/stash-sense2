@@ -30,7 +30,7 @@ from frame_extractor import (
     extract_frames_from_stash_scene,
     check_ffmpeg_available,
 )
-from matching import MatchingConfig
+from matching import MatchingConfig, prefetched_searches
 from scene_matcher import (
     cluster_faces_by_person,
     merge_clusters_by_match,
@@ -840,12 +840,20 @@ def _reconstruct_from_cached_faces(
     _prepare_scene_identify), since both reconstruct the identical shape
     from the same table, just filtered to a different is_sprite value."""
     results: list[tuple[int, RecognitionResult]] = []
-    for row in cached_faces:
-        bbox = json.loads(row["bbox_json"])
-        face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
-        embedding = FaceEmbedding(embedding=np.frombuffer(row["embedding"], dtype=np.float32))
-        matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
-        results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
+    embeddings = [np.frombuffer(row["embedding"], dtype=np.float32) for row in cached_faces]
+    local_index = getattr(_recognizer, "local_performer_index", None)
+    # One batched search per index for the whole scene instead of one query per cached face (see
+    # matching.prefetched_searches) -- the index queries were over half of re-matching a cached scene.
+    with prefetched_searches(
+        [(_recognizer.index, embeddings), (local_index.index if local_index else None, embeddings)],
+        match_config.query_k,
+    ):
+        for row, vec in zip(cached_faces, embeddings):
+            bbox = json.loads(row["bbox_json"])
+            face = DetectedFace(image=None, bbox=bbox, confidence=row["confidence"], yaw=row["yaw"], embedding=None)
+            embedding = FaceEmbedding(embedding=vec)
+            matches, _match_result, _ = _recognizer.recognize_face_v2(face, match_config, embedding=embedding)
+            results.append((row["frame_index"], RecognitionResult(face=face, matches=matches, embedding=embedding)))
     return results
 
 
@@ -993,6 +1001,16 @@ async def _fetch_scene_native_size(scene_id: str) -> Optional[tuple[int, int]]:
         return None
 
 
+def _needs_native_frame_size(all_results) -> bool:
+    """True only if some VIDEO-frame face was detected with a rotation correction: the scene's native size is used
+    solely to de-rotate such a face's bbox (scene_matcher.aggregate_matches), so for every other scene the Stash
+    round trip to fetch it per scene is pure overhead. Sprite results (negative frame_index) never use it."""
+    return any(
+        idx >= 0 and (getattr(result.face, "bbox", None) or {}).get("rotation_applied", 0.0) != 0.0
+        for idx, result in all_results
+    )
+
+
 async def _identify_scene_from_cache(
     request: "SceneIdentifyRequest",
     cache_meta: dict,
@@ -1061,7 +1079,7 @@ async def _identify_scene_from_cache(
 
     t_match = time.time()
     _set_stage(request.scene_id, "matching_performers")
-    frame_native_size = await _fetch_scene_native_size(request.scene_id)
+    frame_native_size = await _fetch_scene_native_size(request.scene_id) if _needs_native_frame_size(all_results) else None
     persons = _cluster_and_match(
         all_results, request, frame_timestamps=frame_timestamps, frame_native_size=frame_native_size,
     )

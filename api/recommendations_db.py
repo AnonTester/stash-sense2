@@ -2633,6 +2633,16 @@ class RecommendationsDB:
                 (db_version, stash_scene_id),
             )
 
+    def bump_fingerprint_db_versions(self, stash_scene_ids, db_version: str) -> None:
+        """Bulk form of bump_fingerprint_db_version: one transaction instead of a connection + commit per scene
+        (thousands of fsyncs, on the event loop, at the start of every scoped Refresh Outdated run)."""
+        ids = [(db_version, int(i)) for i in stash_scene_ids]
+        if not ids:
+            return
+        with self._connection() as conn:
+            conn.executemany(
+                "UPDATE scene_fingerprints SET db_version = ?, updated_at = datetime('now') WHERE stash_scene_id = ?", ids)
+
     def reset_scene_fingerprints_with_backup(self) -> dict:
         """Back up scene_fingerprints + scene_fingerprint_matches to
         timestamped tables, then mark every fingerprint for refresh (same

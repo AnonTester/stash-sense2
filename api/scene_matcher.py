@@ -28,10 +28,22 @@ def _recognizer_link_index(recognizer) -> dict[str, list[str]]:
     already consults performer_link_index (_link_key/_canonical_identity)
     picks up both signals through this one merged dict, no other call
     site needs to change."""
-    return merge_link_indexes(
-        getattr(recognizer, "performer_link_index", None) or {},
-        getattr(recognizer, "local_catalogue_link_index", None) or {},
-    )
+    plink = getattr(recognizer, "performer_link_index", None) or {}
+    local = getattr(recognizer, "local_catalogue_link_index", None) or {}
+    # The merge walks every linked performer (~130k) and normalizes thousands of URLs -- ~220 ms, and it only depends on
+    # these two dicts, yet it ran once per scene (over half the cost of re-matching a cached scene). Cached on the
+    # recognizer, keyed by the identity of both source dicts: the local one is REPLACED (never edited in place) whenever
+    # the local index reloads and the data-gen one is built once at load, so a different object means a new merge. The
+    # cache holds the dicts themselves, so their ids cannot be recycled while it is in use. Callers only read the result.
+    cached = getattr(recognizer, "_merged_link_index_cache", None)
+    if cached is not None and cached[0] is plink and cached[1] is local:
+        return cached[2]
+    merged = merge_link_indexes(plink, local)
+    try:
+        recognizer._merged_link_index_cache = (plink, local, merged)
+    except AttributeError:   # a recognizer stand-in that refuses new attributes just skips the cache
+        pass
+    return merged
 
 
 def _link_key(universal_id: Optional[str], performer_link_index: Optional[dict[str, list[str]]]) -> Optional[str]:

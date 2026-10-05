@@ -1,5 +1,11 @@
 ## 2026-10-05
 
+### 0.45.2 (sidecar)
+- Fix: starting Refresh Outdated (or a full Face Recommendations scan) after a large database update no longer
+  spins every core and freezes the sidecar for 10-15 s; the scoping step runs on a worker thread with capped CPU use.
+- Improvement: re-matching a scene from its cached faces is ~6x faster (432 -> 70 ms per scene, identical results):
+  one batched index search per scene, and the performer link index is no longer rebuilt for every scene.
+
 ### 0.45.1 (sidecar)
 - Fix: applying a database delta no longer blocks the sidecar for minutes (status polls timed out mid-update);
   the steps after the apply run off the main loop and report their own "finalizing" phase.

@@ -9,6 +9,8 @@ one index to query and nothing to fuse or arbitrate between; this module
 is correspondingly a plain single-index nearest-neighbor lookup +
 threshold filter.
 """
+import contextlib
+import contextvars
 import logging
 from dataclasses import dataclass
 from typing import Optional
@@ -98,12 +100,52 @@ class MatchingResult:
 # MATCHING LOGIC
 # =============================================================================
 
+# Per-scene batched search results (see prefetched_searches): {(id(index), embedding bytes): IndexQueryResult}.
+_PREFETCHED_SEARCHES: contextvars.ContextVar = contextvars.ContextVar("prefetched_searches", default=None)
+_PREFETCH_THREADS = 8
+
+
+@contextlib.contextmanager
+def prefetched_searches(index_sets, query_k: int):
+    """Answer every `query_index` call inside the block from ONE batched, multi-threaded search per index.
+
+    `index_sets` = [(index, [embedding, ...]), ...]. Re-matching a cached scene queries the main (and local) index once
+    per cached face -- ~55 faces a scene, ~0.8 ms per single query, over half of that rematch's time. One batched call
+    for the whole scene is several times cheaper and returns exactly what the individual queries would (each query is
+    searched independently). Anything not prefetched, or a batch that fails, simply falls through to a normal single
+    search, so callers need no other change."""
+    table: dict = {}
+    for index, embeddings in index_sets:
+        if index is None or not embeddings:
+            continue
+        try:
+            if len(index) == 0:
+                continue
+            batch = index.search(np.stack(embeddings).astype(np.float32), query_k, threads=_PREFETCH_THREADS)
+            keys, distances, counts = batch.keys, batch.distances, batch.counts
+            for i, emb in enumerate(embeddings):
+                n = int(counts[i])
+                table[(id(index), emb.tobytes())] = IndexQueryResult(neighbors=keys[i][:n], distances=distances[i][:n])
+        except Exception as e:  # noqa: BLE001 -- fall back to single searches
+            logger.warning("Batched index search failed, falling back to single queries: %s", e)
+    token = _PREFETCHED_SEARCHES.set(table)
+    try:
+        yield
+    finally:
+        _PREFETCHED_SEARCHES.reset(token)
+
+
 def query_index(
     embedding: np.ndarray,
     index: Index,
     config: MatchingConfig = DEFAULT_CONFIG,
 ) -> IndexQueryResult:
     """Query the embedding index for nearest neighbors."""
+    prefetched = _PREFETCHED_SEARCHES.get()
+    if prefetched:
+        hit = prefetched.get((id(index), embedding.tobytes()))
+        if hit is not None:
+            return hit
     matches = index.search(embedding, config.query_k)
     return IndexQueryResult(neighbors=matches.keys, distances=matches.distances)
 
@@ -322,7 +364,12 @@ def merge_local_candidates(
             merged.append(local_candidate)
 
     if performers:
-        for local_candidate in local_candidates:
+        # per call: which entries are still in `merged` (by identity) and each catalogue candidate's normalized urls --
+        # both used to be recomputed for every (local candidate x main candidate) pair
+        merged_ids = {id(m) for m in merged}
+        candidate_urls_by_uid: dict[str, set[str]] = {}
+        catalogue_candidates = [c for c in main_matches if classify_universal_id(c.universal_id) == "catalogue"]
+        for local_candidate in (local_candidates if catalogue_candidates else ()):
             local_id = local_candidate.universal_id.split(":", 1)[1]
             if local_id in matched_local_ids:
                 continue  # already resolved via stash_id above
@@ -333,17 +380,17 @@ def merge_local_candidates(
             }
             if not local_urls:
                 continue
-            for candidate in main_matches:
-                if classify_universal_id(candidate.universal_id) != "catalogue":
-                    continue
-                if not any(m is candidate for m in merged):
+            for candidate in catalogue_candidates:
+                if id(candidate) not in merged_ids:
                     continue  # already resolved by an earlier local candidate this pass
-                info = performers.get(candidate.universal_id) or {}
-                candidate_urls = {
-                    normalize_url_for_compare(u)
-                    for u in (info.get("profile_url"), info.get("catalogue_url"))
-                    if u
-                }
+                candidate_urls = candidate_urls_by_uid.get(candidate.universal_id)
+                if candidate_urls is None:
+                    info = performers.get(candidate.universal_id) or {}
+                    candidate_urls = candidate_urls_by_uid[candidate.universal_id] = {
+                        normalize_url_for_compare(u)
+                        for u in (info.get("profile_url"), info.get("catalogue_url"))
+                        if u
+                    }
                 if not (local_urls & candidate_urls):
                     continue
                 # Same real person surfaced under both identities -- keep
@@ -351,6 +398,7 @@ def merge_local_candidates(
                 # stash_id-based merge above.
                 loser = candidate if local_candidate.combined_distance < candidate.combined_distance else local_candidate
                 merged = [m for m in merged if m is not loser]
+                merged_ids.discard(id(loser))
                 break
 
     return merged

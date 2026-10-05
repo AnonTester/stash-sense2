@@ -206,6 +206,45 @@ class TestTier3Vector:
         assert safe == {1}
 
 
+class TestTier3BatchedComparison:
+    """The comparison is batched across scenes (centroids from many scenes in one matrix product) and BLAS-capped, so
+    a Refresh Outdated start no longer thrashes every core for scene after scene. The decisions must not change."""
+
+    def _scenes(self, rec_db, n):
+        rec_db.set_dirty_tracking_marker_if_unset("2026.09.10")
+        fps = []
+        for sid in range(1, n + 1):
+            fps.append(_make_fingerprint(rec_db, sid, "2026.09.10", total_faces=1))
+            _seed_scene_embedding(rec_db, sid, _vec(sid))
+        return fps
+
+    def test_decisions_are_the_same_across_batch_boundaries(self, rec_db, monkeypatch):
+        import delta_scope
+        fps = self._scenes(rec_db, 9)
+        # scenes 2, 5 and 9 each get a changed vector landing well inside max_distance of their face
+        for sid in (2, 5, 9):
+            rec_db.record_dirty_face_vector(1000 + sid, f"stashdb.org:n{sid}",
+                                            _nudge(_vec(sid), face_config.MAX_DISTANCE * 0.3).tobytes(), "2026.09.15")
+        results = {}
+        for rows, block in ((512, 8192), (2, 1), (1, 2), (4, 3)):   # one big batch, then tiny batches and blocks
+            monkeypatch.setattr(delta_scope, "TIER3_BATCH_ROWS", rows)
+            monkeypatch.setattr(delta_scope, "TIER3_VECTOR_BLOCK", block)
+            must, safe = scenes_needing_rematch(rec_db, fps)
+            results[(rows, block)] = (must, safe)
+        for key, (must, safe) in results.items():
+            assert must == {2, 5, 9}, key
+            assert safe == {1, 3, 4, 6, 7, 8}, key
+
+    def test_a_scene_with_several_people_is_flagged_if_any_one_is_close(self, rec_db):
+        rec_db.set_dirty_tracking_marker_if_unset("2026.09.10")
+        fp = _make_fingerprint(rec_db, 1, "2026.09.10", total_faces=2)
+        _seed_scene_embedding(rec_db, 1, _vec(1), frame_index=0)
+        _seed_scene_embedding(rec_db, 1, _vec(2), frame_index=1)   # a second, unrelated person
+        rec_db.record_dirty_face_vector(999, "stashdb.org:new", _nudge(_vec(2), face_config.MAX_DISTANCE * 0.3).tobytes(), "2026.09.15")
+        must, safe = scenes_needing_rematch(rec_db, [fp])
+        assert must == {1}
+
+
 class TestFinalizeDirtyState:
     def test_drains_universal_ids_and_vectors_up_to_version(self, rec_db):
         rec_db.record_dirty_universal_id("stashdb.org:abc", "needs_rematch", "2026.09.15")
@@ -255,3 +294,16 @@ class TestBumpFingerprintDbVersion:
         updated = rec_db.get_scene_fingerprint(1)
         assert updated["db_version"] == "2026.09.15"
         assert len(rec_db.get_fingerprint_matches(fp["id"])) == 1
+
+
+class TestBumpFingerprintDbVersionsBulk:
+    def test_bumps_every_listed_scene_in_one_go_and_leaves_others_alone(self, rec_db):
+        for sid in (1, 2, 3):
+            _make_fingerprint(rec_db, sid, "2026.09.01")
+        rec_db.bump_fingerprint_db_versions([1, 3], "2026.09.15")
+        assert rec_db.get_scene_fingerprint(1)["db_version"] == "2026.09.15"
+        assert rec_db.get_scene_fingerprint(2)["db_version"] == "2026.09.01"
+        assert rec_db.get_scene_fingerprint(3)["db_version"] == "2026.09.15"
+
+    def test_empty_list_is_a_no_op(self, rec_db):
+        rec_db.bump_fingerprint_db_versions([], "2026.09.15")

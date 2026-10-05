@@ -305,9 +305,13 @@ class SceneFingerprintGenerator:
                 ]
                 if outdated_complete:
                     from delta_scope import scenes_needing_rematch
-                    must_rematch, safe_to_bump = scenes_needing_rematch(self.rec_db, outdated_complete)
-                    for sid in safe_to_bump:
-                        self.rec_db.bump_fingerprint_db_version(sid, self.db_version)
+                    # Thousands of scenes of clustering + vector comparison, then thousands of version bumps: both
+                    # were plain synchronous work on the event loop (the sidecar stopped answering for the first
+                    # 10-15 s of a run and the fans spun up). On a worker thread, with the comparison batched and
+                    # BLAS-capped (delta_scope.py), and the bumps in one transaction.
+                    must_rematch, safe_to_bump = await asyncio.to_thread(
+                        scenes_needing_rematch, self.rec_db, outdated_complete)
+                    await asyncio.to_thread(self.rec_db.bump_fingerprint_db_versions, sorted(safe_to_bump), self.db_version)
                     bumped_ids = safe_to_bump
                     logger.warning(
                         "Refresh Outdated: delta-scoped %d/%d outdated scene(s) marked current without "

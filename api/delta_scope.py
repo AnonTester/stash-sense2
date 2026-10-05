@@ -42,6 +42,7 @@ that was actually needed."
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from typing import TYPE_CHECKING
@@ -69,6 +70,25 @@ MATCH_MARGIN = 0.02
 # this module's centroids need to correspond to what a real rematch would
 # actually cluster and compare, not some other grouping.
 CLUSTER_DISTANCE_THRESHOLD = 0.6
+
+
+# Tier 3 compares every scene person's centroid against every changed vector (44k for a catalogue-heavy delta).
+# Done one scene at a time that re-reads the whole vector matrix per scene (memory-bound, ~600 GB of traffic for 6,600
+# scenes) and lets BLAS fan out over every core -- measured: the system's fans spun up and the sidecar was
+# unresponsive for the first 10-15 s of a Refresh Outdated run. So: centroids are gathered across scenes and compared in
+# batches (each vector block read once per batch), and BLAS is held to a few threads.
+TIER3_BATCH_ROWS = 512        # centroids per matrix product
+TIER3_VECTOR_BLOCK = 8192     # changed vectors per block (bounds the temporary similarity matrix)
+BLAS_THREADS = 4
+
+
+def _blas_limit():
+    """Cap BLAS threads for the duration of the comparison (no-op if threadpoolctl is unavailable)."""
+    try:
+        from threadpoolctl import threadpool_limits
+        return threadpool_limits(limits=BLAS_THREADS, user_api="blas")
+    except Exception:  # noqa: BLE001
+        return contextlib.nullcontext()
 
 
 def _chunked(items: list, size: int):
@@ -162,23 +182,42 @@ def scenes_needing_rematch(rec_db: "RecommendationsDB", candidates: list[dict]) 
     vector_rows = rec_db.get_dirty_face_vectors() if remaining else []
     if vector_rows:
         V = np.stack([np.frombuffer(r["embedding"], dtype=np.float32) for r in vector_rows]).astype(np.float32)
-        V = V / np.linalg.norm(V, axis=1, keepdims=True)
+        V = np.ascontiguousarray(V / np.linalg.norm(V, axis=1, keepdims=True))
         threshold = face_config.MAX_DISTANCE + MATCH_MARGIN
 
-        for c in remaining:
-            if not c.get("total_faces"):
-                # Nothing was ever detected in this scene at all -- no
-                # embedding exists for a new/changed vector to be close
-                # to, so no delta can possibly introduce a new candidate.
-                continue
-            centroids = _scene_person_centroids(rec_db, c["stash_scene_id"])
-            if not centroids:
-                continue
-            C = np.stack(centroids).astype(np.float32)
+        row_vectors: list[np.ndarray] = []
+        row_scene_ids: list[int] = []
+
+        def _flush_rows() -> None:
+            if not row_vectors:
+                return
+            C = np.stack(row_vectors).astype(np.float32)
             C = C / np.linalg.norm(C, axis=1, keepdims=True)
-            distances = 1.0 - (C @ V.T)
-            if distances.min() <= threshold:
-                must_rematch.add(c["stash_scene_id"])
+            best = np.full(len(C), -np.inf, dtype=np.float32)   # highest similarity to any changed vector
+            for start in range(0, len(V), TIER3_VECTOR_BLOCK):
+                best = np.maximum(best, (C @ V[start:start + TIER3_VECTOR_BLOCK].T).max(axis=1))
+            # same test as before: 1 - similarity <= threshold for the closest changed vector
+            for scene_id, dist in zip(row_scene_ids, 1.0 - best):
+                if dist <= threshold:
+                    must_rematch.add(scene_id)
+            row_vectors.clear()
+            row_scene_ids.clear()
+
+        with _blas_limit():
+            for c in remaining:
+                if not c.get("total_faces"):
+                    # Nothing was ever detected in this scene at all -- no
+                    # embedding exists for a new/changed vector to be close
+                    # to, so no delta can possibly introduce a new candidate.
+                    continue
+                if c["stash_scene_id"] in must_rematch:
+                    continue   # already decided; its centroids cannot change that
+                for centroid in _scene_person_centroids(rec_db, c["stash_scene_id"]):
+                    row_vectors.append(centroid)
+                    row_scene_ids.append(c["stash_scene_id"])
+                if len(row_vectors) >= TIER3_BATCH_ROWS:
+                    _flush_rows()
+            _flush_rows()
 
     safe_to_bump = {c["stash_scene_id"] for c in eligible} - must_rematch
     return must_rematch, safe_to_bump

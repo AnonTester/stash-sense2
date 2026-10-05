@@ -7,10 +7,23 @@ Clients are sourced from the StashBoxConnectionManager which reads
 endpoint config from Stash's settings API (auto-discovery).
 """
 
+from functools import lru_cache
 from typing import Optional
 
 from stashbox_client import StashBoxClient
 from stashbox_connection_manager import get_connection_manager
+
+
+@lru_cache(maxsize=262144)
+def _normalize_url_cached(url: str) -> str:
+    value = url.strip().lower().rstrip("/")
+    if value.startswith("https://"):
+        value = value[len("https://"):]
+    elif value.startswith("http://"):
+        value = value[len("http://"):]
+    if value.startswith("www."):
+        value = value[len("www."):]
+    return value
 
 
 def normalize_url_for_compare(url: Optional[str]) -> str:
@@ -23,14 +36,8 @@ def normalize_url_for_compare(url: Optional[str]) -> str:
     keep them in sync."""
     if not url:
         return ""
-    value = str(url).strip().lower().rstrip("/")
-    if value.startswith("https://"):
-        value = value[len("https://"):]
-    elif value.startswith("http://"):
-        value = value[len("http://"):]
-    if value.startswith("www."):
-        value = value[len("www."):]
-    return value
+    # Pure string function called millions of times per scene-rematch pass over the same few thousand URLs: memoized.
+    return _normalize_url_cached(url if isinstance(url, str) else str(url))
 
 
 def _get_stashbox_client(endpoint_domain: str) -> Optional[StashBoxClient]:
