@@ -1,3 +1,9 @@
+## 2026-10-06
+
+### 0.36.0 (plugin)
+- Feature: the identify-anywhere userscript can translate any drawn area (page text, mixed content, images, video): the
+  area is captured (page rendering via html2canvas, or an image's native pixels) and uploaded to Google Translate (images) in a new tab.
+
 ## 2026-10-05
 
 ### 0.46.0 (sidecar)

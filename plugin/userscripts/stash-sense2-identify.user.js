@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Stash Sense 2 - Identify anywhere
 // @namespace    https://github.com/AnonTester/stash-sense2
-// @version      0.2.9
-// @description  Identify performers with your Stash Sense 2 sidecar from any web page: right-click an image, or draw an area (face + automatic margin) anywhere on a page.
+// @version      0.5.3
+// @description  Identify performers with your Stash Sense 2 sidecar from any web page: right-click an image, or draw an area (face + automatic margin) anywhere on a page. Also sends a drawn area to Google Translate (images).
 // @match        *://*/*
 // @noframes
 // @run-at       document-idle
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -14,6 +15,7 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_removeValueChangeListener
 // @grant        GM_deleteValue
+// @grant        unsafeWindow
 // @connect      *
 // ==/UserScript==
 
@@ -57,15 +59,23 @@
   // The script also runs in the background tab that grabViaTab opens on an
   // image URL; there it only does one thing: draw that image document's image
   // and hand it back (grabInTab), then stay out of the way.
+  // Declared before the early returns below, which use it (const is not hoisted).
+  const TRANSLATE_JOB_KEY = 'ssvm_translate_job';
   const grabMatch = /^#ssvm-grab=([\w-]+)$/.exec(location.hash);
   if (grabMatch) {
     grabInTab(grabMatch[1]);
     return;
   }
+  // On Google Translate itself the script only delivers a pending "translate
+  // this area" job (see startTranslateFlow) and shows no menu of its own.
+  if (location.hostname === 'translate.google.com') {
+    deliverTranslateJob();
+    return;
+  }
 
   const NAME = 'Stash Sense 2';
   const CFG_KEY = 'ssvm_config';
-  const DEFAULTS = { sidecarUrl: '', stashUrl: '', modifier: 'ctrl', topK: 5, marginPct: 100 };
+  const DEFAULTS = { sidecarUrl: '', stashUrl: '', modifier: 'ctrl', topK: 5, marginPct: 100, translateTo: 'en' };
   const MIN_MEDIA_PX = 32;     // ignore icons/sprites smaller than this on screen
   const MAX_SIDE = 6000;       // longest side of the JPEG sent to the sidecar
   const JPEG_QUALITY = 0.92;
@@ -102,6 +112,81 @@
       reply({ dataUrl: c.toDataURL('image/jpeg', 0.95) });
     };
     run().catch((e) => reply({ error: e.message }));
+  }
+
+  // Runs on translate.google.com: if a "translate this area" job is waiting
+  // (stored a moment ago by startTranslateFlow on another page), put its image
+  // into Google's own image-upload field, exactly as if a file had been chosen.
+  function deliverTranslateJob() {
+    let job = null;
+    try { job = GM_getValue(TRANSLATE_JOB_KEY, null); } catch (e) { job = null; }
+    if (!job || !job.dataUrl || Date.now() - job.ts > 120000) return;
+    try { GM_deleteValue(TRANSLATE_JOB_KEY); } catch (e) { /* ignore */ }
+
+    const toast = (text, isError) => {
+      let el = document.getElementById('ssvm-toast');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'ssvm-toast';
+        el.style.cssText = 'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;'
+          + 'background:#202225;color:#fff;font:14px/1.4 sans-serif;padding:10px 16px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.5);';
+        document.documentElement.appendChild(el);
+      }
+      el.textContent = text;
+      el.style.borderLeft = `4px solid ${isError ? '#dc3545' : '#0d6efd'}`;
+      if (!isError) setTimeout(() => el.remove(), 6000);
+    };
+
+    const findInput = () => [...document.querySelectorAll('input[type=file]')]
+      .find((i) => /image\//i.test(i.getAttribute('accept') || ''));
+    const started = Date.now();
+    toast('Stash Sense 2: uploading the selected area...');
+    const tick = () => {
+      const input = findInput();
+      if (!input) {
+        if (Date.now() - started > 20000) toast('Stash Sense 2: could not find the image upload field on this page.', true);
+        else setTimeout(tick, 300);
+        return;
+      }
+      const bin = atob(job.dataUrl.slice(job.dataUrl.indexOf(',') + 1));
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+      // Google's code runs in the page's own realm and ignores a File/FileList
+      // made in the userscript sandbox in some browsers, so try the page's own
+      // constructors first, the sandbox's as a fallback, then a synthetic drop.
+      const attempts = [
+        ['page objects', () => {
+          const file = new W.File([new W.Uint8Array(bytes)], 'selected-area.png', { type: 'image/png' });
+          const dt = new W.DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new W.Event('change', { bubbles: true }));
+        }],
+        ['sandbox objects', () => {
+          const file = new File([bytes], 'selected-area.png', { type: 'image/png' });
+          const dt = new DataTransfer();
+          dt.items.add(file);
+          input.files = dt.files;
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+        }],
+      ];
+      const errors = [];
+      for (const [label, fn] of attempts) {
+        try {
+          fn();
+          if (input.files && input.files.length) {
+            toast(`Stash Sense 2: area sent to Google Translate (${label}).`);
+            return;
+          }
+          errors.push(`${label}: field stayed empty`);
+        } catch (e) {
+          errors.push(`${label}: ${e.message}`);
+        }
+      }
+      toast(`Stash Sense 2: upload failed (${errors.join('; ')}).`, true);
+    };
+    tick();
   }
 
   // ------------------------------------------------------------------ config
@@ -766,7 +851,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
   // rather than clamped, so the face keeps the same share of the picture
   // wherever it is (a clamped crop at an image edge leaves the face too large
   // for the detector).
-  function renderPadded(src, crop, marginPct) {
+  function renderPadded(src, crop, marginPct, mime = 'image/jpeg') {
     const m = Math.max(0, marginPct) / 100;
     const wantX = crop.x - crop.w * m;
     const wantY = crop.y - crop.h * m;
@@ -789,7 +874,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
       ctx.drawImage(src.drawable, ix0, iy0, ix1 - ix0, iy1 - iy0,
         (ix0 - wantX) * scale, (iy0 - wantY) * scale, (ix1 - ix0) * scale, (iy1 - iy0) * scale);
       try {
-        canvas.toBlob((blob) => (blob ? resolve({ blob, w: cw, h: ch }) : reject(new Error(SECURITY_MSG))), 'image/jpeg', JPEG_QUALITY);
+        canvas.toBlob((blob) => (blob ? resolve({ blob, w: cw, h: ch }) : reject(new Error(SECURITY_MSG))), mime, JPEG_QUALITY);
       } catch (e) {
         reject(new Error(e.name === 'SecurityError' ? SECURITY_MSG : e.message));
       }
@@ -837,7 +922,8 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
     return i ? i.w * i.h : 0;
   }
 
-  async function prepareArea(rect, cfg) {
+  // The part of the media under `rect`, as { src, crop } in native pixels.
+  async function locateArea(rect) {
     const cands = mediaCandidatesIn(rect).map((m) => ({ m, area: visibleArea(m, rect) })).filter((c) => c.area > 0);
     if (!cands.length) throw new Error('No image or video found under the selected area.');
     // Real images/videos/canvases beat CSS backgrounds (page or container
@@ -862,6 +948,11 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
     if (crop.w < MIN_CROP_PX || crop.h < MIN_CROP_PX) {
       throw new Error('The selected area is too small at the image\'s native resolution.');
     }
+    return { src, crop };
+  }
+
+  async function prepareArea(rect, cfg) {
+    const { src, crop } = await locateArea(rect);
     // Hidden margin: the selection is usually tight around the face, but the
     // detector needs surrounding context to find it (see renderPadded).
     // Ladder: configured margin, then wider twice, then narrower (a loosely
@@ -1049,7 +1140,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
         loadingDetail.textContent = detail;
       },
 
-      showError(message) {
+      showError(message, override) {
         loading.style.display = 'none';
         results.style.display = 'none';
         let title = 'Analysis Failed';
@@ -1070,6 +1161,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
           title = 'Request Timed Out';
           hint = 'The sidecar took too long to answer.';
         }
+        if (override) { title = override.title; hint = override.hint; detail = null; }
         error.replaceChildren(
           iconBox(ICON_ERROR),
           h('p', { class: 'error-title' }, title),
@@ -1154,6 +1246,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
         [['ctrl', 'Ctrl + right-click'], ['alt', 'Alt + right-click'], ['shift', 'Shift + right-click'], ['none', 'Plain right-click (replaces the browser menu)']]
           .map(([v, label]) => h('option', { value: v, selected: v === cfg.modifier }, label)));
       const topK = h('input', { type: 'number', min: 1, max: 20, value: cfg.topK });
+      const translateTo = h('input', { type: 'text', value: cfg.translateTo, placeholder: 'en', spellcheck: 'false' });
       const margin = h('input', { type: 'number', min: 0, max: MAX_MARGIN_PCT, value: cfg.marginPct });
       const testResult = h('span', { class: 'test-result' });
 
@@ -1164,6 +1257,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
         stashUrl: normalizeUrl(stash.value),
         modifier: modifier.value,
         topK: clamp(parseInt(topK.value, 10) || DEFAULTS.topK, 1, 20),
+        translateTo: (translateTo.value || '').trim() || DEFAULTS.translateTo,
         marginPct: clamp(Number.isNaN(parseInt(margin.value, 10)) ? DEFAULTS.marginPct : parseInt(margin.value, 10), 0, MAX_MARGIN_PCT),
       });
 
@@ -1192,6 +1286,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
         field('Stash URL (optional)', stash, 'Only used to link matches that are in your library ("View local performer").'),
         field('Menu trigger', modifier, 'Hold this key while right-clicking to open the Stash Sense 2 menu. A browser\'s own menu can\'t be extended by a userscript.'),
         field('Matches per face', topK),
+        field('Translate text to (language code)', translateTo, 'Target language for "Translate text in area", e.g. en, de, fr, es, ja.'),
         field('Area-select margin (%)', margin, 'Context added around a drawn area on each side, as a share of the box size (gray where the image ends). The face detector finds nothing if the face fills the picture; 100 suits a box drawn tight on the face. If no face is found it retries with wider and then narrower margins.'),
         h('div', { class: 'actions' }, testResult, testBtn,
           h('button', { class: 'btn', onclick: () => modal._close() }, 'Cancel'),
@@ -1257,19 +1352,19 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
   // Draw / move / resize a box over the page. Resolves { rect, release } in
   // viewport CSS pixels (release() resumes videos paused for the selection),
   // or null when cancelled.
-  function selectRegion() {
+  function selectRegion(hintText, useLabel) {
     return new Promise((resolve) => {
       const root = ensureUi();
       const paused = [...document.querySelectorAll('video')].filter((v) => !v.paused && !v.ended);
       paused.forEach((v) => v.pause());
       const release = () => paused.forEach((v) => v.play().catch(() => {}));
 
-      const useBtn = h('button', { class: 'btn primary', disabled: true }, 'Use for identify');
+      const useBtn = h('button', { class: 'btn primary', disabled: true }, useLabel || 'Use for identify');
       const cancelBtn = h('button', { class: 'btn' }, 'Cancel');
       const toolbar = h('div', { class: 'sel-toolbar', style: 'display:none' }, useBtn, cancelBtn);
       const box = h('div', { class: 'sel-box', style: 'display:none' },
         ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'].map((n) => h('div', { class: `sel-handle h-${n}`, 'data-h': n })));
-      const hint = h('div', { class: 'sel-hint' }, 'Drag over the face · move the box or drag its handles to adjust · Enter = use, Esc = cancel');
+      const hint = h('div', { class: 'sel-hint' }, hintText || 'Drag over the face · move the box or drag its handles to adjust · Enter = use, Esc = cancel');
       const layer = h('div', { class: 'sel-layer' }, hint, box, toolbar);
       root.appendChild(layer);
 
@@ -1375,6 +1470,167 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
     await identifyFlow((c) => prepareArea(sel.rect, c), sel.release);
   }
 
+  function blobToDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const fr = new FileReader();
+      fr.onload = () => resolve(String(fr.result));
+      fr.onerror = () => reject(new Error('Could not read image data'));
+      fr.readAsDataURL(blob);
+    });
+  }
+
+  // Pick the image an area shows: when one image/video/canvas fills (nearly)
+  // the whole box, its native pixels are cropped exactly (best for text inside
+  // pictures); anything else -- page text, a mix of text and pictures, overlays
+  // -- is rendered from the page itself (rasterizeRect).
+  async function captureArea(rect) {
+    const total = rect.w * rect.h;
+    const media = mediaCandidatesIn(rect)
+      .filter((m) => m.kind !== 'bg')
+      .some((m) => visibleArea(m, rect) >= total * 0.85);
+    if (media) {
+      try {
+        const { src, crop } = await locateArea(rect);
+        return { ...(await renderPadded(src, crop, 0, 'image/png')), how: 'image pixels' };
+      } catch (e) {
+        console.warn(`[${NAME}] native crop failed, capturing the page instead:`, e);
+      }
+    }
+    return { ...(await rasterizeRect(rect)), how: 'page capture' };
+  }
+
+  // Render the part of the page under `rect` to a PNG with html2canvas.
+  // Cross-origin images/backgrounds would be blank (the library cannot read
+  // them), so those are downloaded here first and swapped into the library's
+  // copy of the page as data URLs; <video> frames are snapshotted the same way.
+  async function rasterizeRect(rect) {
+    if (typeof html2canvas !== 'function') {
+      throw new Error('Page capture is unavailable: the html2canvas library did not load. Update this script in your userscript manager so it downloads its @require.');
+    }
+    const MAX_ASSETS = 16;
+    const touches = (el) => {
+      const r = el.getBoundingClientRect();
+      return r.width > 1 && r.height > 1 && intersect(rect, { x: r.left, y: r.top, w: r.width, h: r.height });
+    };
+    const crossOrigin = (u) => { try { return new URL(u, location.href).origin !== location.origin; } catch (e) { return false; } };
+    const tagged = [];
+    const replacements = [];
+    const tag = (el, info) => {
+      el.setAttribute('data-ssvm-i', String(replacements.length));
+      tagged.push(el);
+      replacements.push(info);
+    };
+    const toDataUrl = async (url) => blobToDataUrl(await fetchBlob(url));
+
+    try {
+      let assets = 0;
+      for (const el of document.querySelectorAll('*')) {
+        if (assets >= MAX_ASSETS) break;
+        if (el === host || (host && host.contains(el))) continue;
+        const tagName = el.tagName;
+        if (tagName === 'IMG') {
+          const url = el.currentSrc || el.src;
+          if (!url || /^data:/i.test(url) || !crossOrigin(url) || !touches(el)) continue;
+          try { tag(el, { kind: 'img', dataUrl: await toDataUrl(url) }); assets++; } catch (e) { /* left to the library, may stay blank */ }
+        } else if (tagName === 'VIDEO') {
+          if (!el.videoWidth || !touches(el)) continue;
+          try {
+            const snap = document.createElement('canvas');
+            snap.width = el.videoWidth;
+            snap.height = el.videoHeight;
+            snap.getContext('2d').drawImage(el, 0, 0);
+            const r = el.getBoundingClientRect();
+            const cs = getComputedStyle(el);
+            tag(el, { kind: 'video', dataUrl: snap.toDataURL('image/png'), w: r.width, h: r.height, fit: cs.objectFit, pos: cs.objectPosition });
+            assets++;
+          } catch (e) { /* cross-origin video: cannot be read */ }
+        } else if (tagName !== 'CANVAS' && touches(el)) {
+          const bg = getComputedStyle(el).backgroundImage;
+          const m = bg && bg !== 'none' ? bg.match(/url\((['"]?)(.*?)\1\)/) : null;
+          if (m && m[2] && !/^data:/i.test(m[2]) && crossOrigin(m[2])) {
+            try { tag(el, { kind: 'bg', dataUrl: await toDataUrl(m[2]) }); assets++; } catch (e) { /* ignore */ }
+          }
+        }
+      }
+
+      const scrollX = window.scrollX;
+      const scrollY = window.scrollY;
+      const bodyBg = getComputedStyle(document.body || document.documentElement).backgroundColor;
+      const htmlBg = getComputedStyle(document.documentElement).backgroundColor;
+      const solid = (c) => c && c !== 'transparent' && !/rgba\(.*,\s*0\)$/.test(c);
+      const scale = Math.min(Math.max(2, window.devicePixelRatio || 1), 6000 / Math.max(rect.w, rect.h, 1));
+      const canvas = await html2canvas(document.documentElement, {
+        // Document coordinates, with the library's copy of the page left
+        // unscrolled: Firefox applies the copy's scroll on top of the crop
+        // offset (the area came out shifted by the scroll distance).
+        x: rect.x + scrollX,
+        y: rect.y + scrollY,
+        scrollX: 0,
+        scrollY: 0,
+        width: rect.w,
+        height: rect.h,
+        windowWidth: document.documentElement.clientWidth,
+        windowHeight: document.documentElement.clientHeight,
+        scale,
+        useCORS: true,
+        logging: false,
+        imageTimeout: 8000,
+        backgroundColor: solid(bodyBg) ? bodyBg : solid(htmlBg) ? htmlBg : '#ffffff',
+        ignoreElements: (el) => el === host,
+        onclone: (doc) => {
+          replacements.forEach((info, i) => {
+            const el = doc.querySelector(`[data-ssvm-i="${i}"]`);
+            if (!el) return;
+            if (info.kind === 'img') {
+              el.removeAttribute('srcset');
+              el.removeAttribute('loading');
+              if (el.parentElement) el.parentElement.querySelectorAll('source').forEach((x) => x.remove());
+              el.src = info.dataUrl;
+            } else if (info.kind === 'bg') {
+              el.style.backgroundImage = `url("${info.dataUrl}")`;
+            } else if (info.kind === 'video') {
+              const img = doc.createElement('img');
+              img.src = info.dataUrl;
+              img.style.cssText = `display:block;width:${info.w}px;height:${info.h}px;object-fit:${info.fit};object-position:${info.pos};`;
+              el.replaceWith(img);
+            }
+          });
+        },
+      });
+      const blob = await new Promise((resolve, reject) => {
+        try {
+          canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not encode the captured page area.'))), 'image/png');
+        } catch (e) { reject(new Error(e.name === 'SecurityError' ? SECURITY_MSG : e.message)); }
+      });
+      return { blob, w: canvas.width, h: canvas.height };
+    } finally {
+      tagged.forEach((el) => el.removeAttribute('data-ssvm-i'));
+    }
+  }
+
+  // Draw an area and hand whatever is shown there (page text, images, video,
+  // overlays) to Google Translate's image mode in a new tab, where
+  // deliverTranslateJob uploads it.
+  async function startTranslateFlow() {
+    const sel = await selectRegion('Drag over the text to translate · move the box or drag its handles to adjust · Enter = use, Esc = cancel', 'Translate with Google');
+    if (!sel) return;
+    const cfg = loadConfig();
+    try {
+      const out = await captureArea(sel.rect);
+      GM_setValue(TRANSLATE_JOB_KEY, { dataUrl: await blobToDataUrl(out.blob), ts: Date.now() });
+      const lang = encodeURIComponent((cfg.translateTo || 'en').trim() || 'en');
+      GM_openInTab(`https://translate.google.com/?sl=auto&tl=${lang}&op=images`, { active: true, insert: true });
+    } catch (e) {
+      console.error(`[${NAME}]`, e);
+      openResultModal().showError(e.message || String(e), {
+        title: 'Could not translate this area',
+        hint: 'The area could not be captured. Try a smaller area, or one that is only text or only a single image.',
+      });
+    } finally {
+      sel.release();
+    }
+  }
+
   async function startImageFlow(media) {
     await identifyFlow(() => prepareImage(media));
   }
@@ -1400,6 +1656,8 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
         'Identify this image', h('small', {}, media ? describe(media) : 'No image under the cursor')),
       h('button', { onclick: run(startAreaFlow) },
         'Select area to identify…', h('small', {}, 'Draw a box over a face, then adjust it')),
+      h('button', { onclick: run(startTranslateFlow) },
+        'Translate text in area…', h('small', {}, 'Capture the box (page, image or video) for Google Translate')),
       h('hr'),
       h('button', { onclick: run(() => openSettings()) }, 'Settings…'));
     // Keep the page from seeing (and reacting to) presses on our menu, and keep
@@ -1458,6 +1716,7 @@ details.others ul{margin:8px 0 0;padding:0;list-style:none}
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('Select area to identify', startAreaFlow);
+    GM_registerMenuCommand('Translate text in area (Google)', startTranslateFlow);
     GM_registerMenuCommand('Settings', () => openSettings());
   }
 })();
