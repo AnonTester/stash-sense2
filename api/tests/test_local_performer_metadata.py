@@ -1,6 +1,7 @@
 """The local performer index keeps EVERY stash-box id and the performer's current details, and refreshes them when a
 performer changes in Stash even though its cover image did not."""
 import json
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -11,6 +12,7 @@ from local_performer_index import (
     extract_stash_ids,
     linked_stash_uids,
     performer_metadata,
+    stash_image_fetch_url,
     sync_one_performer,
 )
 
@@ -139,3 +141,41 @@ class TestSyncOnePerformerUnchangedCover:
         assert status == "metadata_updated" and again == "unchanged"
         assert index.mapping["3073"]["name"] == "Aimi Tomozaki"
         generator.detect_faces.assert_not_called()
+
+
+class TestStashImageFetchUrl:
+    def test_rebased_onto_the_client_address_keeping_path_and_query(self):
+        stash = SimpleNamespace(base_url="http://reachable:9999")
+        assert stash_image_fetch_url("http://unreachable.internal/performer/5/image?t=1", stash) == \
+            "http://reachable:9999/performer/5/image?t=1"
+
+    def test_falls_back_to_stash_url_and_ignores_a_trailing_slash(self, monkeypatch):
+        monkeypatch.setenv("STASH_URL", "http://env-host:9999/")
+        assert stash_image_fetch_url("http://x/performer/5/image", None) == "http://env-host:9999/performer/5/image"
+        assert stash_image_fetch_url("http://x/performer/5/image", SimpleNamespace()) == \
+            "http://env-host:9999/performer/5/image"
+
+    def test_left_alone_without_an_address_or_a_path(self, monkeypatch):
+        monkeypatch.delenv("STASH_URL", raising=False)
+        assert stash_image_fetch_url("http://x/performer/5/image", None) == "http://x/performer/5/image"
+        monkeypatch.setenv("STASH_URL", "http://env-host:9999")
+        assert stash_image_fetch_url("", None) == ""
+
+
+class TestHookPathUsesTheSameAddress:
+    async def test_sync_one_performer_downloads_from_the_client_address(self, tmp_path, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock, patch
+        index = LocalPerformerIndex(tmp_path / "i.usearch", tmp_path / "m.json")
+        stash = _Stash(_performer(image_path="http://unreachable.internal/performer/3073/image?t=1"))
+        stash.base_url = "http://reachable:9999"
+        client = AsyncMock()
+        client.get = AsyncMock(return_value=MagicMock(content=b"img", raise_for_status=MagicMock()))
+        cls = MagicMock()
+        cls.return_value.__aenter__ = AsyncMock(return_value=client)
+        cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        generator = MagicMock()
+        generator.detect_faces.return_value = []        # no face: the test is about where the image came from
+        with patch("local_performer_index.httpx.AsyncClient", cls), \
+                patch("embeddings.load_image", return_value=np.zeros((10, 10, 3), dtype=np.uint8)):
+            await sync_one_performer(stash, generator, index, 3073, "update")
+        assert client.get.call_args[0][0] == "http://reachable:9999/performer/3073/image?t=1"

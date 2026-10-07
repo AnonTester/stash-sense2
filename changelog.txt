@@ -1,5 +1,9 @@
 ## 2026-10-07
 
+### 0.47.1 (sidecar)
+- Fix: performer covers for the local index are downloaded from the address the sidecar uses for Stash, not the one
+  Stash reports for itself, in both the full sync and the per-performer hook (full-sync part contributed by holrak).
+
 ### 0.47.0 (sidecar)
 - Fix: a scene whose video was swapped or merged (a longer file made primary) is no longer served from the faces cached
   from the old video: scenes record which file they were scanned from, the cache is dropped when it changes, and Fingerprint Missing / Refresh Outdated redo those scenes.

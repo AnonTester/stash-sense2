@@ -12,6 +12,7 @@ same cosine/512-dim setup), just invoked in-process instead of offline.
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -227,6 +228,24 @@ def _relative_image_url(image_path: str) -> str:
     return parsed.path + (f"?{parsed.query}" if parsed.query else "")
 
 
+def stash_image_fetch_url(image_path: str, stash=None) -> str:
+    """Where to download a performer's cover from.
+
+    Stash reports `image_path` as an absolute URL built from its OWN idea of its address, which the sidecar cannot
+    always reach (Docker networking, a reverse proxy). The path and query are what identify the image, so they are
+    re-based onto the address this sidecar uses for Stash -- the client's base url, else STASH_URL. Used by both the
+    full sync job and the single-performer hook so they cannot disagree. Left as reported when no Stash address is
+    known or the reported value has no path."""
+    base = getattr(stash, "base_url", None)
+    if not isinstance(base, str) or not base:
+        base = os.getenv("STASH_URL", "")
+    base = base.rstrip("/")
+    parts = urlsplit(image_path)
+    if not base or not parts.path:
+        return image_path
+    return f"{base}{parts.path}" + (f"?{parts.query}" if parts.query else "")
+
+
 async def sync_one_performer(
     stash, generator, index: "LocalPerformerIndex", performer_id: int, event_type: str,
 ) -> str:
@@ -259,7 +278,7 @@ async def sync_one_performer(
         return "removed" if was_present else "skipped_no_image"
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(image_path, headers={"ApiKey": stash.api_key})
+        resp = await client.get(stash_image_fetch_url(image_path, stash), headers={"ApiKey": stash.api_key})
         resp.raise_for_status()
         image_bytes = resp.content
 

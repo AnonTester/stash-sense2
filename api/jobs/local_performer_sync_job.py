@@ -66,7 +66,7 @@ import queue
 import threading
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urlsplit
+
 import httpx
 
 from base_job import BaseJob, JobContext
@@ -79,6 +79,7 @@ from local_performer_index import (
     _image_fingerprint,
     _relative_image_url,
     performer_metadata,
+    stash_image_fetch_url,
 )
 from recommendations_router import get_stash_client
 
@@ -146,19 +147,8 @@ async def _fetch_one(
             return
 
         try:
-            stash_url = os.getenv("STASH_URL", "").rstrip("/")
-            parsed_image_url = urlsplit(image_path)
-
-            if stash_url and parsed_image_url.path:
-                image_fetch_url = f"{stash_url}{parsed_image_url.path}"
-
-                if parsed_image_url.query:
-                    image_fetch_url += f"?{parsed_image_url.query}"
-            else:
-                image_fetch_url = image_path
-
             resp = await client.get(
-                image_fetch_url,
+                stash_image_fetch_url(image_path, stash),
                 headers={"ApiKey": stash.api_key},
             )
             resp.raise_for_status()

@@ -128,6 +128,30 @@ class TestLocalPerformerSyncJob:
         summary = ctx.set_result_summary.call_args[0][0]
         assert "2 added" in summary
 
+    async def test_covers_are_downloaded_from_stash_url_not_the_reported_address(self, index_paths, monkeypatch):
+        index_path, mapping_path = index_paths
+        monkeypatch.setattr(
+            "jobs.local_performer_sync_job.DatabaseConfig",
+            lambda data_dir: SimpleNamespace(
+                local_embedding_index_path=index_path, local_faces_json_path=mapping_path,
+            ),
+        )
+        monkeypatch.setenv("STASH_URL", "http://reachable:9999/")
+        stash = _FakeStash({1: {"name": "Alice", "image_path": "http://unreachable.internal:9999/performer/1/image?t=7"}})
+        monkeypatch.setattr("jobs.local_performer_sync_job.get_stash_client", lambda: stash)
+        monkeypatch.setattr("main.refresh_local_performer_index", MagicMock(return_value=True), raising=False)
+        fetched = []
+
+        async def _get(url, headers=None):
+            fetched.append(url)
+            return SimpleNamespace(content=b"img", raise_for_status=lambda: None)
+
+        with _patch_generator(), _patch_load_image(), _patch_http(get_side_effect=_get):
+            await LocalPerformerSyncJob().run(_make_context(), cursor=None)
+
+        assert fetched == ["http://reachable:9999/performer/1/image?t=7"]
+        assert 1 in LocalPerformerIndex(index_path, mapping_path)
+
     async def test_skips_performers_without_custom_image(self, index_paths, monkeypatch):
         index_path, mapping_path = index_paths
         monkeypatch.setattr(
