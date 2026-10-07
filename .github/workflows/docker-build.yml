@@ -136,6 +136,18 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') || contains(github.ref, 'rc') }}
 
+  # Once the new release's images exist, drop the oldest beyond the newest 5 (per image).
+  prune:
+    needs: [build, release]
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/prune-images.yml
+    with:
+      delete: true
+
+# After a release, the prune job keeps only the newest 5 releases of each image on GHCR (prune-images.yml).
+#
 # Publishes 4 image variants (CPU default, AMD ROCm, NVIDIA CUDA, and the CPU
 # build for ARM64 -- see each Dockerfile.* for hardware-specific build notes) to GHCR under this
 # repo's own namespace, e.g. ghcr.io/anontester/stash-sense2. The CUDA

@@ -52,6 +52,15 @@ Pick the compose file matching your hardware:
 
 Each compose file's `image:` already points at its GHCR image, so `up -d` alone pulls and runs it — `build:` is also there if you'd rather build locally instead.
 
+**Old images are pruned.** Only the newest 5 releases of each image are kept on GHCR; when a new release is published the oldest tags are deleted automatically. Pin a tag you rely on by copying the image elsewhere, or move to a newer one — a version older than the last 5 will no longer pull.
+
+**ARM64 image.** `ghcr.io/anontester/stash-sense2-arm64` is the CPU image built natively for `linux/arm64` (Raspberry Pi 5 and other 64-bit ARM boards and servers, Docker Desktop on Apple-silicon Macs, where it runs natively instead of through amd64 emulation). Details:
+
+- It needs a **64-bit** ARM OS (`uname -m` prints `aarch64`/`arm64`); a 32-bit OS cannot run it. The other three images are amd64-only.
+- It is the same application as the CPU image — same features, settings, ports (`6960`) and data layout — with **no GPU acceleration**, so face detection and fingerprinting are slower than on a GPU host. `FFMPEG_HWACCEL` stays `none`.
+- It is published with every tagged release (from the first release after 0.47.0) under the same tags as the other variants: the exact version (`0.47.1`), `major.minor`, and `latest`. `docker-compose.arm64.yml` pins `platform: linux/arm64` and points at this image; `docker compose -f docker-compose.arm64.yml build` builds it locally on the ARM host instead.
+- It is built by the release workflow on GitHub's native ARM runners and is not run in the reference deployment, so treat it as best-effort until you have run it on your hardware.
+
 ```bash
 # CPU — pull and start
 docker compose up -d
@@ -105,7 +114,7 @@ The database also includes performer link groups (records of the same person fro
 
 ### Optional: identify from any web page (userscript)
 
-`plugin/userscripts/stash-sense2-identify.user.js` is a [Violentmonkey](https://violentmonkey.github.io/) / Tampermonkey userscript that brings the plugin's face identification to any website: right-click an image, or draw an area over a face, and the matches appear in a modal like the plugin's, including each performer's disambiguation. Results are read-only — outside Stash there is no scene or image to attach them to.
+`plugin/userscripts/stash-sense2-identify.user.js` is a [Violentmonkey](https://violentmonkey.github.io/) / [Tampermonkey](https://www.tampermonkey.net/) userscript that brings the plugin's face identification to any website: right-click an image, or draw an area over a face, and the matches appear in a modal like the plugin's, including each performer's disambiguation. Results are read-only — outside Stash there is no scene or image to attach them to.
 
 **Install**
 
@@ -115,11 +124,18 @@ Stash serves the script itself, so there is nothing to host. With the plugin ins
 http://<stash-host>:9999/plugin/stash-sense2/assets/userscripts/stash-sense2-identify.user.js
 ```
 
-The manager re-checks that same URL for a newer `@version`, so updating the plugin install (or running `rebuild.sh`) also updates the userscript. The script asks for cross-origin access (`@connect *`) because it has to reach your sidecar and download images from arbitrary sites; the manager prompts for this.
+Either manager recognizes the `.user.js` address and shows its own install page:
+
+- **Violentmonkey** (Chrome, Firefox, Edge — get it from [violentmonkey.github.io](https://violentmonkey.github.io/)): install the extension, open the URL above, then **Confirm installation**.
+- **Tampermonkey** (Chrome, Firefox, Edge, Safari — get it from [tampermonkey.net](https://www.tampermonkey.net/)): install the extension, open the URL above, then click **Install** on the page Tampermonkey shows. In Chrome and Edge, recent Tampermonkey versions will not run userscripts until you allow them: open `chrome://extensions` (or `edge://extensions`), open Tampermonkey's **Details** and switch on **Allow User Scripts** (older browser versions: switch on **Developer mode** at the top of the extensions page instead). Tampermonkey's own page explains this if the script appears installed but does nothing.
+
+The first time the script reaches your sidecar or downloads an image from another site, the manager asks for cross-origin access, because the script declares `@connect *`. In Violentmonkey confirm the prompt; in Tampermonkey choose **Always allow all domains** (or **Always allow domain** for just that host) so it does not ask again for every site.
+
+Updates: the manager re-checks that same URL for a newer `@version`, so updating the plugin install (or running `rebuild.sh`) also updates the userscript. Violentmonkey checks periodically (and on *Check for updates* in its dashboard); Tampermonkey checks on its own interval (Settings → *Script Update*) or on demand from the dashboard's *Installed Userscripts* list.
 
 **Settings**
 
-On first use the script opens its settings (afterwards: the userscript manager's toolbar menu → *Settings*). They are stored by the userscript manager, not in the file.
+On first use the script opens its settings (afterwards: click the manager's toolbar icon → this script's *Settings* entry — Violentmonkey lists it under *Commands*, Tampermonkey under the script's name). They are stored by the userscript manager, not in the file.
 
 | Setting | Default | Description |
 |---------|---------|-------------|

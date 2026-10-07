@@ -1,0 +1,43 @@
+name: Prune old images
+
+# Keeps the newest 5 releases of every published image on GHCR and deletes the rest (see
+# scripts/prune-ghcr-images.py for exactly what counts as a release and what is protected). Runs after every
+# release build (docker-build.yml calls it), and by hand from the Actions tab -- as a dry run unless "delete" is ticked.
+
+on:
+  workflow_call:
+    inputs:
+      delete:
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: "Actually delete (leave off for a dry run that only lists what would go)"
+        type: boolean
+        default: false
+      keep:
+        description: "Releases to keep per image"
+        default: "5"
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Prune old images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DELETE: ${{ inputs.delete }}
+          KEEP: ${{ inputs.keep || '5' }}
+        run: |
+          python3 scripts/prune-ghcr-images.py \
+            --owner "$GITHUB_REPOSITORY_OWNER" \
+            --images stash-sense2 stash-sense2-rocm stash-sense2-cuda stash-sense2-arm64 \
+            --keep "$KEEP" \
+            $([ "$DELETE" = "true" ] && echo --delete)
