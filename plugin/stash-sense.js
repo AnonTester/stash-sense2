@@ -161,10 +161,10 @@
           const scenePerformers = await this.getScenePerformerStashDBIds(sceneId);
           const stashdbIds = [];
           for (const p of scenePerformers) {
+            // every stash-box the performer is linked to, not just StashDB -- the sidecar matches them against
+            // all the ids a recognized person is known under
             for (const sid of (p.stash_ids || [])) {
-              if (sid.endpoint === 'https://stashdb.org/graphql') {
-                stashdbIds.push(sid.stash_id);
-              }
+              stashdbIds.push(sid.stash_id);
             }
           }
 
@@ -595,9 +595,7 @@
         for (const p of scenePerformers) {
           scenePerformerLocalIds.add(p.id);
           for (const sid of (p.stash_ids || [])) {
-            if (sid.endpoint === 'https://stashdb.org/graphql') {
-              taggedStashDBIds.add(sid.stash_id);
-            }
+            taggedStashDBIds.add(sid.stash_id);   // any stash-box: a match is checked against every id it is known under
           }
         }
 
@@ -945,7 +943,25 @@
           // against the library this way for these yet.
           return null;
         }
-        return SS.findPerformerByStashDBId(match.stashdb_id, graphqlUrl);
+        const found = await SS.findPerformerByStashDBId(match.stashdb_id, graphqlUrl);
+        if (found) return found;
+        // The same person can be in the library under another stash-box id (a javstash-only performer, say):
+        // the sidecar lists every id the match is known under.
+        for (const uid of (match.linked_universal_ids || [])) {
+          const [domain, ...rest] = String(uid).split(':');
+          const id = rest.join(':');
+          if (!domain.includes('.') || !id || id === match.stashdb_id) continue;
+          const other = await SS.findPerformerByStashDBId(id, this._stashboxGraphqlUrl(domain));
+          if (other) return other;
+        }
+        return null;
+      },
+
+      // Whether a match is a performer already on the scene, by its own stash id or any other it is known under
+      // (`taggedIds` holds the stash ids of every performer on the scene, all endpoints).
+      _isTaggedByAnyId(match, taggedIds) {
+        if (taggedIds.has(match.stashdb_id)) return true;
+        return (match.linked_universal_ids || []).some(uid => taggedIds.has(String(uid).split(':').slice(1).join(':')));
       },
 
       async _renderPerson(person, sceneId, taggedStashDBIds, scenePerformerLocalIds) {
@@ -971,7 +987,7 @@
         const graphqlUrl = this._stashboxGraphqlUrl(endpoint);
 
         // Check if already tagged (from API flag or local cross-reference)
-        const isAlreadyTagged = match.already_tagged || taggedStashDBIds.has(match.stashdb_id);
+        const isAlreadyTagged = match.already_tagged || this._isTaggedByAnyId(match, taggedStashDBIds);
 
         const localPerformer = await this._resolveLibraryPerformer(match, graphqlUrl);
         const isLocallyTagged = localPerformer && scenePerformerLocalIds.has(localPerformer.id);
@@ -1045,7 +1061,7 @@
             const altEndpoint = m.endpoint || 'stashdb.org';
             const altStashboxUrl = this._stashboxPerformerUrl(altEndpoint, m.stashdb_id);
             const altGraphqlUrl = this._stashboxGraphqlUrl(altEndpoint);
-            const altTagged = m.already_tagged || taggedStashDBIds.has(m.stashdb_id);
+            const altTagged = m.already_tagged || this._isTaggedByAnyId(m, taggedStashDBIds);
 
             const altLocalPerformer = await this._resolveLibraryPerformer(m, altGraphqlUrl);
             const altIsLocallyTagged = altLocalPerformer && scenePerformerLocalIds.has(altLocalPerformer.id);
@@ -2084,9 +2100,7 @@
         for (const p of await this.getScenePerformerStashDBIds(sceneId)) {
           scenePerformerLocalIds.add(p.id);
           for (const sid of (p.stash_ids || [])) {
-            if (sid.endpoint === 'https://stashdb.org/graphql') {
-              taggedStashDBIds.add(sid.stash_id);
-            }
+            taggedStashDBIds.add(sid.stash_id);   // any stash-box: a match is checked against every id it is known under
           }
         }
 
@@ -2121,7 +2135,7 @@
             // Check if already tagged (from API flag or local cross-reference)
             // -- same logic as renderResults' _renderPerson, see the
             // taggedStashDBIds/scenePerformerLocalIds fetch above.
-            const isAlreadyTagged = match.already_tagged || taggedStashDBIds.has(match.stashdb_id);
+            const isAlreadyTagged = match.already_tagged || this._isTaggedByAnyId(match, taggedStashDBIds);
             const isLocallyTagged = localPerformer && scenePerformerLocalIds.has(localPerformer.id);
             const showAlreadyTagged = isAlreadyTagged || isLocallyTagged;
 
@@ -2185,7 +2199,7 @@
                 const altUrl = this._stashboxPerformerUrl(altEp, m.stashdb_id);
                 const altGraphqlUrl = this._stashboxGraphqlUrl(altEp);
                 const altLocalPerformer = await this._resolveLibraryPerformer(m, altGraphqlUrl);
-                const altIsAlreadyTagged = m.already_tagged || taggedStashDBIds.has(m.stashdb_id);
+                const altIsAlreadyTagged = m.already_tagged || this._isTaggedByAnyId(m, taggedStashDBIds);
                 const altIsLocallyTagged = altLocalPerformer && scenePerformerLocalIds.has(altLocalPerformer.id);
                 const altShowAlreadyTagged = altIsAlreadyTagged || altIsLocallyTagged;
                 const li = document.createElement('li');

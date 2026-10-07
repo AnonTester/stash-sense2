@@ -25,6 +25,58 @@ logger = logging.getLogger(__name__)
 DIMENSIONS = 512
 STASHDB_ENDPOINT = "https://stashdb.org/graphql"
 
+# Performer fields copied into the index entry besides the name/urls/ids; kept as a list so the sync job and the
+# single-performer hook stay in step. `aliases` is Stash's alias_list.
+DETAIL_FIELDS = ("disambiguation", "gender", "country", "birthdate", "favorite")
+
+
+def endpoint_domain(endpoint: Optional[str]) -> Optional[str]:
+    """Domain of a stash-box endpoint URL ("https://javstash.org/graphql" -> "javstash.org") -- the same prefix a
+    universal_id carries ("javstash.org:<uuid>")."""
+    if not endpoint:
+        return None
+    host = urlsplit(endpoint if "//" in endpoint else f"//{endpoint}").hostname
+    if not host:
+        return None
+    return host[4:] if host.startswith("www.") else host
+
+
+def extract_stash_ids(performer: dict) -> dict[str, str]:
+    """{endpoint domain: stash_id} for EVERY stash-box a Stash performer is linked to (first id per endpoint)."""
+    out: dict[str, str] = {}
+    for sid in performer.get("stash_ids") or []:
+        domain = endpoint_domain(sid.get("endpoint"))
+        if domain and sid.get("stash_id") and domain not in out:
+            out[domain] = sid["stash_id"]
+    return out
+
+
+def performer_metadata(performer: dict) -> dict:
+    """Everything the index keeps about a performer except its embedding/cover: what a metadata-only refresh writes
+    and what an embed writes alongside the vector."""
+    stash_ids = extract_stash_ids(performer)
+    meta = {
+        "name": performer.get("name"),
+        "stashdb_id": stash_ids.get(endpoint_domain(STASHDB_ENDPOINT)),
+        "stash_ids": stash_ids,
+        "urls": performer.get("urls") or [],
+        "aliases": performer.get("alias_list") or [],
+    }
+    for field in DETAIL_FIELDS:
+        meta[field] = performer.get(field)
+    return meta
+
+
+def linked_stash_uids(entry: dict) -> list[str]:
+    """Every "<domain>:<stash_id>" universal_id a local performer is linked to, StashDB first. Entries written before
+    all stash-boxes were stored only carry `stashdb_id`."""
+    ids = dict(entry.get("stash_ids") or {})
+    if entry.get("stashdb_id"):
+        ids.setdefault(endpoint_domain(STASHDB_ENDPOINT), entry["stashdb_id"])
+    stashdb_domain = endpoint_domain(STASHDB_ENDPOINT)
+    ordered = sorted(ids, key=lambda d: (d != stashdb_domain, d))
+    return [f"{d}:{ids[d]}" for d in ordered]
+
 
 class LocalPerformerIndex:
     """Wraps a usearch index for local Stash performers, plus a JSON
@@ -53,13 +105,17 @@ class LocalPerformerIndex:
     def save(self) -> None:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         self.index.save(str(self.index_path))
+        # keys starting with "_" are runtime annotations (recognizer.py resolves each entry's dataset identity once per
+        # load) -- derived from the main database, so never persisted
+        persisted = {pid: {k: v for k, v in entry.items() if not k.startswith("_")} for pid, entry in self.mapping.items()}
         with open(self.mapping_path, "w") as f:
-            json.dump(self.mapping, f)
+            json.dump(persisted, f)
 
     def upsert(
         self, performer_id: int, name: str, stashdb_id: Optional[str],
         image_hash: str, image_url: Optional[str], embedding: np.ndarray,
         urls: Optional[list[str]] = None, bbox: Optional[dict] = None,
+        details: Optional[dict] = None,
     ) -> None:
         """Add or replace this performer's embedding (delete-then-add for
         clarity/consistency with the main build pipeline's convention,
@@ -84,14 +140,19 @@ class LocalPerformerIndex:
         Optional and may be None for a performer indexed before this
         existed, or if a future caller genuinely has no bbox to give --
         consumers (the new local-performer-crop route) fall back to the
-        whole cover image in that case, same as before this existed."""
+        whole cover image in that case, same as before this existed.
+
+        `details` -- the rest of performer_metadata()'s output (stash_ids for every stash-box, aliases,
+        disambiguation, gender, ...); name/stashdb_id/urls given explicitly above win over the same keys in it."""
         self.remove(performer_id)
         self.index.add(performer_id, embedding.astype(np.float32))
-        self.mapping[str(performer_id)] = {
+        entry = {k: v for k, v in (details or {}).items() if k not in ("name", "stashdb_id", "urls")}
+        entry.update({
             "name": name, "stashdb_id": stashdb_id,
             "image_hash": image_hash, "image_url": image_url,
             "urls": urls or [], "bbox": bbox,
-        }
+        })
+        self.mapping[str(performer_id)] = entry
 
     def remove(self, performer_id: int) -> None:
         if performer_id in self.index:
@@ -110,21 +171,22 @@ class LocalPerformerIndex:
         entry = self.mapping.get(str(performer_id))
         return entry.get("image_url") if entry else None
 
-    def update_urls(self, performer_id: int, urls: list[str]) -> bool:
-        """Refreshes just the stored `urls` for an already-indexed
-        performer, without touching the embedding -- used by
-        sync_one_performer() when the cover image is unchanged (so the
-        normal upsert() path is skipped) but the caller's own `urls` still
-        need to stay current, e.g. right after the identity-resolution
-        flow in recommendations_router.py writes a new profile URL onto
-        an existing performer via a Stash "update" hook that doesn't touch
-        the cover. Returns whether anything actually changed (false =
-        no-op, matching the existing "unchanged" status)."""
+    def update_metadata(self, performer_id: int, meta: dict) -> bool:
+        """Refreshes every stored detail of an already-indexed performer (name, all stash-box ids, urls, aliases,
+        ...) without touching the embedding -- used when the cover is unchanged, so a rename or a newly added
+        stash-box link in Stash reaches the index. Only keys present in `meta` are written; returns whether
+        anything actually changed."""
         entry = self.mapping.get(str(performer_id))
-        if entry is None or entry.get("urls") == urls:
+        if entry is None:
             return False
-        entry["urls"] = urls
-        return True
+        changed = False
+        for key, value in meta.items():
+            if key.startswith("_") or key in ("image_hash", "image_url", "bbox"):
+                continue
+            if entry.get(key) != value:
+                entry[key] = value
+                changed = True
+        return changed
 
     def __contains__(self, performer_id: int) -> bool:
         return str(performer_id) in self.mapping
@@ -174,9 +236,10 @@ async def sync_one_performer(
 
     event_type is one of "create"/"update"/"destroy" (case-insensitive,
     matches the Stash hook operation names). Returns a short status for
-    logging/response: "removed", "added", "updated", "urls_updated"
-    (cover unchanged, but `urls` differed and was refreshed in place --
-    see update_urls()), "skipped_no_image", or "unchanged".
+    logging/response: "removed", "added", "updated", "metadata_updated"
+    (cover unchanged, but name/ids/urls/aliases/... differed and were
+    refreshed in place -- see update_metadata()), "skipped_no_image", or
+    "unchanged".
     """
     if event_type.lower() == "destroy":
         was_present = performer_id in index
@@ -201,13 +264,13 @@ async def sync_one_performer(
         image_bytes = resp.content
 
     fingerprint = _image_fingerprint(image_bytes)
-    current_urls = performer.get("urls") or []
+    meta = performer_metadata(performer)
     if index.get_image_hash(performer_id) == fingerprint:
-        if index.update_urls(performer_id, current_urls):
-            return "urls_updated"
+        if index.update_metadata(performer_id, meta):
+            return "metadata_updated"
         return "unchanged"
 
-    from embeddings import load_image, gpu_compute_lock, select_local_performer_face
+    from embeddings import detect_local_performer_faces, load_image, gpu_compute_lock, select_local_performer_face
     image = load_image(image_bytes)
     # See embeddings.py's gpu_compute_lock() docstring -- this runs as a
     # real coroutine on the event loop (the Performer hook handler calls it
@@ -215,7 +278,7 @@ async def sync_one_performer(
     # threading.Lock local_performer_sync_job.py's _embed_worker uses from
     # its own plain OS thread.
     async with gpu_compute_lock():
-        faces = generator.detect_faces(image, min_confidence=0.5)
+        faces = detect_local_performer_faces(generator, image, min_confidence=0.5)
 
     if not faces:
         # No detectable face -- either a default placeholder (no custom
@@ -229,20 +292,16 @@ async def sync_one_performer(
     best_face = select_local_performer_face(faces, generator)
     embedding = generator.get_embedding(best_face)
 
-    stashdb_id = next(
-        (sid["stash_id"] for sid in performer.get("stash_ids", [])
-         if sid.get("endpoint") == STASHDB_ENDPOINT),
-        None,
-    )
     was_present = performer_id in index
     index.upsert(
         performer_id=performer_id,
-        name=performer["name"],
-        stashdb_id=stashdb_id,
+        name=meta["name"],
+        stashdb_id=meta["stashdb_id"],
         image_hash=fingerprint,
         image_url=_relative_image_url(image_path),
         embedding=embedding.embedding,
-        urls=current_urls,
+        urls=meta["urls"],
         bbox=best_face.bbox,
+        details=meta,
     )
     return "updated" if was_present else "added"

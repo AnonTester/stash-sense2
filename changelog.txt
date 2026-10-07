@@ -1,3 +1,18 @@
+## 2026-10-07
+
+### 0.47.0 (sidecar)
+- Fix: a scene whose video was swapped or merged (a longer file made primary) is no longer served from the faces cached
+  from the old video: scenes record which file they were scanned from, the cache is dropped when it changes, and Fingerprint Missing / Refresh Outdated redo those scenes.
+- Fix: a local performer linked through any stash-box (javstash, fansdb, ...) is now recognized as the same person as the
+  database's record of it, so it merges with that match instead of showing as a second, untagged person.
+- Fix: the local performer index follows every change of a performer in Stash (name, stash-box links, aliases, urls, ...),
+  not only a new cover; "Prefer Western Names" now applies to local performers too.
+- Fix: a tight head shot as a performer's cover is no longer skipped when no face is found in it: detection is retried
+  with 30% edge padding (as the database build does), and the stored face box stays valid for the original photo.
+
+### 0.36.1 (plugin)
+- Fix: "Already tagged" and "In library as" are found through any of a performer's stash-box ids, not only StashDB.
+
 ## 2026-10-06
 
 ### 0.36.0 (plugin)

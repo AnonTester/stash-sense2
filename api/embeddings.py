@@ -618,6 +618,52 @@ def select_local_performer_face(
     return baseline
 
 
+# A local performer's cover photo is often a tight head shot: buffalo_l's detector finds no face in it at all, though
+# the same photo with some background around the face is detected confidently (measured: a 185x185 head shot ->
+# nothing at any confidence, 30% edge-replicated padding -> 0.85). stash-sense2-data-gen's embed pipeline retries with
+# the same padding for the same reason (embed/run_embed.py _detect_with_fallback_padding).
+LOCAL_DETECTION_PAD_FRACTION = 0.3
+
+
+def detect_local_performer_faces(
+    generator: "FaceEmbeddingGenerator", image: np.ndarray, min_confidence: float = 0.5,
+) -> list[DetectedFace]:
+    """detect_faces() for a performer's cover photo, with the padded retry: plain detection first, and only when it
+    finds nothing, the photo padded by 30% of its short side (edge-replicated) on every side.
+
+    Returned boxes are always expressed against the ORIGINAL image so every consumer (the crop route, the stored
+    bbox) works unchanged: for a padded detection the padding is subtracted and the box clamped to the photo; when a
+    roll correction was also applied (the box then lives on a rotated canvas) the box is left as detected and
+    `bbox["pad_applied"]` records the padding, for a consumer that rebuilds that canvas (see pad_image_for_bbox)."""
+    faces = generator.detect_faces(image, min_confidence=min_confidence)
+    if faces:
+        return faces
+    pad = int(round(min(image.shape[0], image.shape[1]) * LOCAL_DETECTION_PAD_FRACTION))
+    if pad <= 0:
+        return []
+    padded = np.pad(image, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
+    faces = generator.detect_faces(padded, min_confidence=min_confidence)
+    img_h, img_w = image.shape[0], image.shape[1]
+    for face in faces:
+        bbox = face.bbox
+        if bbox.get("rotation_applied"):
+            bbox["pad_applied"] = pad
+            continue
+        x1, y1 = max(0, bbox["x"] - pad), max(0, bbox["y"] - pad)
+        x2, y2 = min(img_w, bbox["x"] - pad + bbox["w"]), min(img_h, bbox["y"] - pad + bbox["h"])
+        bbox["x"], bbox["y"], bbox["w"], bbox["h"] = x1, y1, max(0, x2 - x1), max(0, y2 - y1)
+    return faces
+
+
+def pad_image_for_bbox(image: np.ndarray, bbox: dict) -> np.ndarray:
+    """The frame a stored bbox is expressed against, before any rotation: the photo itself, or -- for a roll-corrected
+    detection that ran on the padded copy (bbox["pad_applied"]) -- the same edge-padded copy."""
+    pad = int(bbox.get("pad_applied") or 0)
+    if not pad:
+        return image
+    return np.pad(image, ((pad, pad), (pad, pad), (0, 0)), mode="edge")
+
+
 if __name__ == "__main__":
     import time
     import requests

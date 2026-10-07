@@ -18,6 +18,7 @@ import numpy as np
 
 from usearch.index import Index
 
+from local_performer_index import linked_stash_uids
 from name_script import resolve_display_name
 from stashbox_utils import classify_universal_id, normalize_url_for_compare
 
@@ -195,10 +196,8 @@ def build_matches(
     `aliases`/`prefer_western_names`: settings.py's "Prefer Western Names"
     display setting (see name_script.resolve_display_name) -- swaps a
     non-Latin-script canonical name for a Latin-script alias when one is
-    on file. Local-index candidates (fuse_local_results below) are
-    deliberately NOT covered by this -- those names come from the user's
-    own already-real Stash performer records, a different concern from
-    this crawled-dataset display setting."""
+    on file. Local-index candidates get the same treatment in
+    fuse_local_results below."""
     candidates: dict[int, CandidateMatch] = {}
     faces_count = len(faces_mapping)
 
@@ -259,6 +258,8 @@ def fuse_local_results(
     query_result: IndexQueryResult,
     local_performers_mapping: dict[str, dict],  # str(performer_id) -> {name, stashdb_id, image_url, ...}
     config: MatchingConfig = DEFAULT_CONFIG,
+    aliases: Optional[dict[str, list[str]]] = None,
+    prefer_western_names: bool = False,
 ) -> list[CandidateMatch]:
     """Build CandidateMatch objects from a local-performer-index query.
 
@@ -270,6 +271,9 @@ def fuse_local_results(
     "stashdb.org:" convention -- see stashbox_utils._extract_endpoint,
     which will naturally read this as endpoint "local") and scored down by
     LOCAL_MATCH_BOOST.
+
+    `aliases`/`prefer_western_names`: the same "Prefer Western Names" display setting build_matches applies (see
+    local_display_name for which aliases a local performer is checked against).
     """
     candidates: dict[str, CandidateMatch] = {}
     for rank, (pid, dist) in enumerate(zip(query_result.neighbors, query_result.distances)):
@@ -278,8 +282,9 @@ def fuse_local_results(
         if info is None:
             continue  # stale entry (deleted since the index was last saved)
         uid = f"local:{pid_str}"
+        display_name, original_name = local_display_name(pid_str, info, aliases, prefer_western_names)
         candidate = CandidateMatch(
-            face_index=int(pid), universal_id=uid, name=info.get("name", "Unknown"),
+            face_index=int(pid), universal_id=uid, name=display_name, original_name=original_name,
             distance=float(dist), rank=rank + 1,
         )
         candidate.combined_distance = candidate.distance * LOCAL_MATCH_BOOST
@@ -291,12 +296,90 @@ def fuse_local_results(
     return list(candidates.values())
 
 
-# Endpoint short-name matching universal_id's own "<endpoint_domain>:<uuid>"
-# convention for StashDB entries (see stashbox_utils._extract_endpoint) --
-# local_performer_index.py only ever links against StashDB itself (its own
-# STASHDB_ENDPOINT is the full GraphQL URL, used solely to filter a
-# performer's stash_ids down to the StashDB one), so this is the only
-# endpoint a local candidate's tracked stashdb_id could ever correspond to.
+def local_identity(entry: Optional[dict]) -> tuple[Optional[str], list[str]]:
+    """(primary linked universal_id, every linked universal_id) of a local performer.
+
+    The primary is the dataset's own universal_id for that person (the one performers.json / the link groups use),
+    so every grouping and merge step can compare a local performer with a dataset candidate by plain id equality.
+    recognizer.py resolves it once per load and stores it on the entry as `_linked_uid` / `_linked_uids`; an entry
+    that was never annotated (no dataset to resolve against) falls back to its own stash-box ids, StashDB first."""
+    if not entry:
+        return None, []
+    uids = entry.get("_linked_uids")
+    if uids:
+        return entry.get("_linked_uid") or uids[0], list(uids)
+    own = linked_stash_uids(entry)
+    return (own[0] if own else None), own
+
+
+def resolve_local_identity(
+    entry: dict, performers: dict[str, dict], alt_primary: dict[str, str],
+    siblings: Optional[dict[str, list[str]]] = None,
+) -> tuple[Optional[str], list[str]]:
+    """Resolves a local performer's stash-box ids against the dataset (see local_identity).
+
+    `performers`: the dataset's universal_id -> info (a performer there is keyed by ONE of its stash-box ids);
+    `alt_primary`: any other stash-box universal_id of a dataset performer -> that performer's key;
+    `siblings`: a dataset key -> its other stash-box universal_ids. The primary is the first of the local
+    performer's own ids the dataset knows (directly, or through a sibling id); with none, its first own id."""
+    own = linked_stash_uids(entry)
+    if not own:
+        return None, []
+    primary = next((u for u in own if u in performers), None)
+    if primary is None:
+        primary = next((alt_primary[u] for u in own if u in alt_primary), None)
+    if primary is None:
+        primary = own[0]
+    ordered = [primary]
+    for uid in [*own, *((siblings or {}).get(primary, []))]:
+        if uid not in ordered:
+            ordered.append(uid)
+    return primary, ordered
+
+
+def build_stashbox_sibling_maps(
+    rows: list[tuple[int, str, str]], performers: dict[str, dict],
+) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """(siblings, alt_primary) for dataset performers that carry several stash-box ids.
+
+    `rows`: (performer_id, endpoint domain, stash-box id) of those performers only. The performer's key in
+    `performers` (performers.json) is the one of its ids that the dataset knows; every other id maps to it."""
+    by_performer: dict[int, list[str]] = {}
+    for performer_id, domain, stash_id in rows:
+        by_performer.setdefault(performer_id, []).append(f"{domain}:{stash_id}")
+    siblings: dict[str, list[str]] = {}
+    alt_primary: dict[str, str] = {}
+    for uids in by_performer.values():
+        primary = next((u for u in uids if u in performers), None)
+        if primary is None:
+            continue
+        others = [u for u in uids if u != primary]
+        siblings[primary] = others
+        for other in others:
+            alt_primary[other] = primary
+    return siblings, alt_primary
+
+
+def local_display_name(
+    local_id: str, info: dict, aliases: Optional[dict[str, list[str]]], prefer_western: bool,
+) -> tuple[str, Optional[str]]:
+    """(display name, original name or None) of a local performer under "Prefer Western Names".
+
+    Checked against the performer's own Stash aliases first, then the dataset aliases of the dataset performer it
+    is linked to -- local entries have no aliases.json record under their own `local:<id>` key."""
+    name = info.get("name") or "Unknown"
+    if not prefer_western:
+        return name, None
+    primary, _ = local_identity(info)
+    pool = list(info.get("aliases") or [])
+    if primary and aliases:
+        pool += aliases.get(primary, [])
+    key = f"local:{local_id}"
+    return resolve_display_name(key, name, {key: pool}, prefer_western)
+
+
+# Endpoint domain of a StashDB universal_id ("stashdb.org:<uuid>", see stashbox_utils._extract_endpoint) -- the only
+# stash-box a bare `stashdb_id` field can belong to.
 _STASHDB_ENDPOINT_SHORT_NAME = "stashdb.org"
 
 
@@ -351,10 +434,9 @@ def merge_local_candidates(
 
     for local_candidate in local_candidates:
         local_id = local_candidate.universal_id.split(":", 1)[1]  # "local:<pid>" -> "<pid>"
-        stashdb_id = (local_performers_mapping.get(local_id) or {}).get("stashdb_id")
-        linked_universal_id = f"{_STASHDB_ENDPOINT_SHORT_NAME}:{stashdb_id}" if stashdb_id else None
+        _, linked_uids = local_identity(local_performers_mapping.get(local_id))
 
-        main_entry = main_by_universal_id.get(linked_universal_id) if linked_universal_id else None
+        main_entry = next((main_by_universal_id[u] for u in linked_uids if u in main_by_universal_id), None)
         if main_entry is not None:
             matched_local_ids.add(local_id)
             if local_candidate.combined_distance < main_entry.combined_distance:
@@ -505,9 +587,9 @@ def _resolve_local_link_uid(uid: str, local_performers_mapping: Optional[dict[st
     if not uid or not uid.startswith("local:") or not local_performers_mapping:
         return uid
     local_id = uid.split(":", 1)[1]
-    stashdb_id = (local_performers_mapping.get(local_id) or {}).get("stashdb_id")
-    if stashdb_id and stashdb_id != local_id:
-        return f"{_STASHDB_ENDPOINT_SHORT_NAME}:{stashdb_id}"
+    primary, _ = local_identity(local_performers_mapping.get(local_id))
+    if primary and primary.split(":", 1)[-1] != local_id:
+        return primary
     return uid
 
 
@@ -706,7 +788,10 @@ def match_face(
     if local_index is not None and local_performers_mapping and len(local_index) > 0:
         try:
             local_query_result = query_index(embedding, local_index, config)
-            local_candidates = fuse_local_results(local_query_result, local_performers_mapping, config)
+            local_candidates = fuse_local_results(
+                local_query_result, local_performers_mapping, config,
+                aliases=aliases, prefer_western_names=prefer_western_names,
+            )
             result.matches = merge_local_candidates(result.matches, local_candidates, local_performers_mapping, performers)
         except Exception as e:
             logger.warning(f"Local performer index query failed, skipping local matches: {e}")

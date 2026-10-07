@@ -129,6 +129,9 @@ class StashClientUnified:
               id
               name
               alias_list
+              disambiguation
+              birthdate
+              favorite
               gender
               country
               scene_count
@@ -155,6 +158,9 @@ class StashClientUnified:
             id
             name
             alias_list
+            disambiguation
+            birthdate
+            favorite
             gender
             country
             scene_count
@@ -950,6 +956,7 @@ class StashClientUnified:
                 name
               }
               files {
+                id
                 path
                 duration
                 width
@@ -996,6 +1003,25 @@ class StashClientUnified:
         """
         data = await self._execute(query, {"filter": {"per_page": -1}})
         return {int(s["id"]) for s in data["findScenes"]["scenes"]}
+
+    async def get_all_scene_file_signatures(self) -> dict:
+        """{scene id: FileSignature of its primary file} for every scene, in a single request -- what
+        scene_file_signature.reconcile_scene_signatures compares the cached faces against."""
+        from scene_file_signature import signature_from_scene
+        query = """
+        query AllSceneFiles($filter: FindFilterType) {
+          findScenes(filter: $filter) {
+            scenes { id files { id duration } }
+          }
+        }
+        """
+        data = await self._execute(query, {"filter": {"per_page": -1}})
+        out = {}
+        for scene in data["findScenes"]["scenes"]:
+            sig = signature_from_scene(scene)
+            if sig is not None:
+                out[int(scene["id"])] = sig
+        return out
 
     async def get_scenes_with_fingerprints(
         self,

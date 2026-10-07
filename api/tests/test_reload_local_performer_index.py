@@ -100,6 +100,7 @@ class TestReloadLocalPerformerIndex:
     def test_delegates_to_load_local_performer_index(self):
         fake_self = SimpleNamespace(
             _load_local_performer_index=MagicMock(),
+            _annotate_local_identities=MagicMock(),
             _rebuild_local_catalogue_link_index=MagicMock(),
         )
 
@@ -114,9 +115,12 @@ class TestReloadLocalPerformerIndex:
         # at startup (matching.build_local_catalogue_link_index).
         fake_self = SimpleNamespace(
             _load_local_performer_index=MagicMock(),
+            _annotate_local_identities=MagicMock(),
             _rebuild_local_catalogue_link_index=MagicMock(),
         )
 
         FaceRecognizer.reload_local_performer_index(fake_self)
 
         fake_self._rebuild_local_catalogue_link_index.assert_called_once_with()
+        # every reload re-resolves the local performers against the dataset (their ids and the dataset both change)
+        fake_self._annotate_local_identities.assert_called_once_with()

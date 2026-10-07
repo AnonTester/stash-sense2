@@ -71,12 +71,14 @@ import httpx
 
 from base_job import BaseJob, JobContext
 from config import DatabaseConfig
-from embeddings import FaceEmbeddingGenerator, load_image, GPU_COMPUTE_LOCK, select_local_performer_face
+from embeddings import (
+    FaceEmbeddingGenerator, GPU_COMPUTE_LOCK, detect_local_performer_faces, load_image, select_local_performer_face,
+)
 from local_performer_index import (
-    STASHDB_ENDPOINT,
     LocalPerformerIndex,
     _image_fingerprint,
     _relative_image_url,
+    performer_metadata,
 )
 from recommendations_router import get_stash_client
 
@@ -153,26 +155,15 @@ async def _fetch_one(
             return
 
         fingerprint = _image_fingerprint(image_bytes)
-        current_urls = performer.get("urls") or []
+        meta = performer_metadata(performer)
+        meta["image_url"] = _relative_image_url(image_path)
         if index.get_image_hash(performer_id) == fingerprint:
-            # Cover unchanged, but `urls` may not be -- e.g. right after the
-            # identity-resolution flow in recommendations_router.py writes a
-            # new profile URL onto an existing performer, which doesn't
-            # touch the cover. Payload carries the current urls so the
-            # consumer loop (which owns `index`) can refresh them in place
-            # without a re-embed. See local_performer_index.update_urls().
-            await asyncio.to_thread(event_queue.put, ("unchanged", performer_id, position, current_urls))
+            # Cover unchanged, but any other detail may not be -- a rename, a newly linked stash-box, a new profile
+            # url, an alias. Payload carries the current metadata so the consumer loop (which owns `index`) can
+            # refresh it in place without a re-embed. See local_performer_index.update_metadata().
+            await asyncio.to_thread(event_queue.put, ("unchanged", performer_id, position, meta))
             return
 
-        stashdb_id = next(
-            (sid["stash_id"] for sid in (performer.get("stash_ids") or [])
-             if sid.get("endpoint") == STASHDB_ENDPOINT),
-            None,
-        )
-        meta = {
-            "name": performer["name"], "stashdb_id": stashdb_id,
-            "image_url": _relative_image_url(image_path), "urls": performer.get("urls") or [],
-        }
         await asyncio.to_thread(
             event_queue.put, ("needs_embed", performer_id, position, (image_bytes, fingerprint, meta)),
         )
@@ -226,7 +217,7 @@ def _embed_worker(embed_queue: "queue.Queue", event_queue: "queue.Queue") -> Non
             # already warm/cached, ruling out the model-download race as
             # the actual cause.
             with GPU_COMPUTE_LOCK:
-                faces = generator.detect_faces(image, min_confidence=0.5)
+                faces = detect_local_performer_faces(generator, image, min_confidence=0.5)
                 if not faces:
                     best_face = None
                 else:
@@ -384,7 +375,7 @@ class LocalPerformerSyncJob(BaseJob):
                 continue
 
             if kind == "unchanged":
-                if index.update_urls(performer_id, payload or []):
+                if index.update_metadata(performer_id, payload or {}):
                     updated += 1
             elif kind == "fetch_error":
                 errored += 1
@@ -414,7 +405,7 @@ class LocalPerformerSyncJob(BaseJob):
                 index.upsert(
                     performer_id=performer_id, name=meta["name"], stashdb_id=meta["stashdb_id"],
                     image_hash=fingerprint, image_url=meta["image_url"], embedding=embedding,
-                    urls=meta["urls"], bbox=bbox,
+                    urls=meta["urls"], bbox=bbox, details=meta,
                 )
                 if was_present:
                     updated += 1

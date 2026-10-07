@@ -163,6 +163,7 @@ def save_scene_fingerprint(
                     "profile_url": match.profile_url,
                     "top_timestamps_sec": match.top_timestamps_sec,
                     "original_name": getattr(match, "original_name", None),
+                    "linked_universal_ids": list(getattr(match, "linked_universal_ids", None) or []),
                     # Plain dicts, not FaceBox Pydantic instances -- the
                     # latter broke json.dumps() inside replace_fingerprint_
                     # matches with a silent-to-the-caller TypeError (caught
@@ -2010,6 +2011,8 @@ def _match_row_to_response_dict(row: dict) -> dict:
         "top_timestamp_boxes": row.get("top_timestamp_boxes") or [],
         "top_timestamp_embedding_indices": row.get("top_timestamp_embedding_indices") or [],
         "matched_embedding_index": row.get("matched_embedding_index"),
+        "linked_universal_ids": row.get("linked_universal_ids") or [],
+        "original_name": row.get("original_name"),
     }
 
 
@@ -2341,7 +2344,7 @@ async def sync_one_local_performer(request: LocalPerformerSyncOneRequest):
     )
     index.save()
 
-    if status in ("added", "updated", "urls_updated", "removed"):
+    if status in ("added", "updated", "metadata_updated", "removed"):
         # Refreshes just the local index in place -- does NOT unload the
         # whole face_recognition resource group (buffalo_l models + main
         # DB index), which this single-performer change never touches.

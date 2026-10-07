@@ -183,6 +183,12 @@ Stash Sense 2 checks for new database releases automatically. To update:
 2. Check the **Database** section for available updates
 3. Click **Update** — the sidecar downloads and hot-swaps the data without restarting
 
+### Local library and changed videos
+
+The local performer index is rebuilt from your Stash performers by the **Local Performer Sync** task and on every performer create/update/delete hook. Besides the cover face it keeps each performer's current name, aliases, urls and **every stash-box id** (StashDB, javstash, FansDB, ...), so a performer linked through any stash-box is recognized as the same person as the database's record of it. A rename or a newly added link in Stash reaches the index on the next update, even when the cover image did not change. A cover that is a tight head shot (no face found as is) is retried with 30% edge padding, so it is indexed too.
+
+Detected faces are cached per scene. Each scene remembers which video file (its id and duration) the cache was built from; if the primary file is replaced or a longer video is merged in, the cache is dropped and the next scan reads the new video. This is checked on every identify, at startup, and at the start of **Fingerprint Missing** and **Refresh Outdated**.
+
 ### Container Updates
 
 If you're running a pre-built GHCR image, pull the new tag and recreate (data under `./api/data` and the named `insightface` volume both persist):

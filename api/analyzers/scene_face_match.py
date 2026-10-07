@@ -232,6 +232,9 @@ class SceneFaceMatchAnalyzer(BaseAnalyzer):
                     top_k=5,
                     use_cache=True,
                     use_sprite=use_sprite,
+                    # the scene's primary file as the listing just read it (see scene_file_signature.py)
+                    scene_file_id=str(file_info["id"]) if file_info.get("id") is not None else None,
+                    scene_duration_sec=file_info.get("duration"),
                 ),
             )
 

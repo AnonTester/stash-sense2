@@ -6,7 +6,7 @@ import json
 import queue
 import threading
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import numpy as np
 
@@ -14,7 +14,10 @@ from usearch.index import Index
 
 from config import DatabaseConfig
 from embeddings import FaceEmbeddingGenerator, DetectedFace, FaceEmbedding
-from matching import MatchingConfig, match_face, MatchingResult
+from matching import (
+    MatchingConfig, MatchingResult, build_stashbox_sibling_maps, local_display_name, local_identity, match_face,
+    resolve_local_identity,
+)
 from database_reader import PerformerDatabaseReader
 from stashbox_utils import classify_universal_id
 from stashbox_connection_manager import get_connection_manager
@@ -88,6 +91,11 @@ class PerformerMatch:
     # for adding as an alias if this match is used to create a new local
     # performer.
     original_name: Optional[str] = None
+    # Every stash-box universal_id ("<domain>:<id>") known for this person, the dataset's own key first -- from the
+    # dataset performer's other stash-box ids and, for a local match, the local performer's own links. Lets a
+    # caller recognize the same person under any stash-box id (tagged on the scene, present in the library).
+    # Empty for a performer with a single id and no local counterpart.
+    linked_universal_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -179,6 +187,13 @@ class FaceRecognizer:
               f"{len(self.performer_link_index)} performers in a linked group, "
               f"{len(self.aliases)} performers with aliases")
 
+        # Dataset performers that carry several stash-box ids (a StashDB and a javstash record of one person share a
+        # performer row): their other ids, so a local performer linked through ANY stash-box resolves to the
+        # dataset's key for that person -- see matching.resolve_local_identity.
+        self.stashbox_siblings: dict[str, list[str]] = {}
+        self.stashbox_alt_primary: dict[str, str] = {}
+        self._load_stashbox_siblings()
+
         # Optionally load the local performer index -- built from this
         # Stash instance's own performer cover images by the
         # local_performer_sync job, absent until that's run at least once.
@@ -194,6 +209,7 @@ class FaceRecognizer:
         # performer_link_index -- see matching.build_local_catalogue_link_index
         # and reload_local_performer_index() below for why this needs
         # recomputing on every local-index reload, not just at startup.
+        self._annotate_local_identities()
         self._rebuild_local_catalogue_link_index()
 
         # Initialize SQLite database reader for multi-signal data
@@ -201,6 +217,40 @@ class FaceRecognizer:
         if db_config.sqlite_db_path and db_config.sqlite_db_path.exists():
             print(f"Loading SQLite database from {db_config.sqlite_db_path}...")
             self.db_reader = PerformerDatabaseReader(str(db_config.sqlite_db_path))
+
+    def _load_stashbox_siblings(self) -> None:
+        sqlite_path = self.db_config.sqlite_db_path
+        if not sqlite_path or not Path(sqlite_path).exists():
+            return
+        import sqlite3
+        from export_db_to_json import make_universal_id
+        try:
+            conn = sqlite3.connect(f"file:{sqlite_path}?mode=ro", uri=True)
+            try:
+                rows = [
+                    (pid, make_universal_id(endpoint, sid).split(":", 1)[0], sid)
+                    for pid, endpoint, sid in conn.execute(
+                        "SELECT performer_id, endpoint, stashbox_performer_id FROM stashbox_ids WHERE performer_id IN "
+                        "(SELECT performer_id FROM stashbox_ids GROUP BY performer_id HAVING COUNT(*) > 1)"
+                    )
+                ]
+            finally:
+                conn.close()
+        except sqlite3.Error as e:
+            print(f"Could not read multi-stash-box performers (local performers link by their own ids only): {e}")
+            return
+        self.stashbox_siblings, self.stashbox_alt_primary = build_stashbox_sibling_maps(rows, self.performers)
+        print(f"{len(self.stashbox_siblings)} dataset performers carry more than one stash-box id")
+
+    def _annotate_local_identities(self) -> None:
+        """Resolves every local performer's stash-box ids against the dataset (matching.resolve_local_identity) and
+        stores the result on the in-memory entry (`_linked_uid` / `_linked_uids`, never persisted). Redone on every
+        local-index reload, since both sides change independently."""
+        if not self.local_performer_index:
+            return
+        for entry in self.local_performer_index.mapping.values():
+            primary, uids = resolve_local_identity(entry, self.performers, self.stashbox_alt_primary, self.stashbox_siblings)
+            entry["_linked_uid"], entry["_linked_uids"] = primary, uids
 
     def _load_local_performer_index(self) -> None:
         """(Re)loads self.local_performer_index from disk, or leaves/resets
@@ -233,6 +283,7 @@ class FaceRecognizer:
         full reload on the next request -- see main.py's
         refresh_local_performer_index()."""
         self._load_local_performer_index()
+        self._annotate_local_identities()
         # A newly-synced/edited local performer's own urls can newly match
         # (or stop matching) a catalogue candidate -- see
         # _rebuild_local_catalogue_link_index's own comment at __init__.
@@ -264,6 +315,7 @@ class FaceRecognizer:
         category = classify_universal_id(universal_id)
 
         source = catalogue_url = profile_url = None
+        linked_universal_ids: list[str] = []
         if category == "local":
             # Local-index match: id_part is the local Stash performer
             # id, not a StashDB uuid. Use the real linked stashdb_id if
@@ -272,7 +324,13 @@ class FaceRecognizer:
             # back to the local id as the identifier.
             local_info = (self.local_performer_index.mapping.get(id_part, {})
                           if self.local_performer_index else {})
-            stashdb_id = local_info.get("stashdb_id") or id_part
+            # `stashdb_id` stays a StashDB uuid (callers build stashdb.org links and tagged checks from it): the
+            # local performer's own StashDB link, or the one its dataset counterpart has; any other stash-box
+            # link is in linked_universal_ids.
+            _, linked_uids = local_identity(local_info)
+            stashdb_uid = next((u for u in linked_uids if u.startswith("stashdb.org:")), None)
+            stashdb_id = stashdb_uid.split(":", 1)[1] if stashdb_uid else id_part
+            linked_universal_ids = linked_uids
             country = None
             image_url = local_info.get("image_url")
             local_performer_id = id_part
@@ -295,11 +353,14 @@ class FaceRecognizer:
             country = self.performers.get(universal_id, {}).get("country")
             image_url = self.performers.get(universal_id, {}).get("image_url")
             local_performer_id = None
+            if universal_id in self.stashbox_siblings:
+                linked_universal_ids = [universal_id, *self.stashbox_siblings[universal_id]]
 
         return {
             "stashdb_id": stashdb_id, "country": country, "image_url": image_url,
             "local_performer_id": local_performer_id, "source": source,
             "catalogue_url": catalogue_url, "profile_url": profile_url,
+            "linked_universal_ids": linked_universal_ids,
         }
 
     def build_linked_substitute_match(self, universal_id: str, template: "PerformerMatch") -> Optional["PerformerMatch"]:
@@ -359,18 +420,24 @@ class FaceRecognizer:
                 return None
 
         fields = self._resolve_match_fields(universal_id)
-        raw_name = (info or {}).get("name") or (
-            self.local_performer_index.mapping.get(fields["local_performer_id"], {}).get("name")
+        local_info = (
+            self.local_performer_index.mapping.get(fields["local_performer_id"], {})
             if fields["local_performer_id"] and self.local_performer_index else None
-        ) or "Unknown"
+        )
+        raw_name = (info or {}).get("name") or (local_info or {}).get("name") or "Unknown"
 
         try:
             from settings import get_setting
             from name_script import resolve_display_name
             prefer_western_names = bool(get_setting("prefer_western_names"))
-            display_name, original_name = resolve_display_name(
-                universal_id, raw_name, self.aliases, prefer_western_names,
-            )
+            if local_info is not None:
+                display_name, original_name = local_display_name(
+                    fields["local_performer_id"], local_info, self.aliases, prefer_western_names,
+                )
+            else:
+                display_name, original_name = resolve_display_name(
+                    universal_id, raw_name, self.aliases, prefer_western_names,
+                )
         except RuntimeError:
             display_name, original_name = raw_name, None
 
@@ -388,6 +455,7 @@ class FaceRecognizer:
             profile_url=fields["profile_url"],
             matched_embedding_index=None,
             original_name=original_name,
+            linked_universal_ids=fields["linked_universal_ids"],
         )
 
     def _endpoint_priority_domains(self) -> list[str]:
@@ -628,6 +696,7 @@ class FaceRecognizer:
                 # the real (local, single-cover-photo) match at all.
                 matched_embedding_index=candidate.face_index if not fields["local_performer_id"] else None,
                 original_name=candidate.original_name,
+                linked_universal_ids=fields["linked_universal_ids"],
             ))
 
         return matches, result, embedding

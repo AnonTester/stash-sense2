@@ -156,6 +156,9 @@ class SceneFingerprintGenerator:
         # Scene ids still to fingerprint in the current generate_all() run; drained as scenes
         # finish so the paging loop can stop as soon as the last needed scene is done.
         self._remaining_ids: set[int] = set()
+        # Scenes whose primary video changed since their faces were cached (scene_file_signature.py): their caches
+        # are dropped and they are redone by both Fingerprint Missing and Refresh Outdated.
+        self._file_changed_ids: set[int] = set()
         self._progress = GeneratorProgress(
             status=GeneratorStatus.IDLE,
             total_scenes=0,
@@ -219,6 +222,8 @@ class SceneFingerprintGenerator:
 
     def _needs_work(self, scene_id: int, refresh_outdated: bool, skip_errors: bool) -> bool:
         """Whether generate_all() should fingerprint this scene in this run."""
+        if scene_id in self._file_changed_ids:
+            return True
         existing = self.rec_db.get_scene_fingerprint(scene_id)
         if not existing:
             return True
@@ -286,6 +291,17 @@ class SceneFingerprintGenerator:
 
             all_scene_ids = await self._with_stash_retry(self.stash.get_all_scene_ids)
 
+            # A scene whose video was swapped or merged since its faces were cached must be extracted again -- its
+            # cache is dropped here and its stored result marked outdated (scene_file_signature.py).
+            self._file_changed_ids = set()
+            try:
+                from scene_file_signature import reconcile_scene_signatures
+                current_files = await self._with_stash_retry(self.stash.get_all_scene_file_signatures)
+                reconciled = await asyncio.to_thread(reconcile_scene_signatures, self.rec_db, current_files)
+                self._file_changed_ids = set(reconciled.changed)
+            except Exception as e:  # noqa: BLE001 -- best effort; the per-scene check in identify still applies
+                logger.warning("Could not compare scenes' videos with their cached faces (skipping): %s", e)
+
             # Delta-scoped Refresh Outdated (see delta_scope.py): among the
             # scenes that are db_version-outdated but already have a
             # COMPLETE fingerprint, find the ones a recent delta could not
@@ -302,6 +318,7 @@ class SceneFingerprintGenerator:
                 outdated_complete = [
                     fp for fp in self.rec_db.get_all_scene_fingerprints(status="complete")
                     if fp["stash_scene_id"] in all_scene_ids_set and fp.get("db_version") != self.db_version
+                    and fp["stash_scene_id"] not in self._file_changed_ids
                 ]
                 if outdated_complete:
                     from delta_scope import scenes_needing_rematch
@@ -424,7 +441,7 @@ class SceneFingerprintGenerator:
                             # nothing gets generated for scenes that don't
                             # already have it cached.
                             request=self._build_identify_request(
-                                sid, start_offset_pct, end_offset_pct, use_sprite=use_sprite,
+                                sid, start_offset_pct, end_offset_pct, use_sprite=use_sprite, file_info=file_info,
                             ),
                         )
 
@@ -579,11 +596,15 @@ class SceneFingerprintGenerator:
 
     def _build_identify_request(
         self, scene_id: int, start_offset_pct: float, end_offset_pct: float,
-        use_sprite: bool = False,
+        use_sprite: bool = False, file_info: Optional[dict] = None,
     ) -> "SceneIdentifyRequest":
         from identification_router import SceneIdentifyRequest
+        file_info = file_info or {}
         return SceneIdentifyRequest(
             scene_id=str(scene_id),
+            # the scene's primary file as the listing just read it -- spares the cached-faces check a Stash call
+            scene_file_id=str(file_info["id"]) if file_info.get("id") is not None else None,
+            scene_duration_sec=file_info.get("duration"),
             num_frames=self.num_frames,
             min_face_size=self.min_face_size,
             max_distance=self.max_distance,

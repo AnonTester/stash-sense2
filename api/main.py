@@ -336,6 +336,11 @@ async def lifespan(app: FastAPI):
     from backfill_frame_timestamps import run_video_timestamp_backfill_once
     asyncio.create_task(run_video_timestamp_backfill_once(get_rec_db(), STASH_URL, STASH_API_KEY))
 
+    # Drop cached faces of scenes whose video was swapped/merged since they were cached, and record which file every
+    # other scene's cache belongs to -- see scene_file_signature.py. Non-blocking, best effort.
+    from scene_file_signature import reconcile_on_startup
+    asyncio.create_task(reconcile_on_startup(get_rec_db(), STASH_URL, STASH_API_KEY))
+
     # Warm the face-recognition resource in the background now that
     # settings exist (idle_unload_minutes needs to be readable for
     # _idle_checker below, but the load itself doesn't depend on it).
@@ -446,7 +451,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Stash Sense API",
     description="Face recognition and recommendations engine for Stash",
-    version="0.46.0",
+    version="0.47.0",
     lifespan=lifespan,
 )
 

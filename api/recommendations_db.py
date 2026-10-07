@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Iterator, Any
 
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
@@ -80,6 +80,19 @@ SCENE_SIGNAL_CACHE_SCHEMA = """
     );
     CREATE INDEX IF NOT EXISTS idx_scene_tattoo_emb_scene ON scene_tattoo_embeddings(stash_scene_id);
 """
+
+# Which video file a scene's cached faces were taken from (the primary file's Stash id and duration). A scene whose
+# primary file is swapped or merged keeps its id, so without this the face caches (scene_signal_cache /
+# scene_face_embeddings / sprite status) would keep describing the old video -- see scene_file_signature.py.
+SCENE_FILE_SIGNATURE_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS scene_file_signature (
+        stash_scene_id INTEGER PRIMARY KEY,
+        file_id TEXT,
+        duration_sec REAL,
+        recorded_at TEXT DEFAULT (datetime('now'))
+    );
+"""
+
 
 # Delta-scoped Refresh Outdated / Face Recommendations (see delta_scope.py
 # and delta_applier.py's apply_delta_chain). Populated as a *side effect*
@@ -347,6 +360,7 @@ class RecommendationsDB:
                 top_boxes_json TEXT,
                 top_embedding_indices_json TEXT,
                 matched_embedding_index INTEGER,
+                linked_universal_ids_json TEXT,
                 UNIQUE(fingerprint_id, person_id, match_rank)
             );
             CREATE INDEX idx_sfm_fingerprint ON scene_fingerprint_matches(fingerprint_id);
@@ -458,6 +472,7 @@ class RecommendationsDB:
             );
         """)
         conn.executescript(SCENE_SIGNAL_CACHE_SCHEMA)
+        conn.executescript(SCENE_FILE_SIGNATURE_SCHEMA)
         conn.executescript(DELTA_SCOPE_SCHEMA)
 
     def _migrate_schema(self, conn: sqlite3.Connection, from_version: int):
@@ -945,6 +960,17 @@ class RecommendationsDB:
             if cols and "matched_embedding_index" not in cols:
                 conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN matched_embedding_index INTEGER")
             conn.execute("UPDATE schema_version SET version = 24")
+
+        if from_version < 25:
+            # scene_file_signature (see its schema's comment) and linked_universal_ids_json: every stash-box id a
+            # stored match's person is known under, so the plugin can find an already-tagged / in-library performer
+            # through any of them when it re-reads a stored result. Both purely additive; existing rows simply have
+            # no signature yet / no linked ids until re-matched.
+            conn.executescript(SCENE_FILE_SIGNATURE_SCHEMA)
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(scene_fingerprint_matches)")}
+            if cols and "linked_universal_ids_json" not in cols:
+                conn.execute("ALTER TABLE scene_fingerprint_matches ADD COLUMN linked_universal_ids_json TEXT")
+            conn.execute("UPDATE schema_version SET version = 25")
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -2132,7 +2158,8 @@ class RecommendationsDB:
         None -- stored as JSON in top_embedding_indices_json),
         matched_embedding_index (this match's own single, overall
         reference embedding_index -- the only one a frequency-mode-only
-        match, with no per-timestamp data at all, ever resolves).
+        match, with no per-timestamp data at all, ever resolves),
+        linked_universal_ids (list of "<domain>:<id>", stored as JSON).
         """
         with self._connection() as conn:
             conn.execute("DELETE FROM scene_fingerprint_matches WHERE fingerprint_id = ?", (fingerprint_id,))
@@ -2143,8 +2170,8 @@ class RecommendationsDB:
                     universal_id, stashdb_id, name, confidence, distance, country,
                     image_url, endpoint, already_tagged, local_performer_id,
                     source, catalogue_url, profile_url, top_timestamps_sec, original_name,
-                    top_boxes_json, top_embedding_indices_json, matched_embedding_index
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    top_boxes_json, top_embedding_indices_json, matched_embedding_index, linked_universal_ids_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -2158,6 +2185,7 @@ class RecommendationsDB:
                         json.dumps(m.get("top_timestamp_boxes") or []),
                         json.dumps(m.get("top_timestamp_embedding_indices") or []),
                         m.get("matched_embedding_index"),
+                        json.dumps(m["linked_universal_ids"]) if m.get("linked_universal_ids") else None,
                     )
                     for m in matches
                 ],
@@ -2179,6 +2207,9 @@ class RecommendationsDB:
                 d["top_timestamp_boxes"] = json.loads(d["top_boxes_json"]) if d.get("top_boxes_json") else []
                 d["top_timestamp_embedding_indices"] = (
                     json.loads(d["top_embedding_indices_json"]) if d.get("top_embedding_indices_json") else []
+                )
+                d["linked_universal_ids"] = (
+                    json.loads(d["linked_universal_ids_json"]) if d.get("linked_universal_ids_json") else []
                 )
                 d["is_best_match"] = bool(d["is_best_match"])
                 d["already_tagged"] = bool(d["already_tagged"])
@@ -2240,6 +2271,7 @@ class RecommendationsDB:
                 conn.execute(f"DELETE FROM scene_face_embeddings WHERE stash_scene_id IN ({placeholders})", chunk)
                 conn.execute(f"DELETE FROM scene_sprite_cache_status WHERE stash_scene_id IN ({placeholders})", chunk)
                 conn.execute(f"DELETE FROM scene_tattoo_embeddings WHERE stash_scene_id IN ({placeholders})", chunk)
+                conn.execute(f"DELETE FROM scene_file_signature WHERE stash_scene_id IN ({placeholders})", chunk)
         return deleted
 
     # ==================== Scene signal cache (face) ====================
@@ -2355,6 +2387,89 @@ class RecommendationsDB:
                 """,
                 (stash_scene_id,),
             )
+
+    # ---- scene file signature (see SCENE_FILE_SIGNATURE_SCHEMA) ----
+
+    def get_scene_file_signature(self, stash_scene_id: int) -> Optional[dict]:
+        with self._connection() as conn:
+            row = conn.execute(
+                "SELECT file_id, duration_sec FROM scene_file_signature WHERE stash_scene_id = ?", (stash_scene_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_all_scene_file_signatures(self) -> dict[int, dict]:
+        with self._connection() as conn:
+            rows = conn.execute("SELECT stash_scene_id, file_id, duration_sec FROM scene_file_signature").fetchall()
+            return {r["stash_scene_id"]: {"file_id": r["file_id"], "duration_sec": r["duration_sec"]} for r in rows}
+
+    def set_scene_file_signatures(self, signatures: dict[int, tuple[Optional[str], Optional[float]]]) -> None:
+        """Records {scene_id: (file_id, duration_sec)} in one transaction."""
+        if not signatures:
+            return
+        with self._connection() as conn:
+            conn.executemany(
+                """
+                INSERT INTO scene_file_signature (stash_scene_id, file_id, duration_sec) VALUES (?, ?, ?)
+                ON CONFLICT(stash_scene_id) DO UPDATE SET
+                    file_id = excluded.file_id, duration_sec = excluded.duration_sec, recorded_at = datetime('now')
+                """,
+                [(sid, fid, dur) for sid, (fid, dur) in signatures.items()],
+            )
+
+    def purge_scene_face_caches(self, scene_ids: list[int]) -> None:
+        """Drops every cached face of these scenes (video frames and sprite tiles, plus the markers saying they were
+        extracted) so the next identify extracts them again. Stored match results are left to that identify."""
+        for i in range(0, len(scene_ids), 500):
+            chunk = scene_ids[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            with self._connection() as conn:
+                for table in ("scene_signal_cache", "scene_face_embeddings", "scene_sprite_cache_status",
+                              "scene_tattoo_embeddings"):
+                    conn.execute(f"DELETE FROM {table} WHERE stash_scene_id IN ({placeholders})", chunk)
+
+    def mark_fingerprints_stale(self, scene_ids: list[int], marker: str) -> None:
+        """Sets db_version of these scenes' fingerprints to `marker`, so Refresh Outdated picks them up."""
+        for i in range(0, len(scene_ids), 500):
+            chunk = scene_ids[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            with self._connection() as conn:
+                conn.execute(
+                    f"UPDATE scene_fingerprints SET db_version = ? WHERE stash_scene_id IN ({placeholders})",
+                    [marker, *chunk],
+                )
+
+    def get_cached_video_extents(self) -> dict[int, tuple[float, float]]:
+        """{scene_id: (latest video-frame timestamp in seconds, end_offset_pct)} for every scene with cached video
+        frames -- what an old cache (before file signatures) reveals about the length of the video it came from."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT e.stash_scene_id, MAX(e.timestamp_sec) AS max_ts, c.end_offset_pct
+                FROM scene_face_embeddings e JOIN scene_signal_cache c ON c.stash_scene_id = e.stash_scene_id
+                WHERE e.is_sprite = 0 AND e.timestamp_sec IS NOT NULL
+                GROUP BY e.stash_scene_id
+                """
+            ).fetchall()
+            return {r["stash_scene_id"]: (r["max_ts"], r["end_offset_pct"]) for r in rows}
+
+    def get_cached_video_extent(self, stash_scene_id: int) -> Optional[tuple[float, float]]:
+        """get_cached_video_extents() for one scene."""
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                SELECT MAX(e.timestamp_sec) AS max_ts, c.end_offset_pct
+                FROM scene_face_embeddings e JOIN scene_signal_cache c ON c.stash_scene_id = e.stash_scene_id
+                WHERE e.stash_scene_id = ? AND e.is_sprite = 0 AND e.timestamp_sec IS NOT NULL
+                """, (stash_scene_id,),
+            ).fetchone()
+            return (row["max_ts"], row["end_offset_pct"]) if row and row["max_ts"] is not None else None
+
+    def get_scene_ids_with_face_cache(self) -> set[int]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "SELECT stash_scene_id FROM scene_signal_cache UNION SELECT stash_scene_id FROM scene_sprite_cache_status"
+            ).fetchall()
+            return {r[0] for r in rows}
 
     def get_fingerprints_needing_refresh(self, current_db_version: str) -> list[dict]:
         """Get fingerprints that were generated with an older DB version."""

@@ -127,6 +127,11 @@ def _resolve_local_link(match_like) -> Optional[str]:
 
     local_performer_id = getattr(match_like, "local_performer_id", None)
     stashdb_id = getattr(match_like, "stashdb_id", None)
+    # recognizer.py lists a local match's linked stash-box ids with the dataset's own key for that person first --
+    # covers a person linked through a stash-box other than StashDB (javstash, fansdb, ...)
+    linked = getattr(match_like, "linked_universal_ids", None)
+    if uid and uid.startswith("local:") and local_performer_id and isinstance(linked, (list, tuple)) and linked:
+        return linked[0]
     if (
         uid and uid.startswith("local:") and local_performer_id and stashdb_id
         and str(stashdb_id) != str(local_performer_id)
@@ -269,6 +274,17 @@ def _substitute_linked_priority_winner(
         return best_match
     substitute = build_fn(better, best_match)
     return substitute if substitute is not None else best_match
+
+
+def _match_is_tagged(match, tagged_ids: set[str]) -> bool:
+    """Whether a match is a performer already tagged on the scene: by its own stash id, or by any other stash-box
+    id of the same person (`linked_universal_ids`, "<domain>:<id>"). `tagged_ids` are bare stash ids."""
+    if not tagged_ids:
+        return False
+    if match.stashdb_id in tagged_ids:
+        return True
+    linked = getattr(match, "linked_universal_ids", None)
+    return isinstance(linked, (list, tuple)) and any(u.split(":", 1)[-1] in tagged_ids for u in linked)
 
 
 def match_universal_id(match) -> Optional[str]:
@@ -990,7 +1006,7 @@ def clustered_frequency_matching(
             best_match = _substitute_linked_priority_winner(
                 best_match, raw_matches, performer_link_index, endpoint_priority_domains, recognizer,
             )
-            is_tagged = any(m.stashdb_id in tagged_ids for m in raw_matches)
+            is_tagged = any(_match_is_tagged(m, tagged_ids) for m in raw_matches)
 
             # Apply small boost for already-tagged performers
             if is_tagged:

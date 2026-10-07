@@ -174,6 +174,7 @@ class PerformerMatchResponse(BaseModel):
     matched_embedding_index: Optional[int] = Field(None, description="The usearch index position of the one specific reference face that won this match -- None for a local-index match (no such index) or if unavailable. Distinct from any StashDB performer id: this points at exactly which photo of that performer was matched.")
     disambiguation: Optional[str] = Field(None, description="The performer's disambiguation (e.g. a year or studio), shown after the name to tell same-name performers apart. Resolved from performers.db at response time; None for a local-library match (the plugin reads that one from Stash) or when the performer has none.")
     original_name: Optional[str] = Field(None, description="Set only when the 'Prefer Western Names' setting swapped `name` for a western-script alias -- this is the original (usually non-Latin-script) name, for an 'aka ...' display line.")
+    linked_universal_ids: list[str] = Field(default_factory=list, description="Every stash-box id this person is known under, as '<domain>:<id>' with the database's own key first (the same person's StashDB and javstash records, a local library performer's own links). Lets a caller find the performer in the library or on the scene through any of them. Empty when only one id is known.")
 
 
 class FaceResult(BaseModel):
@@ -265,10 +266,12 @@ class SceneIdentifyRequest(BaseModel):
     matching_mode: str = Field("frequency", description="Matching mode: 'cluster' (cluster faces then match), 'frequency' (count performer appearances), or 'hybrid' (combine both)")
 
     # Already-tagged performers (StashDB IDs) for boosting
-    scene_performer_stashdb_ids: list[str] = Field(default_factory=list, description="StashDB IDs of performers already tagged on this scene")
+    scene_performer_stashdb_ids: list[str] = Field(default_factory=list, description="Stash-box ids (any endpoint) of the performers already tagged on this scene")
 
     # Cache settings
     use_cache: bool = Field(True, description="Reuse a cached prior extraction on this scene when detection params match, skipping ffmpeg/detection/embedding and only redoing matching")
+    scene_file_id: Optional[str] = Field(None, description="Optional hint from a caller that already knows the scene's current primary file (Stash file id), so the cached-faces check does not have to ask Stash again.")
+    scene_duration_sec: Optional[float] = Field(None, description="Duration of that primary file; see scene_file_id.")
 
     # Sprite-sheet settings
     use_sprite: bool = Field(False, description="Additionally detect and match faces from the scene's sprite/thumbnail sheet (Stash's scrubber-bar preview tiles), merged in alongside video-frame results")
@@ -327,6 +330,7 @@ def _match_to_response(m, **overrides) -> PerformerMatchResponse:
         universal_id=uid,
         matched_embedding_index=getattr(m, "matched_embedding_index", None),
         original_name=getattr(m, "original_name", None),
+        linked_universal_ids=list(getattr(m, "linked_universal_ids", None) or []),
         disambiguation=get_disambiguation(uid),
     )
     defaults.update(overrides)
@@ -1182,6 +1186,7 @@ async def _extract_scene_frames(
                 "query": f'''{{
                     findScene(id: "{request.scene_id}") {{
                         files {{
+                            id
                             duration
                             width
                             height
@@ -1540,6 +1545,23 @@ class PreparedSceneIdentify:
     t_start: float
 
 
+async def _drop_caches_of_changed_file(
+    request: "SceneIdentifyRequest", scene_id: int, base_url: str, api_key: Optional[str],
+) -> None:
+    from recommendations_router import rec_db
+    from scene_file_signature import FileSignature, ensure_scene_cache_matches_file, fetch_scene_signature
+    if rec_db is None:
+        return
+    if request.scene_file_id is not None or request.scene_duration_sec:
+        current = FileSignature(
+            file_id=str(request.scene_file_id) if request.scene_file_id is not None else None,
+            duration_sec=request.scene_duration_sec,
+        )
+    else:
+        current = await fetch_scene_signature(base_url, api_key or "", scene_id)
+    await ensure_scene_cache_matches_file(rec_db, scene_id, current)
+
+
 async def _prepare_scene_identify(
     request: SceneIdentifyRequest,
 ) -> "PreparedSceneIdentify | SceneIdentifyResponse":
@@ -1574,6 +1596,10 @@ async def _prepare_scene_identify(
         pass
 
     scene_id_int = int(request.scene_id)
+
+    # Cached faces describe the video they were extracted from: drop them if the scene's primary file has since been
+    # swapped or merged (see scene_file_signature.py). Before the sprite and frame caches below are consulted.
+    await _drop_caches_of_changed_file(request, scene_id_int, base_url, api_key)
 
     match_config = MatchingConfig(
         query_k=100,  # Get more candidates before threshold-filtering
@@ -1765,6 +1791,10 @@ async def local_performer_crop(performer_id: int):
 
     try:
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if bbox.get("pad_applied"):
+            # a roll-corrected detection that ran on the edge-padded copy (embeddings.detect_local_performer_faces)
+            from embeddings import pad_image_for_bbox
+            img = Image.fromarray(pad_image_for_bbox(np.array(img), bbox))
         rotation_applied = bbox.get("rotation_applied", 0.0) or 0.0
         if rotation_applied:
             img = img.rotate(rotation_applied, expand=True, resample=Image.BICUBIC)
