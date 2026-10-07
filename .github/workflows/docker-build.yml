@@ -9,7 +9,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
       packages: write
@@ -20,10 +20,26 @@ jobs:
         include:
           - dockerfile: Dockerfile
             image: stash-sense2
+            runner: ubuntu-latest
+            platforms: linux/amd64
+            free_disk: true
           - dockerfile: Dockerfile.rocm
             image: stash-sense2-rocm
+            runner: ubuntu-latest
+            platforms: linux/amd64
+            free_disk: true
           - dockerfile: Dockerfile.cuda
             image: stash-sense2-cuda
+            runner: ubuntu-latest
+            platforms: linux/amd64
+            free_disk: true
+          # The CPU Dockerfile built for ARM64, on GitHub's native ARM runner (no QEMU emulation, so it builds
+          # about as fast as the amd64 images). Published as its own image, like the GPU variants.
+          - dockerfile: Dockerfile
+            image: stash-sense2-arm64
+            runner: ubuntu-24.04-arm
+            platforms: linux/arm64
+            free_disk: false
 
     steps:
       # ROCm's own packages need ~15GB, twice over (once per build stage in
@@ -32,6 +48,7 @@ jobs:
       # space left on device" partway through dpkg unpacking without this.
       # Harmless (a couple minutes) for the other two variants.
       - name: Free disk space
+        if: matrix.free_disk
         uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: false
@@ -82,7 +99,7 @@ jobs:
         with:
           context: .
           file: ./${{ matrix.dockerfile }}
-          platforms: linux/amd64
+          platforms: ${{ matrix.platforms }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
@@ -94,7 +111,7 @@ jobs:
           # variants' caches, competing for the same 10GB budget) well
           # before the next tag build reuses it. A registry-hosted cache
           # image has no such cap -- each variant gets its own
-          # `:buildcache` tag in GHCR, so the 3 variants no longer fight
+          # `:buildcache` tag in GHCR, so the variants no longer fight
           # each other for cache space either. First build after this
           # change still pays full cost seeding the cache; every build
           # after that should skip straight past the apt-get/pip stages
@@ -119,8 +136,8 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') || contains(github.ref, 'rc') }}
 
-# Publishes 3 image variants (CPU default, AMD ROCm, NVIDIA CUDA -- see
-# each Dockerfile.* for hardware-specific build notes) to GHCR under this
+# Publishes 4 image variants (CPU default, AMD ROCm, NVIDIA CUDA, and the CPU
+# build for ARM64 -- see each Dockerfile.* for hardware-specific build notes) to GHCR under this
 # repo's own namespace, e.g. ghcr.io/anontester/stash-sense2. The CUDA
 # variant is built here (compile-checked) but not runtime-tested anywhere
 # in this project's own CI/CD -- see README's GPU acceleration section for

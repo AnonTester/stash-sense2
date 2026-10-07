@@ -18,7 +18,7 @@ Stash Sense 2 is a sidecar service and Stash plugin that brings ML-powered analy
 
 ## Quick Start
 
-Pre-built images for all 3 hardware variants are published to GHCR on every tagged release — no local build needed, just `docker compose up -d` (see below). Building locally is still fully supported and is what `docker compose build` does, if you'd rather not pull a pre-built image or are testing an unreleased change.
+Pre-built images for all 4 variants are published to GHCR on every tagged release — no local build needed, just `docker compose up -d` (see below). Building locally is still fully supported and is what `docker compose build` does, if you'd rather not pull a pre-built image or are testing an unreleased change.
 
 Install the plugin from the [stash-plugin-repo](https://github.com/AnonTester/stash-plugin-repo) index (step 3 below) either way.
 
@@ -46,6 +46,7 @@ Pick the compose file matching your hardware:
 | CPU only | `docker-compose.yml` | `ghcr.io/anontester/stash-sense2` | ~1.7GB (~0.6GB download) | Tested, most portable |
 | AMD GPU (ROCm) | `docker-compose.rocm.yml` | `ghcr.io/anontester/stash-sense2-rocm` | ~16.5GB (~5.2GB download) | Tested (reference deployment: Radeon 780M / gfx1103) |
 | NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | ~5.2GB (~2.9GB download) | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+| ARM64 (CPU only) | `docker-compose.arm64.yml` | `ghcr.io/anontester/stash-sense2-arm64` | similar to CPU | Built from the CPU Dockerfile for ARM64 hosts (Raspberry Pi 5, ARM servers); not run in the reference deployment |
 
 "Image size" is the size on disk after pulling (what `docker images` / your container manager shows); the download figure in parentheses is smaller because GHCR serves layers gzip-compressed. The GPU variants are larger mainly because they bundle their vendor's GPU runtime libraries (ROCm/CUDA) alongside the app itself — ROCm's in particular includes a full HIP/clang compiler toolchain needed for a JIT kernel-compile step on GPUs outside ROCm's officially supported list.
 
@@ -63,6 +64,9 @@ docker compose -f docker-compose.rocm.yml up -d
 
 # NVIDIA (CUDA) — needs the NVIDIA Container Toolkit on the host
 docker compose -f docker-compose.cuda.yml up -d
+
+# ARM64 host (Raspberry Pi 5, ARM server) — CPU only
+docker compose -f docker-compose.arm64.yml up -d
 ```
 
 Each variant listens on port `6960` and persists its data under `./api/data` — only run one at a time unless you also change the port/volume mappings to avoid a collision. First startup downloads the buffalo_l face recognition models on first use (or via Settings → Models → Download All once running) and can take a few minutes.
@@ -197,6 +201,7 @@ If you're running a pre-built GHCR image, pull the new tag and recreate (data un
 docker compose pull && docker compose up -d          # CPU
 docker compose -f docker-compose.rocm.yml pull && docker compose -f docker-compose.rocm.yml up -d   # AMD
 docker compose -f docker-compose.cuda.yml pull && docker compose -f docker-compose.cuda.yml up -d   # NVIDIA
+docker compose -f docker-compose.arm64.yml pull && docker compose -f docker-compose.arm64.yml up -d   # ARM64
 ```
 
 If you built locally instead, pull the latest source and rebuild with the same compose file you started with:
@@ -206,6 +211,7 @@ git pull
 docker compose build && docker compose up -d          # CPU
 docker compose -f docker-compose.rocm.yml build && docker compose -f docker-compose.rocm.yml up -d   # AMD
 docker compose -f docker-compose.cuda.yml build && docker compose -f docker-compose.cuda.yml up -d   # NVIDIA
+docker compose -f docker-compose.arm64.yml build && docker compose -f docker-compose.arm64.yml up -d   # ARM64
 ```
 
 Your recommendation history and settings are stored separately from the face database and persist across both types of updates.
