@@ -1,5 +1,11 @@
 ## 2026-10-09
 
+### 0.36.2 (plugin)
+- Fix: a performer created from a catalogue match (javdatabase, pornbox, seekfans, ...) is now recognized as being in the
+  library and on the scene (found by its profile/catalogue URL), instead of offering "Add to Stash + Scene" again.
+- Improvement: every identification result that is in the library, including already tagged ones, shows "View local
+  performer", not only matches from the local index.
+
 ### 0.47.3 (sidecar)
 - Fix: a database update that moves a face to a different performer now also refreshes the performer it left (face
   count, rematch tracking), so a performer that lost all its faces no longer stays listed with a stale count.

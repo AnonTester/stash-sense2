@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.36.1';
+  const PLUGIN_VERSION = '0.36.2';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -358,6 +358,37 @@
       console.error('Failed to lookup performer:', e);
       return null;
     }
+  }
+
+  /**
+   * Look up a performer by one of its URLs (first of `urls` that matches wins). Stash compares URLs exactly, so each
+   * is tried with and without a trailing slash.
+   */
+  async function findPerformerByUrl(urls) {
+    const query = `
+      query FindByUrl($url: String!) {
+        findPerformers(performer_filter: { url: { value: $url, modifier: EQUALS } }) {
+          performers { id name disambiguation image_path }
+        }
+      }
+    `;
+    const candidates = [];
+    for (const u of urls || []) {
+      if (!u) continue;
+      for (const v of [u, u.endsWith('/') ? u.slice(0, -1) : `${u}/`]) {
+        if (!candidates.includes(v)) candidates.push(v);
+      }
+    }
+    for (const url of candidates) {
+      try {
+        const data = await stashQuery(query, { url });
+        const performers = data?.findPerformers?.performers || [];
+        if (performers.length > 0) return performers[0];
+      } catch (e) {
+        console.error('Failed to lookup performer by URL:', e);
+      }
+    }
+    return null;
   }
 
   /**
@@ -864,6 +895,7 @@
     // Stash GraphQL
     stashQuery,
     findPerformerByStashDBId,
+    findPerformerByUrl,
     getPerformer,
     getScene,
     getImage,

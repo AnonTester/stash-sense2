@@ -846,7 +846,15 @@
       // real link), show both, since that's two independent,
       // separately-verifiable signals for the same person. Non-local,
       // non-catalogue matches keep the existing single StashBox link.
-      _matchLinksHtml(match, stashboxUrl, endpoint) {
+      _matchLinksHtml(match, stashboxUrl, endpoint, libraryPerformer = null) {
+        const html = this._matchSourceLinksHtml(match, stashboxUrl, endpoint);
+        // A stash-box or catalogue match that is already in the library (`libraryPerformer`, from
+        // _resolveLibraryPerformer) gets the same local link a local-index match has.
+        if (match.local_performer_id || !libraryPerformer?.id) return html;
+        return `${html} <a href="${this._localPerformerUrl(libraryPerformer.id)}" target="_blank" rel="noopener" class="ss-link ss-link-local">View local performer</a>`;
+      },
+
+      _matchSourceLinksHtml(match, stashboxUrl, endpoint) {
         if (match.source) {
           const href = match.profile_url || match.catalogue_url;
           if (!href) {
@@ -937,11 +945,10 @@
           return { id: match.local_performer_id, name: match.name, disambiguation: match.disambiguation };
         }
         if (match.source) {
-          // Catalogue match: match.stashdb_id is the internal database id,
-          // not a real stash_ids-linkable uuid, and there's no stashbox
-          // GraphQL endpoint to query against -- no way to cross-reference
-          // against the library this way for these yet.
-          return null;
+          // Catalogue match: match.stashdb_id is the internal database id, not a stash_ids-linkable uuid, and there
+          // is no stash-box endpoint to query. A performer created from this match carries its profile/catalogue
+          // URL (see create_performer_from_catalogue), so look the library up by those.
+          return await SS.findPerformerByUrl([match.profile_url, match.catalogue_url]);
         }
         const found = await SS.findPerformerByStashDBId(match.stashdb_id, graphqlUrl);
         if (found) return found;
@@ -1039,7 +1046,7 @@
               <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
               ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
               <div class="ss-links">
-                ${this._matchLinksHtml(match, stashboxUrl, endpoint)}
+                ${this._matchLinksHtml(match, stashboxUrl, endpoint, localPerformer)}
               </div>
               <div class="ss-actions">
                 ${actionsHtml}
@@ -1111,7 +1118,7 @@
                   ${altShowAlreadyTagged ? '<span class="ss-tagged-badge ss-tagged-badge-sm">Tagged</span>' : ''}
                   ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
                   <div class="ss-links">
-                    ${this._matchLinksHtml(m, altStashboxUrl, altEndpoint)}
+                    ${this._matchLinksHtml(m, altStashboxUrl, altEndpoint, altLocalPerformer)}
                   </div>
                   <div class="ss-actions ss-alt-match-actions">
                     ${altActionsHtml}
@@ -1835,7 +1842,7 @@
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
                   <div class="ss-links">
-                    ${this._matchLinksHtml(match, imgStashboxUrl, imgEndpoint)}
+                    ${this._matchLinksHtml(match, imgStashboxUrl, imgEndpoint, localPerformer)}
                   </div>
                   <div class="ss-actions">
                     ${localPerformer
@@ -1892,7 +1899,7 @@
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
                       <div class="ss-links">
-                        ${this._matchLinksHtml(m, altUrl, altEp)}
+                        ${this._matchLinksHtml(m, altUrl, altEp, altLocalPerformer)}
                       </div>
                       <div class="ss-actions ss-alt-match-actions">
                         ${altLocalPerformer
@@ -2153,7 +2160,7 @@
                   <div class="ss-confidence ${confidenceClass}">${confidence}% match</div>
                   ${match.country ? `<div class="ss-country">${match.country}</div>` : ''}
                   <div class="ss-links">
-                    ${this._matchLinksHtml(match, imgStashboxUrl, imgEndpoint)}
+                    ${this._matchLinksHtml(match, imgStashboxUrl, imgEndpoint, localPerformer)}
                   </div>
                   <div class="ss-actions">
                     ${showAlreadyTagged
@@ -2215,7 +2222,7 @@
                       <div class="ss-confidence ${altConfClass}">${altConf}% match</div>
                       ${m.country ? `<div class="ss-country">${m.country}</div>` : ''}
                       <div class="ss-links">
-                        ${this._matchLinksHtml(m, altUrl, altEp)}
+                        ${this._matchLinksHtml(m, altUrl, altEp, altLocalPerformer)}
                       </div>
                       <div class="ss-actions ss-alt-match-actions">
                         ${altShowAlreadyTagged
@@ -2726,7 +2733,7 @@
                 <div class="ss-links">
                   ${this._matchLinksHtml(
                     { local_performer_id: performer.local_performer_id, stashdb_id: performer.performer_id },
-                    galStashboxUrl, galEndpoint,
+                    galStashboxUrl, galEndpoint, localPerformer,
                   )}
                 </div>
                 ${localPerformer ? `
