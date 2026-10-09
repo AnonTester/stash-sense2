@@ -372,25 +372,22 @@ class FaceRecognizer:
         detected, this is just displaying it under its linked group's own
         preferred identity).
 
-        matched_embedding_index is deliberately NOT carried over, unlike
-        those two fields -- confirmed live 2026-10-01: a local performer
-        ("Emma White", no main-database embedding of her own at all) was
-        displayed with matched_embedding_index pointing at an entirely
-        unrelated performer's ("Baby Bells") real reference photo, because
-        template (the match that was actually independently detected,
-        here a catalogue candidate for Baby Bells) got outranked by Emma
-        White's own linked-group priority and substituted in by name --
-        but this function kept template's own embedding_index along for
-        the ride regardless. That field's whole purpose is "the specific
-        reference photo of THIS displayed performer that triggered the
-        match" (see its own docstring in identification_router.py); a
-        substitute, by this function's own definition, was never
-        independently detected under its own identity at all, so it has
-        no such photo to point to -- same reasoning the one other
-        matched_embedding_index call site already applies for a local
-        match specifically (see recognizer.py's other construction site),
-        generalized here to every substitute regardless of whether the
-        substituted-in identity happens to be local or not.
+        matched_embedding_index IS carried over from `template` for a
+        non-local substitute: it is the one reference face that actually
+        triggered this match -- the same linked person, shown under their
+        preferred identity. Dropping it (done 2026-10-01) left every such
+        candidate with no way to see which reference face was found:
+        Face Recommendations' no-cluster crop slot rendered empty for it
+        (confirmed 2026-10-09, "Alina Lando", a fansdb.cc identity
+        substituted for a seekfans/babepedia match). Showing that face is
+        the point -- it is also what exposes a wrong link group.
+
+        A LOCAL substitute still carries None (the 2026-10-01 fix, kept):
+        a local performer ("Emma White") was shown with the reference
+        photo of a linked catalogue entry ("Baby Bells") as if it were her
+        own; the UI falls back to the local performer's own cover photo
+        for a local candidate with no index, which is the right image
+        there -- same rule as recognize_face_v2's local-match site.
 
         Added 2026-09-28 for scene_matcher.py's own linked-group display
         substitution (see that module's _substitute_linked_priority_winner):
@@ -453,7 +450,7 @@ class FaceRecognizer:
             source=fields["source"],
             catalogue_url=fields["catalogue_url"],
             profile_url=fields["profile_url"],
-            matched_embedding_index=None,
+            matched_embedding_index=None if fields["local_performer_id"] else template.matched_embedding_index,
             original_name=original_name,
             linked_universal_ids=fields["linked_universal_ids"],
         )

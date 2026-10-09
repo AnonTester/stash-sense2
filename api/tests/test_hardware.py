@@ -272,17 +272,47 @@ class TestProbeAmdGpuVramMb:
 
 
 class TestProbeCpu:
-    """Test CPU probing."""
+    """Test CPU probing.
+
+    _probe_cpu reads the cgroup v2 cpu.max file BEFORE os.cpu_count, so these must pin that file themselves --
+    otherwise the result depends on whether the test runner happens to be inside a CPU-limited container."""
+
+    @staticmethod
+    def _cgroup(monkeypatch, tmp_path, content):
+        """Point _probe_cpu's cpu.max at a temp file (content=None: no such file, i.e. no cgroup v2)."""
+        import hardware
+        real_path = hardware.Path
+        fake = tmp_path / "cpu.max"
+        if content is not None:
+            fake.write_text(content)
+        monkeypatch.setattr(
+            hardware, "Path", lambda p: fake if p == "/sys/fs/cgroup/cpu.max" else real_path(p)
+        )
 
     @patch("os.cpu_count", return_value=8)
-    def test_reads_cpu_count(self, mock_count):
-        cores = _probe_cpu()
-        assert cores == 8
+    def test_reads_cpu_count(self, mock_count, monkeypatch, tmp_path):
+        self._cgroup(monkeypatch, tmp_path, None)
+        assert _probe_cpu() == 8
 
     @patch("os.cpu_count", return_value=None)
-    def test_fallback_when_unknown(self, mock_count):
-        cores = _probe_cpu()
-        assert cores == 1
+    def test_fallback_when_unknown(self, mock_count, monkeypatch, tmp_path):
+        self._cgroup(monkeypatch, tmp_path, None)
+        assert _probe_cpu() == 1
+
+    @patch("os.cpu_count", return_value=8)
+    def test_unlimited_cgroup_uses_cpu_count(self, mock_count, monkeypatch, tmp_path):
+        self._cgroup(monkeypatch, tmp_path, "max 100000\n")
+        assert _probe_cpu() == 8
+
+    @patch("os.cpu_count", return_value=8)
+    def test_cgroup_quota_caps_the_count(self, mock_count, monkeypatch, tmp_path):
+        self._cgroup(monkeypatch, tmp_path, "200000 100000\n")
+        assert _probe_cpu() == 2
+
+    @patch("os.cpu_count", return_value=8)
+    def test_fractional_cgroup_quota_is_at_least_one(self, mock_count, monkeypatch, tmp_path):
+        self._cgroup(monkeypatch, tmp_path, "50000 100000\n")
+        assert _probe_cpu() == 1
 
 
 class TestProbeMemory:

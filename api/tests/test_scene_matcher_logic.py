@@ -4,13 +4,21 @@ import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-# Mock recognizer before importing scene_matcher
-sys.modules['recognizer'] = Mock()
-
 import numpy as np
 import pytest
 
-from scene_matcher import _cosine_distance, merge_clusters_by_match, hybrid_matching, clustered_frequency_matching
+# scene_matcher does `from recognizer import PerformerMatch` at import time, so recognizer is mocked for exactly
+# that import and then put back. Leaving the Mock in sys.modules (as this file used to) made every test that imports
+# the real recognizer AFTER this file is collected get a Mock PerformerMatch -- order-dependent failures.
+_previous_recognizer = sys.modules.get('recognizer')
+sys.modules['recognizer'] = Mock()
+try:
+    from scene_matcher import _cosine_distance, merge_clusters_by_match, hybrid_matching, clustered_frequency_matching
+finally:
+    if _previous_recognizer is None:
+        del sys.modules['recognizer']
+    else:
+        sys.modules['recognizer'] = _previous_recognizer
 
 
 class TestCosineDistance:
