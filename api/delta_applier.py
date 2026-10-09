@@ -662,10 +662,17 @@ class _BatchedIndex:
         self._index.save(path)
 
 
-def _upsert_face(conn: sqlite3.Connection, index: Index, fields: dict) -> bool:
+def _upsert_face(
+    conn: sqlite3.Connection, index: Index, fields: dict, previous_owners: Optional[set[int]] = None,
+) -> bool:
     """Insert or update one face row + its usearch vector, keyed by
     embedding_index. Returns True for a brand-new face, False for an
     existing one just updated in place.
+
+    If the face already existed under a DIFFERENT performer_id, that previous
+    owner is added to `previous_owners` (when given): it just lost a face, so
+    its face_count and dirty state need the same refresh the new owner gets
+    (the removed_faces path does this for its own owner already).
 
     Required upsert-safety fix for stash-sense2-data-gen's post-2026-09-09
     export_delta.py (see its own module docstring): that rework computes
@@ -680,7 +687,10 @@ def _upsert_face(conn: sqlite3.Connection, index: Index, fields: dict) -> bool:
     image_sha256, embedding (raw float32[512] bytes)."""
     eidx = fields["embedding_index"]
     vec = np.frombuffer(fields["embedding"], dtype=np.float32)
-    exists = conn.execute("SELECT 1 FROM faces WHERE embedding_index = ?", (eidx,)).fetchone() is not None
+    existing = conn.execute("SELECT performer_id FROM faces WHERE embedding_index = ?", (eidx,)).fetchone()
+    exists = existing is not None
+    if exists and previous_owners is not None and existing[0] != fields["performer_id"]:
+        previous_owners.add(existing[0])
 
     # usearch has no in-place "replace" -- remove-then-add is the same
     # pattern stash-sense2-data-gen's own repair scripts use for this.
@@ -782,6 +792,8 @@ def apply_delta_db(
     # different downstream treatment (cheap denormalized-field patch vs. a
     # real rematch -- see DELTA_SCOPE_SCHEMA's own comment on `reason`).
     face_level_touched_performer_ids: set[int] = set()
+    # Performers that lost a face to a different owner in this delta (see _upsert_face).
+    previous_owners: set[int] = set()
     removed_performer_ids: set[int] = set()
     metadata_only_performer_ids: set[int] = set()
     # embedding_index -> (performer_id, vector bytes) for every upserted
@@ -826,7 +838,7 @@ def apply_delta_db(
             "gender": _face_field(f, "gender"), "gender_confidence": _face_field(f, "gender_confidence"),
             "estimated_age": _face_field(f, "estimated_age"), "image_sha256": _face_field(f, "image_sha256"),
             "embedding": f["embedding"],
-        })
+        }, previous_owners)
         touched_performers.add(performer_id)
         face_level_touched_performer_ids.add(performer_id)
         upserted_face_vectors[f["embedding_index"]] = (performer_id, f["embedding"])
@@ -875,7 +887,7 @@ def apply_delta_db(
                 "gender": _face_field(f, "gender"), "gender_confidence": _face_field(f, "gender_confidence"),
                 "estimated_age": _face_field(f, "estimated_age"), "image_sha256": _face_field(f, "image_sha256"),
                 "embedding": f["embedding"],
-            })
+            }, previous_owners)
             touched_performers.add(f["performer_id"])
             face_level_touched_performer_ids.add(f["performer_id"])
             upserted_face_vectors[f["embedding_index"]] = (f["performer_id"], f["embedding"])
@@ -926,6 +938,9 @@ def apply_delta_db(
                 face_level_touched_performer_ids.add(correct_pid)
                 owner_repairs_applied += 1
             _tick()
+
+    touched_performers |= previous_owners
+    face_level_touched_performer_ids |= previous_owners
 
     for pid in touched_performers:
         _sync_face_count(conn, pid)

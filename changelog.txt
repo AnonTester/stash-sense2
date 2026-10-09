@@ -1,5 +1,9 @@
 ## 2026-10-09
 
+### 0.47.3 (sidecar)
+- Fix: a database update that moves a face to a different performer now also refreshes the performer it left (face
+  count, rematch tracking), so a performer that lost all its faces no longer stays listed with a stale count.
+
 ### 0.47.2 (sidecar)
 - Fix: a Face Recommendations candidate shown under its preferred linked identity (e.g. a fansdb.cc performer matched
   through a linked seekfans/babepedia entry) again shows the matched reference face, as every other candidate does.

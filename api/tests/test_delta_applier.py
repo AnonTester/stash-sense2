@@ -475,3 +475,63 @@ class TestDirtyStateTrackingFields:
         assert result["removed_performer_ids"] == {1}
         assert result["metadata_only_performer_ids"] == set()
         assert result["face_level_touched_performer_ids"] == set()
+
+
+class TestFaceMovedToAnotherOwner:
+    """A face whose owner changes (mixed-images split, move-faces) must also refresh the performer it LEFT."""
+
+    def _setup(self, tmp_path):
+        rows = [
+            (1, 10, 100, "u1", "stashdb", 0.9, 0.0, "FEMALE", 0.9, 25, "s1"),
+            (2, 10, 101, "u2", "stashdb", 0.9, 0.0, "FEMALE", 0.9, 25, "s2"),
+        ]
+        _make_performers_db(tmp_path / "performers.db", faces=rows)
+        conn = sqlite3.connect(tmp_path / "performers.db")
+        conn.execute("UPDATE performers SET face_count = 2 WHERE id = 10")
+        conn.commit()
+        conn.close()
+        _seed_usearch_index(tmp_path / "face_embeddings.usearch", {100: _vector(1), 101: _vector(2)})
+
+    def _catalogue_move(self, tmp_path, embedding_indexes):
+        faces = [{
+            "embedding_index": 100 + i, "performer_id": 30, "image_url": f"u{i + 1}", "source_endpoint": "stashdb",
+            "quality_score": 0.9, "yaw": 0.0, "gender": "FEMALE", "gender_confidence": 0.9, "estimated_age": 25,
+            "image_sha256": f"s{i + 1}", "embedding": _vector(i + 1).tobytes(),
+        } for i in embedding_indexes]
+        _make_delta_db(tmp_path / "delta.db", catalogue_faces=faces)
+        conn = sqlite3.connect(tmp_path / "delta.db")
+        conn.execute("INSERT INTO catalogue_performers (id, canonical_name) VALUES (30, 'New Person')")
+        conn.commit()
+        conn.close()
+
+    def test_previous_owner_face_count_is_resynced(self, tmp_path):
+        self._setup(tmp_path)
+        self._catalogue_move(tmp_path, [0, 1])
+
+        apply_delta_db(tmp_path / "delta.db", tmp_path)
+
+        conn = sqlite3.connect(tmp_path / "performers.db")
+        counts = dict(conn.execute("SELECT id, face_count FROM performers"))
+        conn.close()
+        assert counts[10] == 0
+        assert counts[30] == 2
+
+    def test_previous_owner_is_marked_face_level_touched(self, tmp_path):
+        self._setup(tmp_path)
+        self._catalogue_move(tmp_path, [0])
+
+        result = apply_delta_db(tmp_path / "delta.db", tmp_path)
+
+        assert result["face_level_touched_performer_ids"] == {10, 30}
+
+    def test_same_owner_update_does_not_touch_anyone_else(self, tmp_path):
+        self._setup(tmp_path)
+        _make_delta_db(tmp_path / "delta.db", faces=[{
+            "embedding_index": 100, "endpoint": "stashdb", "stashbox_id": "perf-10",
+            "image_url": "u1", "quality_score": 0.95, "yaw": 0.0, "gender": "FEMALE", "gender_confidence": 0.9,
+            "estimated_age": 25, "image_sha256": "s1", "embedding": _vector(1).tobytes(),
+        }])
+
+        result = apply_delta_db(tmp_path / "delta.db", tmp_path)
+
+        assert result["face_level_touched_performer_ids"] == {10}
