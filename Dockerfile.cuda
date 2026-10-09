@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 #
-# NVIDIA CUDA GPU variant. Offered on a best-effort basis for users with
-# NVIDIA hardware -- UNVERIFIED on this deployment. stash-sense2 is
-# developed and tested on an AMD Radeon 780M (see Dockerfile.rocm, the
-# variant actually run here); this file only received the buffalo_l/
-# usearch dependency swap, not a real GPU test pass. If you hit a CUDA-
-# specific issue, please open one -- there's no NVIDIA card on the
-# reference deployment to reproduce it against.
+# NVIDIA CUDA GPU variant. Tested on the reference deployment (GeForce RTX
+# 4080, host driver 580, NVIDIA Container Toolkit), which builds this file
+# locally: the CUDA execution provider loads and buffalo_l runs on the GPU.
+# The published GHCR image is built from this same file by the release
+# workflow. Needs a host driver >= 580 (see the onnxruntime-gpu step below).
+# If you hit a CUDA-specific issue, please open one.
 
 # Stage 0: Static ffmpeg (latest release, GPU-capable)
 FROM mwader/static-ffmpeg:latest AS ffmpeg-static
@@ -97,9 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # "GLIBCXX_3.4.3x not found". Pulling libstdc++6 from the same toolchain PPA
 # keeps this stage's C++ runtime at least as new as what the build stage
 # can produce. Ported from v1's stash-sense (same failure mode, same
-# NVIDIA CUDA base image family) -- unverified here since this Dockerfile
-# variant can't be tested on homeserver (no NVIDIA hardware), but the same
-# defensive fix applies regardless.
+# NVIDIA CUDA base image family); kept as a defensive fix.
 RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
     && add-apt-repository -y ppa:ubuntu-toolchain-r/test \
     && apt-get update && apt-get install -y --only-upgrade libstdc++6 \

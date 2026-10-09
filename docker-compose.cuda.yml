@@ -1,8 +1,6 @@
-# NVIDIA CUDA GPU variant. Offered on a best-effort basis -- see
-# Dockerfile.cuda's own header: this is unverified on the reference
-# deployment (AMD Radeon 780M, no NVIDIA card to test against). Requires
-# the NVIDIA Container Toolkit on the host (see README's GPU
-# Troubleshooting section).
+# NVIDIA CUDA GPU variant. Tested on the reference deployment (GeForce RTX
+# 4080) -- see Dockerfile.cuda's own header. Requires the NVIDIA Container
+# Toolkit and a host driver >= 580 (see README's GPU Troubleshooting section).
 #
 # Pre-built images are published to GHCR on every tagged release -- no
 # local build needed:

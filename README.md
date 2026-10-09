@@ -45,7 +45,7 @@ Pick the compose file matching your hardware:
 |----------|--------------|------------|------------|--------|
 | CPU only | `docker-compose.yml` | `ghcr.io/anontester/stash-sense2` | ~1.7GB (~0.6GB download) | Tested, most portable |
 | AMD GPU (ROCm) | `docker-compose.rocm.yml` | `ghcr.io/anontester/stash-sense2-rocm` | ~16.5GB (~5.2GB download) | Tested (reference deployment: Radeon 780M / gfx1103) |
-| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | ~5.2GB (~2.9GB download) | Best-effort, unverified — no NVIDIA hardware in the reference deployment |
+| NVIDIA GPU (CUDA) | `docker-compose.cuda.yml` | `ghcr.io/anontester/stash-sense2-cuda` | ~5.2GB (~2.9GB download) | Tested (reference deployment: GeForce RTX 4080, driver 580, image built from `Dockerfile.cuda`); needs a host driver ≥ 580 |
 | ARM64 (CPU only) | `docker-compose.arm64.yml` | `ghcr.io/anontester/stash-sense2-arm64` | similar to CPU | Built from the CPU Dockerfile for ARM64 hosts (Raspberry Pi 5, ARM servers); not run in the reference deployment |
 
 "Image size" is the size on disk after pulling (what `docker images` / your container manager shows); the download figure in parentheses is smaller because GHCR serves layers gzip-compressed. The GPU variants are larger mainly because they bundle their vendor's GPU runtime libraries (ROCm/CUDA) alongside the app itself — ROCm's in particular includes a full HIP/clang compiler toolchain needed for a JIT kernel-compile step on GPUs outside ROCm's officially supported list.
@@ -170,7 +170,7 @@ By default ffmpeg decodes video frames on the CPU. For very large or high-resolu
 | Value | GPU | Notes |
 |-------|-----|-------|
 | `none` | Any / CPU | Default in every compose file, regardless of which one you're running. |
-| `cuda` | NVIDIA | Uses NVDEC for qualifying (≥4K) scenes. Only meaningful with `docker-compose.cuda.yml`, which already reserves the GPU it needs. |
+| `cuda` | NVIDIA | Uses NVDEC for qualifying (≥4K) scenes. Only meaningful with `docker-compose.cuda.yml`, which already reserves the GPU it needs. Not exercised on the reference deployment, which runs `none`. |
 | `vaapi` | AMD or Intel | Uses VAAPI for qualifying (≥4K) scenes. `docker-compose.rocm.yml` already maps `/dev/dri` and defaults to this; for CPU-inference + VAAPI-decode on the base compose file, uncomment its `devices:` block instead. |
 
 **Trade-off:** since this now only applies to genuinely large scenes, there's little reason not to leave it set once you've confirmed hwaccel actually works on your host — the common case (sub-4K scenes) decodes on CPU either way.
@@ -253,17 +253,18 @@ If you plan to run v1 and v2 side by side for a while during the switch (rather 
 |-----------|-------------|
 | Stash | v0.25+ with sprite sheets generated |
 | Docker | With Docker Compose; plus `nvidia-container-toolkit` (NVIDIA) or a working ROCm host install (AMD), only if using GPU acceleration |
-| GPU | Optional — AMD (ROCm, tested) or NVIDIA (CUDA, best-effort) with 4GB+ VRAM recommended; CPU-only fallback works for every feature, just slower for face recognition |
+| GPU | Optional — AMD (ROCm, tested) or NVIDIA (CUDA, tested; driver ≥ 580) with 4GB+ VRAM recommended; CPU-only fallback works for every feature, just slower for face recognition |
 | Disk | ~1.5 GB for the face recognition database + models, plus working space for frame extraction |
 
 ## GPU Troubleshooting
 
-**NVIDIA (CUDA):** requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) on the host.
+**NVIDIA (CUDA):** requires the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and a host driver ≥ 580 (the image carries the CUDA 13 runtime libraries; the driver is the only thing it takes from the host).
 
 | Problem | Solution |
 |---------|----------|
 | `docker: Error response from daemon: could not select device driver "" with capabilities: [[gpu]]` | Install `nvidia-container-toolkit` and restart Docker |
 | GPU not detected inside container | Verify with `nvidia-smi` on the host; ensure the toolkit is configured: `sudo nvidia-ctk runtime configure --runtime=docker && sudo systemctl restart docker` |
+| GPU is visible but face recognition runs on the CPU (slow, tier shown as CPU) | The host driver is older than 580: the CUDA provider then fails to load and onnxruntime silently falls back to the CPU. Check the driver version with `nvidia-smi` and update it |
 
 **AMD (ROCm):** `docker-compose.rocm.yml` maps `/dev/kfd` and `/dev/dri` and sets `security_opt: seccomp=unconfined` — no separate toolkit install needed beyond a working host kernel driver (`rocminfo` should list your GPU). Cards outside ROCm's officially supported list (e.g. integrated/APU parts like the Radeon 780M this was tested on) need `HSA_OVERRIDE_GFX_VERSION` set to the *nearest supported* gfx target, not their own literal chip id — rocBLAS's bundled kernel library doesn't ship one for every real chip, and using the literal id can crash on the first real inference call. It's a compose-level env var (`docker-compose.rocm.yml`'s `HSA_OVERRIDE_GFX_VERSION` line, commented out by default), not baked into the image, so uncomment and set it without rebuilding.
 
