@@ -2227,6 +2227,14 @@
         }
       });
 
+      // Browser Back/Forward across tabs: select the tab the URL names by
+      // going through the same click handlers as a real tab click.
+      SS.onRouteChange((route) => {
+        if (!tabBar.isConnected) return;
+        const target = tabBar.querySelector(`.ss-page-tab[data-tab="${route.tab}"]`);
+        if (target && !target.classList.contains('active')) target.click();
+      });
+
       // Stop polling when navigating away from the plugin page entirely
       SS.onLeavePlugin(stopLogRefresh);
     }

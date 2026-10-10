@@ -4864,3 +4864,16 @@ a.ss-detail-entity-link:hover {
   justify-content: center;
   margin-top: 12px;
 }
+
+/* Header title is a link back to the plugin's main page */
+.ss-app-title-link,
+.ss-app-title-link:hover,
+.ss-app-title-link:focus {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.ss-app-title-link:hover {
+  opacity: 0.8;
+}

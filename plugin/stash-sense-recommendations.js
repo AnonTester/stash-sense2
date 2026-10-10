@@ -494,6 +494,113 @@
     listScrollY: null,
   };
 
+  // ==================== URL <-> State ====================
+  //
+  // Where the user is (queue, status, page, open recommendation) is mirrored
+  // into the address bar -- see "Page URL State" in stash-sense-core.js --
+  // so the browser Back/Forward buttons, refresh and pasted links all land on
+  // the same view. currentState stays the source of truth while the page is
+  // live; the URL is written from it by renderCurrentView() (every view
+  // change already funnels through there) and read back on load and on
+  // Back/Forward (applyRoute()).
+
+  const REC_TYPES = [
+    'duplicate_performer', 'duplicate_scenes', 'duplicate_scene_files',
+    'upstream_performer_changes', 'upstream_tag_changes', 'upstream_studio_changes',
+    'upstream_scene_changes', 'scene_fingerprint_match', 'scene_face_match',
+  ];
+
+  const VIEW_DEPTH = { dashboard: 0, list: 1, detail: 2 };
+  // Depth of the view the URL was last written for; null until the first
+  // render, so the very first sync replaces rather than pushes.
+  let routedDepth = null;
+
+  function routeFromState() {
+    if (currentState.view === 'dashboard' || !currentState.type) {
+      return { type: null, status: 'pending', page: 1, rec: null };
+    }
+    return {
+      type: currentState.type,
+      status: currentState.status,
+      page: currentState.page + 1,
+      rec: currentState.view === 'detail' && currentState.selectedRec
+        ? (currentState.selectedRec.id ?? null)
+        : null,
+    };
+  }
+
+  // Normalized view state for a parsed URL route (inverse of routeFromState).
+  function stateFromRoute(route) {
+    if (route.tab !== 'recommendations' || !route.type || !REC_TYPES.includes(route.type)) {
+      return { view: 'dashboard', type: null, status: 'pending', page: 0, recId: null };
+    }
+    return {
+      view: route.rec ? 'detail' : 'list',
+      type: route.type,
+      status: route.status,
+      page: route.page - 1,
+      recId: route.rec || null,
+    };
+  }
+
+  // Write currentState into the URL. `kind` forces replace/push semantics;
+  // by default moving deeper (dashboard -> list -> detail), or changing
+  // status/page/recommendation at the same depth, is a forward step, and
+  // moving back up is an "up" step (pops to the entry it came from).
+  function syncRoute(kind) {
+    const depth = VIEW_DEPTH[currentState.view] ?? 0;
+    const previousDepth = routedDepth;
+    routedDepth = depth;
+    // Only own the URL while the Recommendations tab is the visible one:
+    // a late re-render from a timer must not hijack ?tab=operations.
+    if (SS.getCurrentRoute().tab !== 'recommendations') return;
+    let step = kind;
+    if (!step) {
+      if (previousDepth == null) step = 'replace';
+      else if (depth < previousDepth) step = 'up';
+      else step = 'forward';
+    }
+    SS.setRoute({ tab: 'recommendations', ...routeFromState() }, step);
+  }
+
+  // Browser Back/Forward (or a hand-edited URL): make currentState match the
+  // URL and render. The list cache is deliberately kept when only the
+  // detail/list level changes -- that is what keeps returning to a list after
+  // an action a surgical removal instead of a re-fetch.
+  function applyRoute(route) {
+    if (route.tab !== 'recommendations') return;
+    let container = document.getElementById('ss-recommendations');
+    if (!container) {
+      injectPluginPage();
+      return;
+    }
+    const next = stateFromRoute(route);
+    const same = next.view === currentState.view
+      && next.type === currentState.type
+      && next.status === currentState.status
+      && next.page === currentState.page
+      && next.recId === (currentState.view === 'detail' ? (currentState.selectedRec?.id ?? null) : null);
+    if (same) {
+      routedDepth = VIEW_DEPTH[currentState.view] ?? 0;
+      return;
+    }
+    if (next.view === 'dashboard') {
+      // Same reasoning as the in-page Back button on the list.
+      invalidateListCache();
+    }
+    currentState.view = next.view;
+    currentState.type = next.type;
+    currentState.status = next.status;
+    currentState.page = next.page;
+    if (next.view === 'detail') {
+      const keep = currentState.selectedRec && currentState.selectedRec.id === next.recId;
+      currentState.selectedRec = keep ? currentState.selectedRec : { id: next.recId, type: next.type };
+    } else {
+      currentState.selectedRec = null;
+    }
+    renderCurrentView(container);
+  }
+
   // (Polling for analysis/fingerprint progress now handled by Operations tab)
 
   // ==================== Dashboard Container ====================
@@ -513,11 +620,18 @@
     });
     appHeader.innerHTML = `
       <div class="ss-app-header-left">
-        <h1>${SS.PLUGIN_NAME}</h1>
+        <h1><a class="ss-app-title-link" id="ss-app-title-link" href="${escapeHtml(window.location.pathname)}" title="Back to the main page">${SS.PLUGIN_NAME}</a></h1>
         <p class="ss-dashboard-subtitle">Library analysis and curation tools</p>
       </div>
       <div class="ss-app-header-right" id="ss-status-area"></div>
     `;
+    // The title is a real link to the plugin's main page (so open-in-new-tab
+    // works); a plain click is handled in place.
+    appHeader.querySelector('#ss-app-title-link').addEventListener('click', (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      goToMainPage();
+    });
     container.appendChild(appHeader);
 
     // Content wrapper (views render inside this)
@@ -1947,6 +2061,7 @@
       const maxPage = Math.max(0, Math.ceil(total / PAGE_SIZE) - 1);
       if (currentState.page > maxPage) {
         currentState.page = maxPage;
+        syncRoute('replace');
       }
       const recommendations = allRecommendations.slice(
         currentState.page * PAGE_SIZE,
@@ -2504,6 +2619,12 @@
       try {
         rec = await RecommendationsAPI.getOne(rec.id);
         currentState.selectedRec = rec;
+        // A deep link (or hand-edited URL) may name a different queue than
+        // the recommendation actually belongs to; Back should return there.
+        if (rec.type && currentState.type !== rec.type) {
+          currentState.type = rec.type;
+          syncRoute('replace');
+        }
       } catch (e) {
         const msg = String(e?.message || e || '');
         const stale = /recommendation not found|recommendation removed because referenced scene no longer exists/i.test(msg);
@@ -7293,9 +7414,32 @@
     return result;
   }
 
+  // Header title: back to the Recommendations dashboard from anywhere --
+  // another tab, a queue, or a recommendation's detail view.
+  function goToMainPage() {
+    const container = document.getElementById('ss-recommendations');
+    if (!container) return;
+    // Same teardown as the in-page Back button on a list.
+    invalidateListCache();
+    currentState.view = 'dashboard';
+    currentState.type = null;
+    currentState.status = 'pending';
+    currentState.page = 0;
+    currentState.selectedRec = null;
+    const onOtherTab = SS.getCurrentRoute().tab !== 'recommendations';
+    const tabButton = container.querySelector('.ss-page-tab[data-tab="recommendations"]');
+    if (onOtherTab && tabButton) {
+      // Reuse the tab bar's own handler (panel switch, URL, count refresh);
+      // state is already the dashboard, so the URL it writes is the main page.
+      tabButton.click();
+    }
+    renderCurrentView(container);
+  }
+
   // ==================== View Router ====================
 
   function renderCurrentView(container) {
+    syncRoute();
     const content = container.querySelector('.ss-dashboard-content') || container;
     switch (currentState.view) {
       case 'dashboard':
@@ -7362,18 +7506,21 @@
     }
     mainContainer.appendChild(container);
 
-    // Reset state
+    // Reset state -- from the URL, so a refresh or pasted link lands on the
+    // same queue/page/recommendation instead of the main menu.
+    const initial = stateFromRoute(SS.getCurrentRoute());
     currentState = {
-      view: 'dashboard',
-      type: null,
-      status: 'pending',
-      page: 0,
-      selectedRec: null,
+      view: initial.view,
+      type: initial.type,
+      status: initial.status,
+      page: initial.page,
+      selectedRec: initial.recId ? { id: initial.recId, type: initial.type } : null,
       counts: null,
       listCache: null,
       countsCache: null,
       listScrollY: null,
     };
+    routedDepth = null;
 
     renderCurrentView(container);
   }
@@ -7403,6 +7550,7 @@
       countsCache: null,
       listScrollY: null,
     };
+    routedDepth = null;
 
     entityCache.clear();
   }
@@ -7420,6 +7568,11 @@
 
     // Clean up when leaving plugin page
     SS.onLeavePlugin(cleanup);
+
+    // Address-bar state: what the Recommendations tab shows when it is
+    // (re)selected, and applying Back/Forward to it.
+    SS.registerRecommendationsRouteProvider(routeFromState);
+    SS.onRouteChange(applyRoute);
 
     console.log(`[${SS.PLUGIN_NAME}] Recommendations module loaded`);
   }

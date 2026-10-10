@@ -1,5 +1,11 @@
 ## 2026-10-10
 
+### 0.38.0 (plugin)
+- Improvement: the Recommendations page keeps its position in the address bar (`type`, `status`, `page`, `rec`
+  alongside `tab`), so the browser Back/Forward buttons, refresh and pasted links return to the same queue, page and
+  recommendation.
+- Improvement: the "Stash Sense 2" title in the header is a link back to the main page.
+
 ### 0.37.0 (plugin)
 - Improvement: Custom Bulk Dismiss (Face Recommendations) pages through all performers, 20 at a time, instead of
   stopping at the 20 with the most candidates; ticks are kept across pages.

@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.37.0';
+  const PLUGIN_VERSION = '0.38.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -803,21 +803,143 @@
     }
   }
 
-  // ==================== Tab URL State ====================
+  // ==================== Page URL State ====================
+  //
+  // The plugin page is one Stash route (/plugins/<id>) that swaps its own
+  // DOM, so its position lives in query parameters:
+  //   tab     recommendations (default) | operations | settings
+  //   type    recommendation type (queue) open in the Recommendations tab
+  //   status  pending (default) | resolved | dismissed
+  //   page    1-based list page (default 1)
+  //   rec     recommendation id open in the detail view
+  // Moving "forward" (open a queue, change page/status, open a detail, switch
+  // tab) pushes a history entry so the browser Back button walks back through
+  // them; moving "up" (an in-page Back button, or returning after an action)
+  // pops to the entry it came from when there is one, so the in-page Back and
+  // the browser Back stay the same thing instead of piling up entries.
+  // Every pushed entry remembers the route it was pushed from (`ssFrom`).
+
+  const ROUTE_PARAM_KEYS = ['tab', 'type', 'status', 'page', 'rec'];
+  const DEFAULT_TAB = 'recommendations';
+  const DEFAULT_STATUS = 'pending';
+  const VALID_TABS = ['recommendations', 'operations', 'settings'];
+  const VALID_STATUSES = ['pending', 'resolved', 'dismissed'];
+
+  // Parse a query string into a normalized route. Parameters that belong to
+  // the Recommendations tab are only kept while that tab is the active one.
+  function parseRoute(search = window.location.search) {
+    const params = new URLSearchParams(search);
+    const tabParam = params.get('tab');
+    const tab = VALID_TABS.includes(tabParam) ? tabParam : DEFAULT_TAB;
+    const route = { tab, type: null, status: DEFAULT_STATUS, page: 1, rec: null };
+    if (tab !== DEFAULT_TAB) return route;
+    const type = params.get('type');
+    if (type && /^[a-z_]+$/.test(type)) route.type = type;
+    const status = params.get('status');
+    if (VALID_STATUSES.includes(status)) route.status = status;
+    const page = parseInt(params.get('page'), 10);
+    if (Number.isFinite(page) && page > 1) route.page = page;
+    const rec = parseInt(params.get('rec'), 10);
+    if (Number.isFinite(rec) && rec > 0) route.rec = rec;
+    return route;
+  }
+
+  function routeKey(route) {
+    return [route.tab, route.type || '', route.status, route.page, route.rec || ''].join('|');
+  }
+
+  function buildSearch(route) {
+    const params = new URLSearchParams(window.location.search);
+    ROUTE_PARAM_KEYS.forEach(k => params.delete(k));
+    if (route.tab !== DEFAULT_TAB) params.set('tab', route.tab);
+    if (route.tab === DEFAULT_TAB) {
+      if (route.type) params.set('type', route.type);
+      if (route.type && route.status !== DEFAULT_STATUS) params.set('status', route.status);
+      if (route.type && route.page > 1) params.set('page', String(route.page));
+      if (route.type && route.rec) params.set('rec', String(route.rec));
+    }
+    const text = params.toString();
+    return text ? `?${text}` : '';
+  }
+
+  function getCurrentRoute() {
+    return parseRoute();
+  }
+
+  // Set while a browser Back/Forward is being applied: the URL is already
+  // right then, so nothing may push, replace or pop.
+  let restoringFromHistory = false;
+  const routeChangeCallbacks = [];
+
+  function onRouteChange(callback) {
+    routeChangeCallbacks.push(callback);
+  }
+
+  function isRestoringFromHistory() {
+    return restoringFromHistory;
+  }
+
+  window.addEventListener('popstate', () => {
+    if (getRoute().type !== 'plugin') return;
+    restoringFromHistory = true;
+    try {
+      const route = parseRoute();
+      for (const callback of routeChangeCallbacks) {
+        try {
+          callback(route);
+        } catch (e) {
+          console.error(`[${PLUGIN_NAME}] Route change callback error:`, e);
+        }
+      }
+    } finally {
+      restoringFromHistory = false;
+    }
+  });
+
+  /**
+   * Make the address bar show `route`.
+   *   kind 'forward'  push a new history entry
+   *   kind 'up'       go back to the entry this one was pushed from if it is
+   *                   `route`, otherwise replace the current entry
+   *   kind 'replace'  replace the current entry
+   * A no-op when the URL already shows `route`, or during a history restore.
+   */
+  function setRoute(route, kind = 'forward') {
+    if (restoringFromHistory) return;
+    const targetKey = routeKey(route);
+    const currentKey = routeKey(parseRoute());
+    if (targetKey === currentKey) return;
+    const url = window.location.pathname + buildSearch(route) + window.location.hash;
+    const state = history.state && typeof history.state === 'object' ? history.state : {};
+    if (kind === 'up' && state.ssFrom === targetKey) {
+      history.back();
+      return;
+    }
+    if (kind === 'forward') {
+      history.pushState({ ssFrom: currentKey }, '', url);
+    } else {
+      history.replaceState({ ...state, ssFrom: state.ssFrom }, '', url);
+    }
+  }
+
+  // Tab URL state. Switching tab is a forward move; the Recommendations
+  // tab comes back showing whatever queue/page/detail it was left on.
+  let recommendationsRouteProvider = null;
+
+  function registerRecommendationsRouteProvider(provider) {
+    recommendationsRouteProvider = provider;
+  }
 
   function getTabFromUrl() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('tab') || 'recommendations';
+    return parseRoute().tab;
   }
 
   function setTabInUrl(tabName) {
-    const url = new URL(window.location.href);
-    if (tabName === 'recommendations') {
-      url.searchParams.delete('tab');
-    } else {
-      url.searchParams.set('tab', tabName);
+    const route = { tab: tabName, type: null, status: DEFAULT_STATUS, page: 1, rec: null };
+    if (tabName === DEFAULT_TAB && recommendationsRouteProvider) {
+      Object.assign(route, recommendationsRouteProvider() || {}, { tab: DEFAULT_TAB });
     }
-    history.replaceState(null, '', url.toString());
+    setRoute(route, 'forward');
   }
 
   // ==================== SPA Navigation ====================
@@ -908,6 +1030,13 @@
     initNavigationWatcher,
     getTabFromUrl,
     setTabInUrl,
+    getCurrentRoute,
+    parseRoute,
+    routeKey,
+    setRoute,
+    onRouteChange,
+    isRestoringFromHistory,
+    registerRecommendationsRouteProvider,
 
     // Utilities
     formatSize,
