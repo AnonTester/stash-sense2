@@ -1,5 +1,13 @@
 ## 2026-10-10
 
+### 0.37.0 (plugin)
+- Improvement: Custom Bulk Dismiss (Face Recommendations) pages through all performers, 20 at a time, instead of
+  stopping at the 20 with the most candidates; ticks are kept across pages.
+
+### 0.48.0 (sidecar)
+- Improvement: the performer list behind Custom Bulk Dismiss accepts an offset and reports the total number of
+  performers.
+
 ### 0.47.4 (sidecar)
 - Fix: dismissed duplicate scenes no longer come back after a database update. A dismissal says "these scenes do not
   match", but only the pairs that were on screen were remembered; a pair that had scored just under the threshold was

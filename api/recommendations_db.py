@@ -1487,7 +1487,7 @@ class RecommendationsDB:
             counts["applied"] = True
             return counts
 
-    def get_scene_face_match_performer_counts(self, limit: int = 20) -> list[dict]:
+    def get_scene_face_match_performer_counts(self, limit: int = 20, offset: int = 0) -> list[dict]:
         """Top performers by pending scene_face_match candidate count --
         for the "Custom Bulk Dismiss" tool (a performer with poor/generic
         embedding data can match a large number of scenes incorrectly;
@@ -1496,7 +1496,11 @@ class RecommendationsDB:
         settings.py's prefer_western_names); rows with no universal_id
         (shouldn't happen in practice -- scene_face_match's own
         _make_details always sets it) are excluded rather than lumped
-        into one misleading "unknown" bucket."""
+        into one misleading "unknown" bucket.
+
+        `offset` pages through the list; ties on count are ordered by
+        name then universal_id so consecutive pages never repeat or skip a
+        performer."""
         with self._connection() as conn:
             rows = conn.execute(
                 """
@@ -1508,12 +1512,25 @@ class RecommendationsDB:
                 WHERE type = 'scene_face_match' AND status = 'pending'
                     AND json_extract(details, '$.universal_id') IS NOT NULL
                 GROUP BY universal_id
-                ORDER BY count DESC
-                LIMIT ?
+                ORDER BY count DESC, name, universal_id
+                LIMIT ? OFFSET ?
                 """,
-                (limit,)
+                (limit, offset)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def count_scene_face_match_performers(self) -> int:
+        """Number of performers with at least one pending scene_face_match
+        candidate -- the page count behind get_scene_face_match_performer_counts."""
+        with self._connection() as conn:
+            return conn.execute(
+                """
+                SELECT COUNT(DISTINCT json_extract(details, '$.universal_id'))
+                FROM recommendations
+                WHERE type = 'scene_face_match' AND status = 'pending'
+                    AND json_extract(details, '$.universal_id') IS NOT NULL
+                """
+            ).fetchone()[0]
 
     def batch_dismiss_scene_face_match_by_performers(
         self, universal_ids: list[str], reason: Optional[str] = None,

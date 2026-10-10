@@ -1622,6 +1622,16 @@
   flex-shrink: 0;
 }
 
+.ss-cbd-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--bs-secondary-color, #aaa);
+}
+
 @media (max-width: 600px) {
   .ss-cbd-grid {
     grid-template-columns: 1fr;

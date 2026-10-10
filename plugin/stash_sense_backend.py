@@ -1338,10 +1338,11 @@ def handle_recommendations(mode, args, sidecar_url):
         )
 
     elif mode == "rec_scene_face_match_performer_counts":
-        limit = args.get("limit", 20)
+        limit = int(args.get("limit", 20))
+        offset = int(args.get("offset", 0))
         return sidecar_get(
             sidecar_url,
-            f"/recommendations/actions/scene-face-match-performer-counts?limit={limit}",
+            f"/recommendations/actions/scene-face-match-performer-counts?limit={limit}&offset={offset}",
         )
 
     elif mode == "rec_bulk_dismiss_scene_face_match_performers":

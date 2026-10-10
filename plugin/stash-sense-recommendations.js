@@ -355,8 +355,8 @@
       return apiCall('rec_undismiss_scene_face_match', { rec_id: recId });
     },
 
-    async getSceneFaceMatchPerformerCounts(limit = 20) {
-      return apiCall('rec_scene_face_match_performer_counts', { limit });
+    async getSceneFaceMatchPerformerCounts(limit = 20, offset = 0) {
+      return apiCall('rec_scene_face_match_performer_counts', { limit, offset });
     },
 
     async bulkDismissSceneFaceMatchPerformers(universalIds, reason) {
@@ -1368,33 +1368,49 @@
     overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
     footer.querySelector('#ss-cbd-cancel').addEventListener('click', close);
 
-    let performers;
+    // The list is paged (highest candidate count first). Ticks are kept
+    // across pages -- `selected` maps universal_id -> pending count -- so a
+    // performer with few candidates, far down the list, can be dismissed
+    // together with the big ones in one confirm.
+    const PAGE_SIZE = 20;
+    const selected = new Map();
+    let page = 0;
+    let total = 0;
+    let loading = false;
+
+    const loadPage = async (pageIndex) => {
+      const result = await RecommendationsAPI.getSceneFaceMatchPerformerCounts(PAGE_SIZE, pageIndex * PAGE_SIZE);
+      const performers = result.performers || [];
+      // An older sidecar ignores the offset and sends no total: show its
+      // single page without a pager rather than repeating page one.
+      const reportedTotal = Number.isFinite(result.total) ? result.total : performers.length;
+      return { performers, total: reportedTotal };
+    };
+
+    let first;
     try {
-      const result = await RecommendationsAPI.getSceneFaceMatchPerformerCounts(20);
-      performers = result.performers || [];
+      first = await loadPage(0);
     } catch (e) {
       body.innerHTML = `<p>Could not load performers: ${escapeHtml(e.message)}</p>`;
       return;
     }
-    if (performers.length === 0) {
+    if (first.performers.length === 0) {
       body.innerHTML = '<p>No pending Face Recommendations candidates.</p>';
       return;
     }
+    total = first.total;
 
-    const selected = new Set();
     body.innerHTML = `
-      <p>Tick the performers whose pending Face Recommendations candidates should all be dismissed at once -- e.g. a performer whose poor/generic embedding data keeps matching unrelated scenes.</p>
+      <p>Tick the performers whose pending Face Recommendations candidates should all be dismissed at once -- e.g. a performer whose poor/generic embedding data keeps matching unrelated scenes. Ticks are kept while paging.</p>
       <div class="ss-cba-toolbar">
-        <button class="ss-cba-link" id="ss-cbd-select-all">Select all</button>
+        <button class="ss-cba-link" id="ss-cbd-select-all">Select page</button>
         <button class="ss-cba-link" id="ss-cbd-unselect-all">Unselect all</button>
       </div>
-      <div class="ss-cbd-grid">
-        ${performers.map(p => `
-          <label class="ss-cbd-item">
-            <input type="checkbox" data-uid="${escapeHtml(p.universal_id)}" data-count="${p.count}">
-            <span class="ss-cba-label">${escapeHtmlBreakable(p.name || 'Unknown')}</span>
-            <span class="ss-cba-count" title="Pending Face Recommendations candidates for this performer">${p.count}</span>
-          </label>`).join('')}
+      <div class="ss-cbd-grid" id="ss-cbd-grid"></div>
+      <div class="ss-cbd-pager" id="ss-cbd-pager">
+        <button class="ss-btn ss-btn-secondary" id="ss-cbd-prev">&lsaquo; Previous</button>
+        <span id="ss-cbd-page-label"></span>
+        <button class="ss-btn ss-btn-secondary" id="ss-cbd-next">Next &rsaquo;</button>
       </div>
       <p class="ss-cba-summary" id="ss-cbd-summary"></p>`;
     footer.innerHTML = `
@@ -1402,26 +1418,72 @@
       <button class="ss-accept-all-btn" id="ss-cbd-confirm" disabled>Dismiss 0 recommendations</button>`;
     footer.querySelector('#ss-cbd-cancel').addEventListener('click', close);
 
-    const checkboxes = [...body.querySelectorAll('input[type="checkbox"][data-uid]')];
+    const gridEl = body.querySelector('#ss-cbd-grid');
+    const pagerEl = body.querySelector('#ss-cbd-pager');
+    const pageLabelEl = body.querySelector('#ss-cbd-page-label');
+    const prevBtn = body.querySelector('#ss-cbd-prev');
+    const nextBtn = body.querySelector('#ss-cbd-next');
     const summaryEl = body.querySelector('#ss-cbd-summary');
     const confirmBtn = footer.querySelector('#ss-cbd-confirm');
+    let currentRows = [];
+
+    const totalPages = () => Math.max(1, Math.ceil(total / PAGE_SIZE));
     const update = () => {
-      const checked = checkboxes.filter(cb => cb.checked);
-      const total = checked.reduce((sum, cb) => sum + (Number(cb.dataset.count) || 0), 0);
-      summaryEl.innerHTML = `<strong>${checked.length}</strong> performer${checked.length === 1 ? '' : 's'} selected &mdash; <strong>${total}</strong> pending recommendation${total === 1 ? '' : 's'} will be dismissed.`;
-      confirmBtn.disabled = checked.length === 0;
-      confirmBtn.textContent = `Dismiss ${total} recommendation${total === 1 ? '' : 's'}`;
+      const count = [...selected.values()].reduce((sum, n) => sum + (Number(n) || 0), 0);
+      summaryEl.innerHTML = `<strong>${selected.size}</strong> performer${selected.size === 1 ? '' : 's'} selected &mdash; <strong>${count}</strong> pending recommendation${count === 1 ? '' : 's'} will be dismissed.`;
+      confirmBtn.disabled = selected.size === 0;
+      confirmBtn.textContent = `Dismiss ${count} recommendation${count === 1 ? '' : 's'}`;
+      pagerEl.style.display = totalPages() > 1 ? '' : 'none';
+      pageLabelEl.textContent = `Page ${page + 1} of ${totalPages()} (${total} performer${total === 1 ? '' : 's'})`;
+      prevBtn.disabled = loading || page <= 0;
+      nextBtn.disabled = loading || page >= totalPages() - 1;
     };
-    checkboxes.forEach(cb => cb.addEventListener('change', () => {
-      if (cb.checked) selected.add(cb.dataset.uid); else selected.delete(cb.dataset.uid);
+    const renderGrid = () => {
+      gridEl.innerHTML = currentRows.map(p => `
+        <label class="ss-cbd-item">
+          <input type="checkbox" data-uid="${escapeHtml(p.universal_id)}" data-count="${p.count}"${selected.has(p.universal_id) ? ' checked' : ''}>
+          <span class="ss-cba-label">${escapeHtmlBreakable(p.name || 'Unknown')}</span>
+          <span class="ss-cba-count" title="Pending Face Recommendations candidates for this performer">${p.count}</span>
+        </label>`).join('');
+      gridEl.querySelectorAll('input[type="checkbox"][data-uid]').forEach(cb => cb.addEventListener('change', () => {
+        if (cb.checked) selected.set(cb.dataset.uid, Number(cb.dataset.count) || 0); else selected.delete(cb.dataset.uid);
+        update();
+      }));
+      gridEl.scrollTop = 0;
+    };
+    const goToPage = async (pageIndex) => {
+      if (loading) return;
+      loading = true;
       update();
-    }));
-    const setAll = (checked) => {
-      checkboxes.forEach(cb => { cb.checked = checked; if (checked) selected.add(cb.dataset.uid); else selected.delete(cb.dataset.uid); });
+      try {
+        const result = await loadPage(pageIndex);
+        total = result.total;
+        // The list may have shrunk since the dialog opened; stay on a real page.
+        page = Math.min(pageIndex, totalPages() - 1);
+        currentRows = result.performers;
+      } catch (e) {
+        gridEl.innerHTML = `<p>Could not load performers: ${escapeHtml(e.message)}</p>`;
+        currentRows = [];
+      }
+      loading = false;
+      renderGrid();
       update();
     };
-    body.querySelector('#ss-cbd-select-all').addEventListener('click', () => setAll(true));
-    body.querySelector('#ss-cbd-unselect-all').addEventListener('click', () => setAll(false));
+
+    currentRows = first.performers;
+    renderGrid();
+    prevBtn.addEventListener('click', () => goToPage(page - 1));
+    nextBtn.addEventListener('click', () => goToPage(page + 1));
+    body.querySelector('#ss-cbd-select-all').addEventListener('click', () => {
+      currentRows.forEach(p => selected.set(p.universal_id, Number(p.count) || 0));
+      renderGrid();
+      update();
+    });
+    body.querySelector('#ss-cbd-unselect-all').addEventListener('click', () => {
+      selected.clear();
+      renderGrid();
+      update();
+    });
     update();
 
     confirmBtn.addEventListener('click', async () => {
@@ -1431,7 +1493,7 @@
       body.innerHTML = '<div class="ss-loading-inline"><div class="ss-spinner"></div></div>';
       try {
         const result = await RecommendationsAPI.bulkDismissSceneFaceMatchPerformers(
-          Array.from(selected), 'Custom bulk dismiss by performer',
+          Array.from(selected.keys()), 'Custom bulk dismiss by performer',
         );
         dirty = true;
         body.innerHTML = `

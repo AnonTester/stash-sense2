@@ -161,6 +161,17 @@ class TestSceneFaceMatchPerformerCounts:
         counts = db.get_scene_face_match_performer_counts(limit=2)
         assert len(counts) == 2
 
+    def test_offset_pages_without_repeating_or_skipping_ties(self, db):
+        """Equal counts are ordered by name then id, so pages never overlap."""
+        for i in range(7):
+            self._create_candidate(db, str(i), f"seekfans:{i}", f"Performer {i}")
+
+        pages = [db.get_scene_face_match_performer_counts(limit=3, offset=o) for o in (0, 3, 6)]
+
+        ids = [c["universal_id"] for page in pages for c in page]
+        assert ids == [f"seekfans:{i}" for i in range(7)]
+        assert db.count_scene_face_match_performers() == 7
+
     def test_only_counts_pending(self, db):
         self._create_candidate(db, "1", "seekfans:1", "Autumn🌹")
         self._create_candidate(db, "2", "seekfans:1", "Autumn🌹", status="dismissed")

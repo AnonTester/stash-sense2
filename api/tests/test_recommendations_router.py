@@ -1328,6 +1328,23 @@ class TestSceneFaceMatchPerformerCountsAction:
     def test_empty_when_nothing_pending(self, db, client):
         resp = client.get("/recommendations/actions/scene-face-match-performer-counts")
         assert resp.json()["performers"] == []
+        assert resp.json()["total"] == 0
+
+    def test_pages_through_every_performer_with_a_total(self, db, client):
+        """The dialog pages the list so performers beyond the first 20 can be dismissed too."""
+        for i in range(5):
+            for scene in range(5 - i):  # counts 5, 4, 3, 2, 1
+                self._create_candidate(db, f"{i}-{scene}", f"seekfans:{i}", f"Performer {i}")
+
+        pages = [
+            client.get(f"/recommendations/actions/scene-face-match-performer-counts?limit=2&offset={o}").json()
+            for o in (0, 2, 4)
+        ]
+
+        assert [p["total"] for p in pages] == [5, 5, 5]
+        ids = [r["universal_id"] for p in pages for r in p["performers"]]
+        assert ids == [f"seekfans:{i}" for i in range(5)]
+        assert [len(p["performers"]) for p in pages] == [2, 2, 1]
 
 
 class TestBulkDismissSceneFaceMatchPerformersAction:
