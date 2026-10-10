@@ -1845,13 +1845,16 @@ async def merge_source_into_duplicate_scene_match(request: MergeSourceIntoDuplic
 
 @router.post("/actions/dismiss-duplicate-scene-group")
 async def dismiss_duplicate_scene_group(request: DismissDuplicateSceneGroupRequest):
-    """Dismiss all duplicate-scene recommendations in a grouped source-scene review."""
+    """Dismiss all duplicate-scene recommendations in a grouped source-scene review (or several selected groups).
+
+    The verdict "these scenes do not match" also covers every other pair among those scenes, so a pair that
+    scored just under the threshold now cannot surface later when scoring changes -- see
+    RecommendationsDB.dismiss_duplicate_scene_group."""
     db = get_rec_db()
-    dismissed_count = 0
-    for rec_id in request.recommendation_ids:
-        if db.dismiss_recommendation(rec_id, reason=request.reason or "Marked not duplicates"):
-            dismissed_count += 1
-    return {"success": True, "dismissed_count": dismissed_count}
+    result = db.dismiss_duplicate_scene_group(
+        request.recommendation_ids, reason=request.reason or "Marked not duplicates",
+    )
+    return {"success": True, **result}
 
 
 @router.get("/scene/{scene_id}")

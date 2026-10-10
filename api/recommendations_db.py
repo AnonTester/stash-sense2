@@ -18,6 +18,10 @@ from typing import Optional, Iterator, Any
 
 SCHEMA_VERSION = 25
 
+# The recommendation type whose target_id is a scene PAIR "<a>:<b>" (a < b) -- see the
+# "Duplicate-scene dismissals" section of RecommendationsDB.
+DUPLICATE_SCENES_TYPE = "duplicate_scenes"
+
 # Caches the DB-independent, expensive-to-recompute part of scene
 # fingerprinting (frame extraction + face detection+embedding)
 # so a performer-database version bump only has to redo the cheap
@@ -1297,7 +1301,191 @@ class RecommendationsDB:
                 except sqlite3.IntegrityError:
                     pass  # Already dismissed
 
+            if rec_type == DUPLICATE_SCENES_TYPE:
+                self._record_scene_pair_closure(
+                    conn, self._scene_pairs_of(rows), reason, permanent
+                )
+
             return len(rec_ids)
+
+    # ==================== Duplicate-scene dismissals ====================
+    #
+    # A duplicate_scenes recommendation is one scene PAIR, keyed "<a>:<b>" (a < b). Dismissing it means
+    # "these two scenes do not match" -- a manual verdict that must stand no matter how the scores move later
+    # (a database update that identifies performers better, a changed threshold, new phash/stash-box data).
+    #
+    # Recording only the pairs that happened to be on screen leaves a hole: a pair that scored just under
+    # the threshold when a group was dismissed has no recommendation row and so no dismissal, and surfaces
+    # as "new" the day its score crosses the line. So whenever duplicate scenes are dismissed together
+    # (one group, several selected groups, "Dismiss All") the verdict is extended to every pair among the
+    # scenes they connect. This is specific to duplicate_scenes: face-match recommendations are meant to
+    # resurface when new faces are identified and keep their per-target behaviour.
+
+    @staticmethod
+    def _scene_pairs_of(rows) -> list[tuple[int, int]]:
+        """(a, b) scene ids of duplicate_scenes recommendation rows; malformed targets are ignored."""
+        pairs = []
+        for row in rows:
+            if row['type'] != DUPLICATE_SCENES_TYPE:
+                continue
+            try:
+                a, b = (int(part) for part in str(row['target_id']).split(":"))
+            except ValueError:
+                continue
+            pairs.append((a, b))
+        return pairs
+
+    @staticmethod
+    def _scene_pair_closure(pairs) -> set[str]:
+        """Every pair key "<a>:<b>" among the scenes of each connected component of `pairs`.
+
+        Dismissed groups overlap and chain (A with B, C; B with A, D...), so components -- not single
+        groups -- are the unit: scenes reviewed and dismissed together are mutually "not duplicates"."""
+        parent: dict[int, int] = {}
+
+        def find(x: int) -> int:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in pairs:
+            parent[find(a)] = find(b)
+        components: dict[int, list[int]] = {}
+        for scene in list(parent):
+            components.setdefault(find(scene), []).append(scene)
+        keys = set()
+        for members in components.values():
+            members.sort()
+            for i, a in enumerate(members):
+                for b in members[i + 1:]:
+                    keys.add(f"{a}:{b}")
+        return keys
+
+    def _record_scene_pair_closure(
+        self, conn: sqlite3.Connection, pairs, reason: Optional[str], permanent: bool,
+    ) -> int:
+        """Record a dismissal for every pair among the scenes of `pairs` that has no recommendation row yet.
+
+        A pair that already has a row keeps it: pending ones stay visible for the user to judge, dismissed
+        and resolved ones are already settled. Returns the number of dismissals recorded."""
+        keys = self._scene_pair_closure(pairs)
+        if not keys:
+            return 0
+        known = {
+            r[0] for r in conn.execute(
+                "SELECT target_id FROM recommendations WHERE type = ? AND target_type = 'scene'",
+                (DUPLICATE_SCENES_TYPE,),
+            )
+        }
+        recorded = 0
+        for key in sorted(keys - known):
+            recorded += conn.execute(
+                "INSERT OR IGNORE INTO dismissed_targets (type, target_type, target_id, reason, permanent) "
+                "VALUES (?, 'scene', ?, ?, ?)",
+                (DUPLICATE_SCENES_TYPE, key, reason, int(permanent)),
+            ).rowcount
+        return recorded
+
+    def dismiss_duplicate_scene_group(
+        self, rec_ids: list[int], reason: Optional[str] = None, permanent: bool = False,
+    ) -> dict:
+        """Dismiss duplicate_scenes recommendations reviewed together (one group, or several selected groups)
+        AND record the same verdict for every other pair among their scenes -- see the section note above.
+
+        Returns {"dismissed_count": recommendations dismissed, "extra_pairs_recorded": dismissals recorded
+        for pairs that had no recommendation row}."""
+        if not rec_ids:
+            return {"dismissed_count": 0, "extra_pairs_recorded": 0}
+        with self._connection() as conn:
+            rows = conn.execute(
+                f"SELECT id, type, target_type, target_id FROM recommendations WHERE id IN ({','.join('?' * len(rec_ids))})",
+                list(rec_ids),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "UPDATE recommendations SET status = 'dismissed', updated_at = datetime('now') WHERE id = ?",
+                    (row['id'],),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO dismissed_targets (type, target_type, target_id, reason, permanent) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (row['type'], row['target_type'], row['target_id'], reason, int(permanent)),
+                )
+            extra = self._record_scene_pair_closure(conn, self._scene_pairs_of(rows), reason, permanent)
+        return {"dismissed_count": len(rows), "extra_pairs_recorded": extra}
+
+    def backfill_duplicate_scene_dismissals(
+        self, dry_run: bool = True, reason: str = "Group dismissal (backfilled)",
+    ) -> dict:
+        """One-time repair for dismissals made before group dismissals extended their verdict.
+
+        Two scenes that were each dismissed against the same third scene were reviewed in that scene's
+        group, so the pair between them is dismissed too: a pending recommendation for it is dismissed,
+        and a pair with no row at all gets a dismissal so it can never surface. Pairs with a resolved
+        recommendation are left alone. `dry_run` only counts. Returns the counts.
+
+        Only the user's own dismissals decide which scenes were reviewed together: the rows this method
+        writes (recognised by `reason`) are ignored when working that out, so running it again changes
+        nothing instead of widening the set step by step."""
+        with self._connection() as conn:
+            neighbours: dict[int, set[int]] = {}
+            dismissed_keys = set()
+            for r in conn.execute(
+                "SELECT target_id, reason FROM dismissed_targets WHERE type = ? AND target_type = 'scene'",
+                (DUPLICATE_SCENES_TYPE,),
+            ):
+                dismissed_keys.add(r[0])
+                if r[1] == reason:
+                    continue   # written by an earlier run of this backfill, not a review decision
+                try:
+                    a, b = (int(p) for p in r[0].split(":"))
+                except ValueError:
+                    continue
+                neighbours.setdefault(a, set()).add(b)
+                neighbours.setdefault(b, set()).add(a)
+
+            wanted = set()
+            for scenes in neighbours.values():
+                ordered = sorted(scenes)
+                for i, a in enumerate(ordered):
+                    for b in ordered[i + 1:]:
+                        wanted.add(f"{a}:{b}")
+            wanted -= dismissed_keys
+
+            status_of = {
+                r[0]: (r[1], r[2]) for r in conn.execute(
+                    "SELECT target_id, status, id FROM recommendations WHERE type = ? AND target_type = 'scene'",
+                    (DUPLICATE_SCENES_TYPE,),
+                )
+            }
+            pending = {k: status_of[k][1] for k in wanted if k in status_of and status_of[k][0] == 'pending'}
+            without_row = {k for k in wanted if k not in status_of}
+            counts = {
+                "dismissed_pairs": len(dismissed_keys),
+                "pairs_to_dismiss": len(wanted),
+                "pending_recommendations": len(pending),
+                "pairs_without_recommendation": len(without_row),
+                "pairs_left_alone": len(wanted) - len(pending) - len(without_row),
+                "applied": False,
+            }
+            if dry_run:
+                return counts
+
+            for key, rec_id in pending.items():
+                conn.execute(
+                    "UPDATE recommendations SET status = 'dismissed', updated_at = datetime('now') WHERE id = ?",
+                    (rec_id,),
+                )
+            for key in sorted(set(pending) | without_row):
+                conn.execute(
+                    "INSERT OR IGNORE INTO dismissed_targets (type, target_type, target_id, reason, permanent) "
+                    "VALUES (?, 'scene', ?, ?, 0)",
+                    (DUPLICATE_SCENES_TYPE, key, reason),
+                )
+            counts["applied"] = True
+            return counts
 
     def get_scene_face_match_performer_counts(self, limit: int = 20) -> list[dict]:
         """Top performers by pending scene_face_match candidate count --
