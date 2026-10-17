@@ -199,6 +199,39 @@ def _map_stashbox_to_stash(performer: dict, endpoint_url: str, stashdb_id: str) 
     )
 
 
+
+async def _raise_if_name_taken(stash_client, name: str, exc: RuntimeError) -> None:
+    """Turn Stash's "performer with name 'X' already exists" create error into a 409 whose message says
+    which performer is in the way and what to do, so the plugin can show it instead of a bare "Failed"
+    (the old behaviour was an unhandled 500). Any other error is left to the caller to re-raise."""
+    if "already exists" not in str(exc):
+        return
+    existing = None
+    try:
+        data = await stash_client._execute(
+            """
+            query FindByName($f: PerformerFilterType) {
+                findPerformers(performer_filter: $f, filter: {per_page: 5}) {
+                    performers { id name disambiguation stash_ids { endpoint } }
+                }
+            }
+            """,
+            {"f": {"name": {"value": name, "modifier": "EQUALS"}}},
+        )
+        found = data.get("findPerformers", {}).get("performers", [])
+        existing = next((p for p in found if p.get("name") == name), found[0] if found else None)
+    except Exception:
+        logger.warning("Could not look up the performer blocking the create of %r", name, exc_info=True)
+    where = f" (id {existing['id']})" if existing else ""
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"A performer named '{name}' already exists in Stash{where}. "
+            "Use \"Add as...\" to link this match to that performer, or rename or merge it first."
+        ),
+    )
+
+
 # ==================== Route Handlers ====================
 
 
@@ -317,7 +350,11 @@ async def create_performer_from_stashbox(request: CreatePerformerRequest):
     }
     """
     from rate_limiter import Priority
-    data = await stash_client._execute(create_query, {"input": create_input}, priority=Priority.CRITICAL)
+    try:
+        data = await stash_client._execute(create_query, {"input": create_input}, priority=Priority.CRITICAL)
+    except RuntimeError as exc:
+        await _raise_if_name_taken(stash_client, mapped.name, exc)
+        raise
     new_performer = data["performerCreate"]
 
     # 3. Add performer to scene/image, unless the caller is staging it into
@@ -393,7 +430,11 @@ async def create_performer_from_catalogue(request: CreatePerformerFromCatalogueR
     if request.image_url:
         create_input["image"] = request.image_url
 
-    new_performer = await stash_client.create_performer(**create_input)
+    try:
+        new_performer = await stash_client.create_performer(**create_input)
+    except RuntimeError as exc:
+        await _raise_if_name_taken(stash_client, request.name, exc)
+        raise
 
     urls = [u for u in (request.profile_url, request.catalogue_url) if u]
     if urls:

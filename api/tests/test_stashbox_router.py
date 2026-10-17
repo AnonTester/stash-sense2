@@ -306,3 +306,67 @@ class TestSearchStashPerformers:
             data = resp.json()
             assert len(data) == 1
             assert data[0]["name"] == "Test"
+
+
+class TestCreatePerformerNameTaken:
+    """POST /stash/create-performer(-from-catalogue) when Stash already has a performer with that name:
+    a 409 whose message names the blocking performer, not an unhandled 500 (the plugin showed a bare "Failed")."""
+
+    TAKEN = RuntimeError("GraphQL error: [{'message': \"performer with name 'Jane Roe' already exists\", 'path': ['performerCreate']}]")
+
+    def _mock_stash(self, blocking=True):
+        mock_stash = AsyncMock()
+        found = [{"id": "4242", "name": "Jane Roe", "disambiguation": "", "stash_ids": []}] if blocking else []
+
+        async def execute(query, variables=None, **kwargs):
+            if "performerCreate" in query:
+                raise self.TAKEN
+            return {"findPerformers": {"performers": found}}
+
+        mock_stash._execute.side_effect = execute
+        mock_stash.create_performer.side_effect = self.TAKEN
+        return mock_stash
+
+    def _post_stashbox(self, client, mock_stash):
+        sb_mod._stash_url = "http://localhost:9999"
+        sb_mod._stash_api_key = "test-key"
+        stashbox = AsyncMock()
+        stashbox.get_performer.return_value = {"name": "Jane Roe", "aliases": ["Jane Doe"]}
+        with patch("stashbox_router._get_stashbox_client", return_value=stashbox), \
+             patch("stashbox_router._get_endpoint_url", return_value="https://javstash.org/graphql"), \
+             patch("stash_client_unified.StashClientUnified", return_value=mock_stash):
+            return client.post(
+                "/stash/create-performer",
+                json={"endpoint": "javstash.org", "stashdb_id": "a2ae8711", "scene_id": "1"},
+            )
+
+    def test_stashbox_name_taken_returns_409_naming_the_blocker(self, stashbox_client):
+        resp = self._post_stashbox(stashbox_client, self._mock_stash())
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert "'Jane Roe' already exists" in detail
+        assert "id 4242" in detail
+        assert "Add as" in detail
+
+    def test_stashbox_name_taken_without_lookup_result_still_409(self, stashbox_client):
+        resp = self._post_stashbox(stashbox_client, self._mock_stash(blocking=False))
+        assert resp.status_code == 409
+        assert "'Jane Roe' already exists" in resp.json()["detail"]
+        assert "id " not in resp.json()["detail"]
+
+    def test_stashbox_other_create_errors_are_not_swallowed(self, stashbox_client):
+        mock_stash = AsyncMock()
+        mock_stash._execute.side_effect = RuntimeError("GraphQL error: boom")
+        with pytest.raises(RuntimeError, match="boom"):
+            self._post_stashbox(stashbox_client, mock_stash)
+
+    def test_catalogue_name_taken_returns_409(self, stashbox_client):
+        sb_mod._stash_url = "http://localhost:9999"
+        sb_mod._stash_api_key = "test-key"
+        with patch("stash_client_unified.StashClientUnified", return_value=self._mock_stash()):
+            resp = stashbox_client.post(
+                "/stash/create-performer-from-catalogue",
+                json={"source": "iafd", "name": "Jane Roe", "scene_id": "1"},
+            )
+        assert resp.status_code == 409
+        assert "id 4242" in resp.json()["detail"]

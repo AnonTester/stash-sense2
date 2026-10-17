@@ -363,6 +363,9 @@
         const closeModal = () => {
           document.removeEventListener('keydown', escHandler);
           modal.remove();
+          // Performers were added straight to the scene/image while the modal stayed open (see
+          // _markResultTagged); the page behind it only shows them after a reload.
+          if (modal._reloadOnClose) window.location.reload();
         };
         modal._close = closeModal;
         closeBtn.addEventListener('click', closeModal);
@@ -425,12 +428,47 @@
       // resubmits its whole performer_ids list and silently reverts
       // anything added out-of-band. Staging into the form itself removes
       // the race entirely.
-      async _finishMutation(modal, { staged = false } = {}) {
+      async _finishMutation(modal, { staged = false, trigger = null } = {}) {
+        // Other results in the modal can still be added: keep it open and show this one as tagged. Only
+        // the last (or only) result closes the modal / reloads the page as described above.
+        if (trigger && this._markResultTagged(trigger, modal, staged)) return;
         if (staged) {
           if (modal && typeof modal._close === 'function') modal._close();
           return;
         }
         window.location.reload();
+      },
+
+      // After a successful add from a results card: when other cards in the modal still offer an add
+      // action, swap this card's actions for the "already tagged" layout and leave the modal open so those
+      // can be added too. Returns false (caller closes/reloads as usual) when this was the only or last
+      // add-able result, or the card isn't one we know how to update. A direct (non-staged) mutation
+      // leaves the page behind the modal stale, so the page reloads when the modal is finally closed.
+      _markResultTagged(trigger, modal, staged) {
+        const actions = trigger.closest('.ss-actions');
+        const card = trigger.closest('.ss-match');
+        if (!modal || !actions || !card) return false;
+        const others = Array.from(modal.querySelectorAll('.ss-actions .ss-btn-add, .ss-actions .ss-btn-create'))
+          .filter((b) => b.closest('.ss-actions') !== actions);
+        if (!others.length) return false;
+
+        const isAlt = actions.classList.contains('ss-alt-match-actions');
+        const onWhat = trigger.dataset.imageId ? 'image' : 'scene';
+        actions.innerHTML = `<span class="ss-local-status ss-already-tagged">${isAlt ? 'Already tagged' : `Already tagged on ${onWhat}`}</span>`;
+        // The "Add as..." search panel sits next to the actions, not inside them.
+        modal.querySelectorAll('.ss-search-panel').forEach((panel) => {
+          if (panel._triggerBtn === trigger || !panel._triggerBtn?.isConnected) this._cleanupSearchPanel(panel);
+        });
+        if (!card.querySelector('.ss-tagged-badge, .ss-person-header .ss-tagged-badge')) {
+          const badge = document.createElement('span');
+          badge.className = isAlt ? 'ss-tagged-badge ss-tagged-badge-sm' : 'ss-tagged-badge';
+          badge.textContent = 'Tagged';
+          const header = isAlt ? null : card.closest('.ss-person')?.querySelector('.ss-person-header');
+          if (header) header.appendChild(badge);
+          else card.querySelector('.ss-confidence')?.insertAdjacentElement('afterend', badge);
+        }
+        if (!staged) modal._reloadOnClose = true;
+        return true;
       },
 
       _setNativeInputValue(input, value) {
@@ -521,6 +559,21 @@
         match.dispatchEvent(new MouseEvent('click', opts));
         await new Promise((r) => setTimeout(r, 150));
         return true;
+      },
+
+      // Show why a create/link button failed under the button itself (the button label alone just says
+      // "Failed"), e.g. "A performer named 'X' already exists in Stash (id 123)...".
+      _showButtonError(btn, err) {
+        const message = (err && err.message) || '';
+        if (!message) return;
+        btn.title = message;
+        const holder = btn.parentElement;
+        if (!holder) return;
+        holder.querySelectorAll('.ss-btn-error-note').forEach((n) => n.remove());
+        const note = document.createElement('div');
+        note.className = 'ss-btn-error-note';
+        note.textContent = message;
+        btn.insertAdjacentElement('afterend', note);
       },
 
       _withTimeout(promise, timeoutMs, timeoutMessage) {
@@ -686,7 +739,7 @@
             if (success) {
               btn.textContent = staged ? 'Added to form' : 'Added!';
               btn.classList.add('ss-btn-success');
-              await this._finishMutation(modal, { staged });
+              await this._finishMutation(modal, { staged, trigger: btn });
             } else {
               btn.textContent = staged ? 'Could not add automatically' : 'Failed';
               btn.classList.add('ss-btn-error');
@@ -743,7 +796,7 @@
               if (success) {
                 btn.textContent = staged ? 'Created — added to form' : 'Added!';
                 btn.classList.add('ss-btn-success');
-                await this._finishMutation(modal, { staged });
+                await this._finishMutation(modal, { staged, trigger: btn });
               } else {
                 // Performer was created in the library either way -- just
                 // couldn't be verified-selected into the open form.
@@ -767,7 +820,7 @@
                     if (success) {
                       btn.textContent = staged ? 'Created — added to form' : 'Added!';
                       btn.classList.add('ss-btn-success');
-                      await this._finishMutation(modal, { staged });
+                      await this._finishMutation(modal, { staged, trigger: btn });
                       return;
                     }
                     btn.textContent = 'Created — add manually';
@@ -781,6 +834,7 @@
               btn.textContent = 'Failed';
               btn.classList.add('ss-btn-error');
               btn.disabled = false;
+              this._showButtonError(btn, err);
               console.error('Failed to create performer:', err);
             }
           });
@@ -1243,7 +1297,7 @@
             // a failed select still leaves an open form's other
             // pending edits in place, which a reload would lose.
             const modal = triggerBtn.closest('#ss-modal');
-            await self._finishMutation(modal, { staged });
+            await self._finishMutation(modal, { staged, trigger: triggerBtn });
           } catch (err) {
             resultsDiv2.innerHTML = `<div class="ss-search-error">Failed: ${SS.escapeHtml(err.message)}</div>`;
             console.error('Failed to link performer:', err);
@@ -1957,7 +2011,7 @@
             if (success) {
               btn.textContent = staged ? 'Added to form' : 'Added!';
               btn.classList.add('ss-btn-success');
-              await this._finishMutation(modal, { staged });
+              await this._finishMutation(modal, { staged, trigger: btn });
             } else {
               btn.textContent = staged ? 'Could not add automatically' : 'Failed';
               btn.classList.add('ss-btn-error');
@@ -2014,7 +2068,7 @@
               if (success) {
                 btn.textContent = staged ? 'Created — added to form' : 'Added!';
                 btn.classList.add('ss-btn-success');
-                await this._finishMutation(modal, { staged });
+                await this._finishMutation(modal, { staged, trigger: btn });
               } else {
                 // Performer was created in the library either way -- just
                 // couldn't be verified-selected into the open form.
@@ -2038,7 +2092,7 @@
                     if (success) {
                       btn.textContent = staged ? 'Created — added to form' : 'Added!';
                       btn.classList.add('ss-btn-success');
-                      await this._finishMutation(modal, { staged });
+                      await this._finishMutation(modal, { staged, trigger: btn });
                       return;
                     }
                     btn.textContent = 'Created — add manually';
@@ -2052,6 +2106,7 @@
               btn.textContent = 'Failed';
               btn.classList.add('ss-btn-error');
               btn.disabled = false;
+              this._showButtonError(btn, err);
               console.error('Failed to create performer:', err);
             }
           });
@@ -2282,7 +2337,7 @@
             if (success) {
               btn.textContent = staged ? 'Added to form' : 'Added!';
               btn.classList.add('ss-btn-success');
-              await this._finishMutation(modal, { staged });
+              await this._finishMutation(modal, { staged, trigger: btn });
             } else {
               btn.textContent = staged ? 'Could not add automatically' : 'Failed';
               btn.classList.add('ss-btn-error');
@@ -2339,7 +2394,7 @@
               if (success) {
                 btn.textContent = staged ? 'Created — added to form' : 'Added!';
                 btn.classList.add('ss-btn-success');
-                await this._finishMutation(modal, { staged });
+                await this._finishMutation(modal, { staged, trigger: btn });
               } else {
                 // Performer was created in the library either way -- just
                 // couldn't be verified-selected into the open form.
@@ -2363,7 +2418,7 @@
                     if (success) {
                       btn.textContent = staged ? 'Created — added to form' : 'Added!';
                       btn.classList.add('ss-btn-success');
-                      await this._finishMutation(modal, { staged });
+                      await this._finishMutation(modal, { staged, trigger: btn });
                       return;
                     }
                     btn.textContent = 'Created — add manually';
@@ -2377,6 +2432,7 @@
               btn.textContent = 'Failed';
               btn.classList.add('ss-btn-error');
               btn.disabled = false;
+              this._showButtonError(btn, err);
               console.error('Failed to create performer:', err);
             }
           });

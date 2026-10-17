@@ -1,3 +1,16 @@
+## 2026-10-17
+
+### 0.38.1 (plugin)
+- Improvement: adding a performer from the Identify results no longer closes the results while other matches can
+  still be added. The added match switches to the "Already tagged" layout and the results stay open; adding the last
+  (or only) match closes them as before.
+- Fix: when "Add to Stash + Scene/Image" fails, the reason is shown under the button instead of just "Failed".
+
+### 0.48.1 (sidecar)
+- Fix: adding a performer whose name already exists in Stash (for example an unlinked performer with the same
+  romanised name) now reports which performer is in the way and suggests "Add as..." to link it, instead of failing
+  with an unexplained server error.
+
 ## 2026-10-10
 
 ### 0.38.0 (plugin)
