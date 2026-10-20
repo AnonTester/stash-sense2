@@ -27,7 +27,12 @@
 
   const QueueAPI = {
     async getStatus() { return apiCall('queue_status'); },
-    async getJobs(status) { return apiCall('queue_list', status ? { status } : {}); },
+    // The queue endpoint returns the newest 50 jobs by default; History pages through more than that.
+    async getJobs(status) {
+      const args = { limit: JOBS_FETCH_LIMIT };
+      if (status) args.status = status;
+      return apiCall('queue_list', args);
+    },
     async getTypes() { return apiCall('queue_types'); },
     async submit(type, cursor = null) {
       const payload = { type };
@@ -45,6 +50,9 @@
   let pollInterval = null;
   let jobTypes = null;
   let historyExpanded = true;
+  let historyPage = 0;  // 0-based page of the History list; survives the 3 s re-render
+  const HISTORY_PAGE_SIZE = 10;
+  const JOBS_FETCH_LIMIT = 500;
   const FORCE_FULL_SCAN_USER_JOB_TYPES = new Set(['scene_fingerprint_match', 'upstream_scene_changes']);
 
   // Recent-rate tracking for ETA. A lifetime average (items_processed /
@@ -449,6 +457,7 @@
           button.textContent = 'Clearing...';
           try {
             await QueueAPI.clearHistory();
+            historyPage = 0;
             await refreshContent(container);
           } catch (err) {
             button.textContent = 'Error';
@@ -467,9 +476,24 @@
     if (!historyExpanded) {
       list.style.display = 'none';
     }
-    for (const job of jobs.slice(0, 20)) {
+    const totalPages = Math.max(1, Math.ceil(jobs.length / HISTORY_PAGE_SIZE));
+    historyPage = Math.min(historyPage, totalPages - 1);  // the list shrinks as jobs are cleared
+    const start = historyPage * HISTORY_PAGE_SIZE;
+    // The page control sits above and below the list; each needs its own element.
+    const buildPager = () => SS.buildStashStylePagination({
+      currentPage: historyPage,
+      totalPages,
+      onGoToPage: (page) => {
+        historyPage = page;
+        refreshContent(container);
+      },
+    });
+    const paged = totalPages > 1 && !!SS.buildStashStylePagination;
+    if (paged) list.appendChild(buildPager());
+    for (const job of jobs.slice(start, start + HISTORY_PAGE_SIZE)) {
       list.appendChild(renderJobCard(job, false, true));
     }
+    if (paged) list.appendChild(buildPager());
     section.appendChild(list);
     container.appendChild(section);
   }

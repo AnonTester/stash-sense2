@@ -753,6 +753,8 @@ def handle_queue(mode, args, sidecar_url):
             params.append(f"status={args['status']}")
         if args.get("type"):
             params.append(f"type={args['type']}")
+        if args.get("limit"):
+            params.append(f"limit={int(args['limit'])}")
         qs = f"?{'&'.join(params)}" if params else ""
         return sidecar_get(sidecar_url, f"/queue{qs}")
     elif mode == "queue_status":

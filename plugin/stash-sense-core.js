@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.38.1';
+  const PLUGIN_VERSION = '0.39.0';
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -955,9 +955,45 @@
     leavePluginCallbacks.push(callback);
   }
 
+  // ==================== Page title ====================
+
+  // Stash titles its own pages "<Page> | <branding>" (the branding is Settings > Interface > Custom title,
+  // "Stash" when unset) but leaves the plugin page with just the bare branding, so name it the same way.
+  const PAGE_TITLE = 'SS2 Plugin';
+  let brandingPromise = null;
+
+  function getBranding() {
+    if (!brandingPromise) {
+      brandingPromise = fetch('/graphql', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '{ configuration { ui } }' }),
+      })
+        .then((r) => r.json())
+        .then((j) => (j.data && j.data.configuration && j.data.configuration.ui && j.data.configuration.ui.title) || 'Stash')
+        .catch(() => { brandingPromise = null; return 'Stash'; });
+    }
+    return brandingPromise;
+  }
+
+  async function applyPageTitle() {
+    if (getRoute().type !== 'plugin') return;
+    const title = `${PAGE_TITLE} | ${await getBranding()}`;
+    if (getRoute().type === 'plugin' && document.title !== title) document.title = title;
+  }
+
+  async function restorePageTitle() {
+    // Stash normally sets the next page's own title; only undo ours if it is still showing.
+    if (document.title.startsWith(`${PAGE_TITLE} | `)) document.title = await getBranding();
+  }
+
   function initNavigationWatcher() {
     let lastUrl = window.location.href;
     let lastRouteType = getRoute().type;
+
+    // Stash can rewrite <title> after we set it (its own title handling re-runs on some renders).
+    applyPageTitle();
+    new MutationObserver(() => { applyPageTitle(); }).observe(document.head, { childList: true, subtree: true, characterData: true });
 
     const observer = new MutationObserver(() => {
       if (window.location.href !== lastUrl) {
@@ -965,7 +1001,9 @@
         const route = getRoute();
 
         // Fire leave-plugin callbacks when navigating away from plugin page
+        if (route.type === 'plugin') applyPageTitle();
         if (lastRouteType === 'plugin' && route.type !== 'plugin') {
+          restorePageTitle();
           for (const callback of leavePluginCallbacks) {
             try {
               callback();

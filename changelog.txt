@@ -1,3 +1,12 @@
+## 2026-10-20
+
+### 0.39.0 (plugin)
+- Improvement: the Operations history is paged, 10 jobs per page, with the same page control as the Recommendations
+  lists (first/previous/next/last and jump to page) above and below the list. It now reaches back through up to 500 jobs instead of the
+  newest 20 that were shown before.
+- Improvement: the plugin page's browser tab is titled "SS2 Plugin | <Stash title>", in the same form Stash uses for
+  its own pages, instead of the bare Stash title.
+
 ## 2026-10-17
 
 ### 0.38.1 (plugin)

@@ -1769,6 +1769,9 @@
     return nav;
   }
 
+  // Shared with the Operations tab's History list.
+  SS.buildStashStylePagination = buildStashStylePagination;
+
   async function renderList(container) {
     const typeConfigs = {
       duplicate_performer: 'Duplicate Performers',
