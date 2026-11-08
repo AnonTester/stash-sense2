@@ -2630,10 +2630,16 @@
         }
       } catch (e) {
         const msg = String(e?.message || e || '');
-        const stale = /recommendation not found|recommendation removed because referenced scene no longer exists/i.test(msg);
+        // "recommendation removed because" is the stable prefix every server-side prune reason starts
+        // with (missing scene, missing file, fileless scene, ...) -- match on that prefix, not the full
+        // reason text, so a wording change on any one of those prune paths (confirmed live 2026-11-08:
+        // the duplicate_scenes/duplicate_scene_files messages got more specific and stopped matching the
+        // old exact-phrase regex here, leaving a stale card on the page until a manual refresh) can never
+        // again silently break this detection.
+        const stale = /recommendation not found|recommendation removed because/i.test(msg);
         showToast(
           stale
-            ? 'Recommendation removed because source/target scene no longer exists.'
+            ? 'Recommendation removed because source/target scene or file no longer exists.'
             : `Failed to open recommendation: ${msg}`,
           stale ? 'warning' : 'error',
         );
@@ -6086,7 +6092,8 @@
           showSuccessAndReturn(applyBtn, 'Done!', rec.id);
         } catch (e) {
           const msg = String(e?.message || e || '');
-          const stale = /recommendation not found|recommendation removed because referenced scene no longer exists/i.test(msg);
+          // See renderDetail's own comment on this same prefix match.
+          const stale = /recommendation not found|recommendation removed because/i.test(msg);
           if (stale) {
             showToast('Recommendation removed because source/target scene no longer exists.', 'warning');
             removeFromListCache(rec.id);
@@ -6110,7 +6117,8 @@
         showSuccessAndReturn(applyBtn, 'Applied!', rec.id);
       } catch (e) {
         const msg = String(e?.message || e || '');
-        const stale = /scene .*not found|removed stale upstream scene recommendation|recommendation removed because referenced scene no longer exists|recommendation not found/i.test(msg);
+        // See renderDetail's own comment on the "recommendation removed because" prefix match.
+        const stale = /scene .*not found|removed stale upstream scene recommendation|recommendation removed because|recommendation not found/i.test(msg);
         if (stale) {
           showToast('Recommendation removed because source/target scene no longer exists.', 'warning');
           removeFromListCache(rec.id);

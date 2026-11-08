@@ -1,5 +1,14 @@
 ## 2026-11-08
 
+### 0.39.3 (plugin)
+- Fix: a duplicate_scenes or duplicate_scene_files recommendation removed server-side as stale (see sidecar
+  0.48.2) showed a warning toast but stayed on the page until a manual refresh. The toast-vs-card-removal
+  check matched the exact old wording of that removal reason; it now matches the stable "recommendation
+  removed because" prefix every prune reason shares, so the card is pulled from the list immediately
+  regardless of which specific reason triggered it -- and stays correct if that wording changes again.
+
+## 2026-11-08
+
 ### 0.48.2 (sidecar)
 - Fix: opening a duplicate_scenes or duplicate_scene_files recommendation now checks that every file it
   refers to is still actually on the scene, not just that the scene itself still exists. A file (or a whole
