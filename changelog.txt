@@ -1,5 +1,15 @@
 ## 2026-11-08
 
+### 0.39.6 (plugin)
+- Fix: shortened the connection-status label from "Connected"/"Disconnected" to "Online"/"Offline" --
+  shorter text was the last bit of slack needed to stop the mobile header pill from wrapping awkwardly.
+- Fix: the mobile page-tab fix in 0.39.5 split the bar into 3 even thirds, which over-shrunk
+  "Recommendations" (the longest of the 3 labels) and truncated it with an ellipsis even though all 3
+  labels' own natural widths already fit a phone viewport combined. Tabs now size to their own label first
+  and only shrink, proportionally, if they truly don't fit.
+
+## 2026-11-08
+
 ### 0.39.5 (plugin)
 - Fix: on mobile, the status pill in the app header (plugin/sidecar version text, changelog button, status
   dot+label) stayed on one unwrapped line that was wider than the viewport, overflowing it instead of

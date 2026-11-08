@@ -697,7 +697,7 @@
       ${versionHtml}
       <button type="button" id="ss-changelog-btn" title="View changelog" style="background:none;border:none;cursor:pointer;color:inherit;opacity:0.7;padding:0 4px;font-size:0.85rem;line-height:1;">&#128220;</button>
       <span class="ss-status-dot"></span>
-      <span class="ss-status-label">${connected ? 'Connected' : 'Disconnected'}</span>
+      <span class="ss-status-label">${connected ? 'Online' : 'Offline'}</span>
       ${sidecarStatus?.error ? `<span class="ss-status-error">${sidecarStatus.error}</span>` : ''}
     `;
     // Re-bound on every call (innerHTML above just replaced the element) --
