@@ -2342,7 +2342,10 @@
 /* Responsive for Recommendations */
 @media (max-width: 768px) {
   .ss-recommendations {
-    padding: 16px;
+    /* Horizontal padding only, roughly half the desktop value and in line
+       with Stash's own mobile content gutter -- the vertical 16px above/
+       below is unrelated to the left/right-margin complaint this matches. */
+    padding: 16px 8px;
   }
 
   .ss-type-cards {
@@ -3520,7 +3523,11 @@ a.ss-upstream-endpoint-badge:hover {
 /* Responsive Settings */
 @media (max-width: 768px) {
   .ss-settings-page {
-    padding: 0 12px 16px;
+    /* No horizontal padding here either (see the desktop rule's own
+       comment) -- adding 12px on top of .ss-recommendations' own mobile
+       gutter double-indented this panel and pushed it into horizontal
+       scroll. */
+    padding: 0 0 16px;
   }
 
   .ss-hw-banner-content {
@@ -3856,7 +3863,8 @@ a.ss-upstream-endpoint-badge:hover {
 /* Responsive Operations */
 @media (max-width: 768px) {
   .ss-operations-page {
-    padding: 0 12px 16px;
+    /* Same reasoning as .ss-settings-page's own mobile override above. */
+    padding: 0 0 16px;
   }
 
   .ss-quick-actions {
