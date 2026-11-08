@@ -55,6 +55,17 @@
   const JOBS_FETCH_LIMIT = 500;
   const FORCE_FULL_SCAN_USER_JOB_TYPES = new Set(['scene_fingerprint_match', 'upstream_scene_changes']);
 
+  // In-flight action tracking -- survives the 3 s re-render the same way historyPage does. Every action
+  // button here already disables itself directly on click, but that disabled state lives only on that one
+  // DOM node: the poll interval (or the immediate refresh on returning to this tab) rebuilds the whole button
+  // list from scratch every few seconds, and a freshly-built button has no memory of a request still in
+  // flight on the node it replaced -- so a second click on the *new* button could fire a duplicate
+  // submit/stop/cancel/retry/clear-history before the first call's response has even come back. Keyed by
+  // type_id for Quick Actions (one submit per job type at a time) and by job.id for the per-job actions.
+  const pendingQuickActions = new Map(); // type_id -> button text to show while pending
+  const pendingJobActions = new Map();   // job.id -> button text to show while pending
+  let pendingClearHistory = null;        // button text to show while pending, or null
+
   // Recent-rate tracking for ETA. A lifetime average (items_processed /
   // time since started_at) goes badly stale across a phase change within
   // one job -- e.g. fingerprint generation skips thousands of
@@ -190,12 +201,17 @@
     const grid = SS.createElement('div', { className: 'ss-quick-actions' });
 
     for (const type of jobTypes) {
+      const pendingText = pendingQuickActions.get(type.type_id);
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-secondary ss-quick-action-btn',
         attrs: { 'data-type': type.type_id },
         events: {
           click: async (e) => {
             const button = e.currentTarget;
+            // Already submitting this type (set by an earlier click, possibly on a button this exact re-render
+            // just replaced) -- never let a second click queue a second submit for the same job type.
+            if (pendingQuickActions.has(type.type_id)) return;
+            pendingQuickActions.set(type.type_id, 'Submitting...');
             button.disabled = true;
             button.textContent = 'Submitting...';
             try {
@@ -207,16 +223,18 @@
               // for the pre-existing force-full-scan pair below.
               const cursor = FORCE_FULL_SCAN_USER_JOB_TYPES.has(type.type_id) ? '__full__' : null;
               await QueueAPI.submit(type.type_id, cursor);
+              pendingQuickActions.delete(type.type_id);
               await refreshContent(container);
               ensurePolling(container);
             } catch (err) {
-              if (err.message.includes('409') || err.message.includes('already')) {
-                button.textContent = 'Already Running';
-                setTimeout(() => { button.textContent = type.display_name; button.disabled = false; }, 2000);
-              } else {
-                button.textContent = 'Error';
-                setTimeout(() => { button.textContent = type.display_name; button.disabled = false; }, 2000);
-              }
+              const text = (err.message.includes('409') || err.message.includes('already')) ? 'Already Running' : 'Error';
+              pendingQuickActions.set(type.type_id, text);
+              button.textContent = text;
+              setTimeout(() => {
+                pendingQuickActions.delete(type.type_id);
+                button.textContent = type.display_name;
+                button.disabled = false;
+              }, 2000);
               return;
             }
             button.textContent = type.display_name;
@@ -225,17 +243,24 @@
         },
       });
 
-      // Resource badge -- effective_resource reflects what a new run would
-      // actually use right now (GPU types can run CPU-only, depending on
-      // the gpu_enabled setting and real GPU availability); falls back to
-      // the static classification for non-GPU types.
-      const resource = type.effective_resource || type.resource;
-      const badge = SS.createElement('span', {
-        className: `ss-resource-badge ss-resource-${resource}`,
-        textContent: resource.toUpperCase(),
-      });
-      btn.appendChild(document.createTextNode(type.display_name + ' '));
-      btn.appendChild(badge);
+      if (pendingText) {
+        // Rebuilding mid-request (poll tick, or returning to this tab) -- reproduce the pending button as-is
+        // instead of defaulting back to the normal enabled/labelled state.
+        btn.disabled = true;
+        btn.textContent = pendingText;
+      } else {
+        // Resource badge -- effective_resource reflects what a new run would
+        // actually use right now (GPU types can run CPU-only, depending on
+        // the gpu_enabled setting and real GPU availability); falls back to
+        // the static classification for non-GPU types.
+        const resource = type.effective_resource || type.resource;
+        const badge = SS.createElement('span', {
+          className: `ss-resource-badge ss-resource-${resource}`,
+          textContent: resource.toUpperCase(),
+        });
+        btn.appendChild(document.createTextNode(type.display_name + ' '));
+        btn.appendChild(badge);
+      }
       grid.appendChild(btn);
     }
 
@@ -374,48 +399,64 @@
     // Action buttons
     const actions = SS.createElement('div', { className: 'ss-job-actions' });
 
-    function actionHandler(button, action, label, pendingLabel) {
+    // jobId-keyed guard mirrors renderQuickActions' pendingQuickActions -- same reason: this card gets
+    // rebuilt from scratch on every poll tick, so the button's own `disabled` can't be the only thing
+    // stopping a second click from firing a duplicate stop/cancel/retry while the first is still in flight.
+    function actionHandler(jobId, button, action, label, pendingLabel) {
       return async () => {
+        if (pendingJobActions.has(jobId)) return;
+        pendingJobActions.set(jobId, pendingLabel);
         button.disabled = true;
         button.textContent = pendingLabel;
         try {
           await action();
+          pendingJobActions.delete(jobId);
           const container = button.closest('#ss-operations');
           if (container) await refreshContent(container);
         } catch (err) {
+          pendingJobActions.set(jobId, 'Error');
           button.textContent = 'Error';
-          setTimeout(() => { button.textContent = label; button.disabled = false; }, 2000);
+          setTimeout(() => {
+            pendingJobActions.delete(jobId);
+            button.textContent = label;
+            button.disabled = false;
+          }, 2000);
         }
       };
     }
 
+    const pendingJobText = pendingJobActions.get(job.id);
     if (job.status === 'running') {
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-danger ss-btn-sm',
-        textContent: 'Stop',
+        textContent: pendingJobText || 'Stop',
       });
-      btn.addEventListener('click', actionHandler(btn, () => QueueAPI.stop(job.id), 'Stop', 'Stopping\u2026'));
+      btn.disabled = !!pendingJobText;
+      btn.addEventListener('click', actionHandler(job.id, btn, () => QueueAPI.stop(job.id), 'Stop', 'Stopping\u2026'));
       actions.appendChild(btn);
     } else if (job.status === 'stopping') {
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-danger ss-btn-sm',
-        textContent: 'Force Cancel',
+        textContent: pendingJobText || 'Force Cancel',
       });
-      btn.addEventListener('click', actionHandler(btn, () => QueueAPI.cancel(job.id), 'Force Cancel', 'Cancelling\u2026'));
+      btn.disabled = !!pendingJobText;
+      btn.addEventListener('click', actionHandler(job.id, btn, () => QueueAPI.cancel(job.id), 'Force Cancel', 'Cancelling\u2026'));
       actions.appendChild(btn);
     } else if (job.status === 'queued') {
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-secondary ss-btn-sm',
-        textContent: 'Cancel',
+        textContent: pendingJobText || 'Cancel',
       });
-      btn.addEventListener('click', actionHandler(btn, () => QueueAPI.cancel(job.id), 'Cancel', 'Cancelling\u2026'));
+      btn.disabled = !!pendingJobText;
+      btn.addEventListener('click', actionHandler(job.id, btn, () => QueueAPI.cancel(job.id), 'Cancel', 'Cancelling\u2026'));
       actions.appendChild(btn);
     } else if ((job.status === 'failed' || job.status === 'cancelled') && !job.retried_as) {
       const btn = SS.createElement('button', {
         className: 'ss-btn ss-btn-primary ss-btn-sm',
-        textContent: 'Retry',
+        textContent: pendingJobText || 'Retry',
       });
-      btn.addEventListener('click', actionHandler(btn, () => QueueAPI.retry(job.id), 'Retry', 'Retrying\u2026'));
+      btn.disabled = !!pendingJobText;
+      btn.addEventListener('click', actionHandler(job.id, btn, () => QueueAPI.retry(job.id), 'Retry', 'Retrying\u2026'));
       actions.appendChild(btn);
     }
     if (actions.children.length > 0) {
@@ -448,24 +489,33 @@
 
     const clearBtn = SS.createElement('button', {
       className: 'ss-btn ss-btn-secondary ss-btn-sm',
-      textContent: 'Clear History',
+      textContent: pendingClearHistory || 'Clear History',
       events: {
         click: async (e) => {
           e.stopPropagation();
+          if (pendingClearHistory) return;
           const button = e.currentTarget;
+          pendingClearHistory = 'Clearing...';
           button.disabled = true;
           button.textContent = 'Clearing...';
           try {
             await QueueAPI.clearHistory();
+            pendingClearHistory = null;
             historyPage = 0;
             await refreshContent(container);
           } catch (err) {
+            pendingClearHistory = 'Error';
             button.textContent = 'Error';
-            setTimeout(() => { button.textContent = 'Clear History'; button.disabled = false; }, 2000);
+            setTimeout(() => {
+              pendingClearHistory = null;
+              button.textContent = 'Clear History';
+              button.disabled = false;
+            }, 2000);
           }
         },
       },
     });
+    clearBtn.disabled = !!pendingClearHistory;
     headerRow.appendChild(clearBtn);
 
     section.appendChild(headerRow);

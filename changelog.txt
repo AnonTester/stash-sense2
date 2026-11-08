@@ -1,3 +1,11 @@
+## 2026-11-08
+
+### 0.39.1 (plugin)
+- Fix: Operations tab action buttons (Quick Actions, Stop/Cancel/Retry, Clear History) could fire a duplicate
+  request if clicked again while the first was still in flight. The panel rebuilds its buttons on every poll
+  tick (every 3 s) and on returning to the tab; that rebuild was resetting a button back to its normal enabled
+  state even while its own request hadn't finished yet, letting a second click slip through.
+
 ## 2026-10-20
 
 ### 0.39.0 (plugin)
