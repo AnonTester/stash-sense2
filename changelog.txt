@@ -1,5 +1,25 @@
 ## 2026-11-08
 
+### 0.48.2 (sidecar)
+- Fix: opening a duplicate_scenes or duplicate_scene_files recommendation now checks that every file it
+  refers to is still actually on the scene, not just that the scene itself still exists. A file (or a whole
+  scene, in the duplicate_scenes case) that was deleted outside this tool since the recommendation was made
+  no longer surfaces as if it were still an actionable duplicate -- it is pruned the same way a fully missing
+  scene already was.
+- Fix: deleting duplicate scene files, deleting a matched scene, or deleting a grouped source scene now all
+  re-check the live file list immediately before the destructive call and refuse with a clear reason if the
+  scene you are keeping has since lost its own files -- this is the exact situation that could otherwise
+  delete the only remaining copy of a video while believing a duplicate was being removed.
+
+### 0.39.2 (plugin)
+- Fix: merging duplicate performers could show "Failed: Recommendation not found" even though the merge
+  itself had already succeeded. Merging destroys the source performer, which fires Stash's own destroy hook
+  and cleans up every recommendation that referenced it -- including the one this merge was about to mark
+  resolved -- often before that follow-up call lands. That race is now tolerated the same way an equivalent
+  one already was elsewhere in this same flow.
+
+## 2026-11-08
+
 ### 0.39.1 (plugin)
 - Fix: Operations tab action buttons (Quick Actions, Stop/Cancel/Retry, Clear History) could fire a duplicate
   request if clicked again while the first was still in flight. The panel rebuilds its buttons on every poll

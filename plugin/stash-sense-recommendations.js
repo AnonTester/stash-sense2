@@ -2768,7 +2768,22 @@
         btn.textContent = 'Merging...';
 
         await RecommendationsAPI.mergePerformers(keeperId, sourceIds);
-        await RecommendationsAPI.resolve(rec.id, 'merged', { keeper_id: keeperId });
+        try {
+          await RecommendationsAPI.resolve(rec.id, 'merged', { keeper_id: keeperId });
+        } catch (resolveErr) {
+          // mergePerformers destroys the source performer(s), which fires Stash's own
+          // Performer.Destroy.Post hook synchronously -- that hook's cleanup-entity call deletes
+          // every recommendation referencing the now-gone performer, INCLUDING this one, often before
+          // this resolve call lands. The merge itself already succeeded (that's the only thing that
+          // actually matters); a 404 here just means the hook got there first, not that anything
+          // failed -- same race, same tolerance already applied to the merge call itself a few lines
+          // below (showNameConflictDialog's "Merge & Continue" handler).
+          const msg = String(resolveErr.message || resolveErr);
+          if (!msg.includes('not found') && !msg.includes('404')) {
+            throw resolveErr;
+          }
+          console.warn('[Stash Sense] Recommendation already removed by the destroy hook before resolve landed -- merge still succeeded.');
+        }
 
         showSuccessAndReturn(btn, 'Merged!', rec.id);
       } catch (e) {

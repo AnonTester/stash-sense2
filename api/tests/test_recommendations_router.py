@@ -350,7 +350,9 @@ class TestGetRecommendation:
             },
             confidence=0.95,
         )
-        rec_mod.stash_client.get_scene_by_id = AsyncMock(side_effect=lambda scene_id: {"id": str(scene_id)})
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            side_effect=lambda scene_id: {"id": str(scene_id), "files": [{"id": "f" + str(scene_id)}]}
+        )
 
         resp = client.get(f"/recommendations/{first_id}")
         assert resp.status_code == 200
@@ -389,7 +391,8 @@ class TestGetRecommendation:
             confidence=0.80,
         )
         rec_mod.stash_client.get_scene_by_id = AsyncMock(
-            side_effect=lambda scene_id: None if str(scene_id) == "77" else {"id": str(scene_id)}
+            side_effect=lambda scene_id: None if str(scene_id) == "77"
+            else {"id": str(scene_id), "files": [{"id": "f" + str(scene_id)}]}
         )
 
         resp = client.get(f"/recommendations/{valid_id}")
@@ -400,6 +403,88 @@ class TestGetRecommendation:
         assert data["details"]["duplicate_matches"][0]["match_scene_id"] == "88"
         assert db.get_recommendation(valid_id) is not None
         assert db.get_recommendation(stale_id) is None
+
+    def test_duplicate_scene_get_prunes_sibling_match_that_lost_all_its_files(self, client, db):
+        """A scene can still exist (still exists as a Stash row) while having lost every file it
+        had (deleted on disk, cleaned up by a library scan) -- this must prune the same way a fully
+        missing scene does, not be left looking like a live, actionable duplicate pair."""
+        valid_id = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:88",
+            details={
+                "scene_a_id": 42,
+                "scene_b_id": 88,
+                "confidence": 95,
+                "scene_a_summary": {"title": "Source 42"},
+                "scene_b_summary": {"title": "Match 88"},
+            },
+            confidence=0.95,
+        )
+        stale_id = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:77",
+            details={
+                "scene_a_id": 42,
+                "scene_b_id": 77,
+                "confidence": 80,
+                "scene_a_summary": {"title": "Source 42"},
+                "scene_b_summary": {"title": "Match 77"},
+            },
+            confidence=0.80,
+        )
+
+        def _get_scene(scene_id):
+            if str(scene_id) == "77":
+                return {"id": "77", "files": []}  # exists, but every file is gone
+            return {"id": str(scene_id), "files": [{"id": "f" + str(scene_id)}]}
+
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(side_effect=_get_scene)
+
+        resp = client.get(f"/recommendations/{valid_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["details"]["duplicate_matches"]) == 1
+        assert data["details"]["duplicate_matches"][0]["match_scene_id"] == "88"
+        assert db.get_recommendation(valid_id) is not None
+        assert db.get_recommendation(stale_id) is None
+
+    def test_duplicate_scene_files_get_prunes_when_a_referenced_file_is_gone(self, client, db):
+        """One of the two files a duplicate_scene_files recommendation tracks can be deleted (on disk,
+        then cleaned up by Stash's own library scan) without the scene itself disappearing -- opening
+        the recommendation must recognize that and prune it rather than serve the stale pair."""
+        rec_id = db.create_recommendation(
+            type="duplicate_scene_files",
+            target_type="scene",
+            target_id="55",
+            details={"scene_id": "55", "files": [{"id": "1001"}, {"id": "1002"}]},
+            confidence=1.0,
+        )
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            return_value={"id": "55", "files": [{"id": "1001"}]}  # 1002 is gone
+        )
+
+        resp = client.get(f"/recommendations/{rec_id}")
+        assert resp.status_code == 404
+        assert "1002" in resp.json()["detail"]
+        assert db.get_recommendation(rec_id) is None
+
+    def test_duplicate_scene_files_get_keeps_recommendation_when_both_files_present(self, client, db):
+        rec_id = db.create_recommendation(
+            type="duplicate_scene_files",
+            target_type="scene",
+            target_id="55",
+            details={"scene_id": "55", "files": [{"id": "1001"}, {"id": "1002"}]},
+            confidence=1.0,
+        )
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            return_value={"id": "55", "files": [{"id": "1001"}, {"id": "1002"}]}
+        )
+
+        resp = client.get(f"/recommendations/{rec_id}")
+        assert resp.status_code == 200
+        assert db.get_recommendation(rec_id) is not None
 
 
 class TestSceneFaceMatchLocalLinkEnrichment:
@@ -935,6 +1020,49 @@ class TestMergeScenesAction:
         assert db.is_dismissed("duplicate_scenes", "scene", "42:99") is True
 
 
+class TestDeleteSceneFilesAction:
+    def test_refuses_when_a_requested_file_is_no_longer_on_the_scene(self, client, db):
+        """Confirmed live 2026-11-08: one of the two duplicate files had already been deleted outside
+        this tool (removed on disk, cleaned up by a library scan); confirming the stale recommendation
+        anyway reached Stash's own sceneUpdate mutation and failed with a confusing, unrelated-looking
+        GraphQL error. This must be caught here first, with a clear reason, before that mutation runs."""
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            return_value={"id": "55", "files": [{"id": "1001"}]}  # 1002 is gone
+        )
+        rec_mod.stash_client.delete_scene_files = AsyncMock(return_value=True)
+
+        resp = client.post(
+            "/recommendations/actions/delete-scene-files",
+            json={
+                "scene_id": "55",
+                "file_ids_to_delete": ["1002"],
+                "keep_file_id": "1001",
+                "all_file_ids": ["1001", "1002"],
+            },
+        )
+        assert resp.status_code == 409
+        assert "1002" in resp.json()["detail"]
+        rec_mod.stash_client.delete_scene_files.assert_not_awaited()
+
+    def test_proceeds_when_both_files_still_on_the_scene(self, client, db):
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            return_value={"id": "55", "files": [{"id": "1001"}, {"id": "1002"}]}
+        )
+        rec_mod.stash_client.delete_scene_files = AsyncMock(return_value=True)
+
+        resp = client.post(
+            "/recommendations/actions/delete-scene-files",
+            json={
+                "scene_id": "55",
+                "file_ids_to_delete": ["1002"],
+                "keep_file_id": "1001",
+                "all_file_ids": ["1001", "1002"],
+            },
+        )
+        assert resp.status_code == 200
+        rec_mod.stash_client.delete_scene_files.assert_awaited_once()
+
+
 class TestDuplicateSceneGroupActions:
     def test_delete_duplicate_scene_match_resolves_after_successful_delete(self, client, db):
         rec_id = db.create_recommendation(
@@ -1057,6 +1185,95 @@ class TestDuplicateSceneGroupActions:
         assert resp.json()["dismissed_count"] == 2
         assert db.get_recommendation(rec_a).status == "dismissed"
         assert db.get_recommendation(rec_b).status == "dismissed"
+
+    def test_delete_duplicate_scene_match_refuses_when_kept_scene_has_lost_its_files(self, client, db):
+        """source_scene_id is what the human believes they're keeping; if it's since gone fileless
+        while match_scene_id (about to be destroyed WITH its file) still has real content, deleting
+        would destroy the only remaining copy -- must refuse, not proceed."""
+        rec_id = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:77",
+            details={"scene_a_id": 42, "scene_b_id": 77},
+            confidence=0.9,
+        )
+
+        def _get_scene(scene_id):
+            if str(scene_id) == "77":
+                return {"id": "77", "files": [{"id": "f77"}]}
+            return {"id": "42", "files": []}
+
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(side_effect=_get_scene)
+        rec_mod.stash_client.destroy_scene = AsyncMock(return_value=True)
+
+        resp = client.post(
+            "/recommendations/actions/delete-duplicate-scene-match",
+            json={
+                "source_scene_id": "42",
+                "match_scene_id": "77",
+                "recommendation_id": rec_id,
+                "delete_file": True,
+            },
+        )
+        assert resp.status_code == 409
+        rec_mod.stash_client.destroy_scene.assert_not_awaited()
+        assert db.get_recommendation(rec_id).status == "pending"  # untouched
+
+    def test_delete_duplicate_scene_match_allows_delete_file_when_kept_scene_still_has_files(self, client, db):
+        rec_id = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:77",
+            details={"scene_a_id": 42, "scene_b_id": 77},
+            confidence=0.9,
+        )
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(
+            return_value={"id": "x", "files": [{"id": "fx"}]}
+        )
+        rec_mod.stash_client.destroy_scene = AsyncMock(return_value=True)
+
+        resp = client.post(
+            "/recommendations/actions/delete-duplicate-scene-match",
+            json={
+                "source_scene_id": "42",
+                "match_scene_id": "77",
+                "recommendation_id": rec_id,
+                "delete_file": True,
+            },
+        )
+        assert resp.status_code == 200
+        rec_mod.stash_client.destroy_scene.assert_awaited_once_with("77", delete_file=True)
+
+    def test_delete_duplicate_scene_group_refuses_when_no_kept_sibling_has_files(self, client, db):
+        rec_a = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:77",
+            details={"scene_a_id": 42, "scene_b_id": 77},
+            confidence=0.9,
+        )
+        rec_b = db.create_recommendation(
+            type="duplicate_scenes",
+            target_type="scene",
+            target_id="42:88",
+            details={"scene_a_id": 42, "scene_b_id": 88},
+            confidence=0.8,
+        )
+
+        def _get_scene(scene_id):
+            if str(scene_id) == "42":
+                return {"id": "42", "files": [{"id": "f42"}]}
+            return {"id": str(scene_id), "files": []}  # both kept siblings (77, 88) are fileless
+
+        rec_mod.stash_client.get_scene_by_id = AsyncMock(side_effect=_get_scene)
+        rec_mod.stash_client.destroy_scene = AsyncMock(return_value=True)
+
+        resp = client.post(
+            "/recommendations/actions/delete-duplicate-scene-group",
+            json={"source_scene_id": "42", "recommendation_ids": [rec_a, rec_b], "delete_file": True},
+        )
+        assert resp.status_code == 409
+        rec_mod.stash_client.destroy_scene.assert_not_awaited()
 
 
 class TestUpdateSceneAction:

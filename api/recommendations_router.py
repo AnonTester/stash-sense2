@@ -1050,6 +1050,72 @@ async def _validate_and_prune_missing_scene_recommendation(rec, stash, db) -> li
     return missing_scene_ids
 
 
+async def _validate_and_prune_missing_duplicate_scene_files_recommendation(rec, stash, db) -> list[str]:
+    """Delete a duplicate_scene_files recommendation if any of ITS SPECIFIC files no longer exist.
+
+    _validate_and_prune_missing_scene_recommendation (above) only checks that the scene itself still
+    exists -- not enough here, since the whole point of this recommendation type is a specific pair/group
+    of FILE ids on that scene, cached in rec.details["files"] at analysis time. A file can disappear
+    (deleted on disk, cleaned up by a library scan, or already resolved through some other path) without
+    the scene disappearing -- confirmed live 2026-11-08: a scene's own duplicate file was removed outside
+    this recommendation, the scene itself still existed (so the generic check above passed clean), and
+    confirming the stale "keep the other file" choice failed with a confusing Stash-side GraphQL error
+    ("file with id ... not associated with scene") instead of this recommendation being recognized as
+    already resolved. Mirrors the existing missing-scene pattern: deletes the recommendation and returns
+    the missing file IDs so the caller can raise the same kind of "already gone" 404 instead of surfacing
+    that raw mutation failure.
+
+    Returns the list of missing file IDs. Empty list means every referenced file is still on the scene
+    (or this isn't a duplicate_scene_files recommendation / it has no file references to check).
+    """
+    if rec.type != "duplicate_scene_files":
+        return []
+    details = rec.details or {}
+    file_ids = [str(f.get("id")) for f in details.get("files", []) if f.get("id") is not None]
+    if not file_ids:
+        return []
+
+    scene_id = _normalize_scene_id(details.get("scene_id")) or _normalize_scene_id(rec.target_id)
+    if not scene_id:
+        return []
+    try:
+        scene = await stash.get_scene_by_id(scene_id)
+    except Exception as exc:
+        logger.warning(
+            "Failed file existence check for recommendation %s scene %s: %s",
+            rec.id, scene_id, exc,
+        )
+        return []
+    if not scene:
+        return []  # the generic missing-scene check (above) already covers/prunes this case
+
+    current_file_ids = {str(f.get("id")) for f in (scene.get("files") or []) if f.get("id") is not None}
+    missing_file_ids = [fid for fid in file_ids if fid not in current_file_ids]
+
+    if missing_file_ids:
+        db.delete_recommendation(rec.id)
+        logger.info(
+            "Deleted stale duplicate_scene_files recommendation %s: missing file(s) %s on scene %s",
+            rec.id, ", ".join(missing_file_ids), scene_id,
+        )
+
+    return missing_file_ids
+
+
+async def _scene_has_files(stash, scene_id: str) -> Optional[bool]:
+    """True/False whether the scene currently has at least one file, None if the live check itself
+    failed (caller should fail OPEN on None, same as every other staleness check here -- an infra
+    hiccup must never block a legitimate delete, only a confirmed empty scene should)."""
+    try:
+        scene = await stash.get_scene_by_id(scene_id)
+    except Exception as exc:
+        logger.warning("Failed live file check for scene %s: %s", scene_id, exc)
+        return None
+    if scene is None:
+        return None  # a missing scene is a different problem, handled by the existence checks elsewhere
+    return bool(scene.get("files"))
+
+
 async def _validate_and_prune_duplicate_scene_group_recommendations(
     rec: Recommendation,
     stash,
@@ -1074,7 +1140,15 @@ async def _validate_and_prune_duplicate_scene_group_recommendations(
     if not group_recs:
         return set(), []
 
-    scene_exists: dict[str, Optional[bool]] = {}
+    # Cache per scene_id whether it's usable: False covers BOTH "scene no longer exists" and "scene exists
+    # but has lost every one of its files" (e.g. the file was deleted on disk and a library scan cleaned
+    # up the dangling record, same class of staleness as duplicate_scene_files -- see
+    # _validate_and_prune_missing_duplicate_scene_files_recommendation's own docstring). Either way, this
+    # scene is no longer a real candidate to merge/keep/delete-against: presenting the pair as still
+    # actionable risks the human picking the now-empty one as the "keeper" while the OTHER, still-intact
+    # scene gets deleted (with its real files) as the "duplicate" -- confirmed as a real concern
+    # 2026-11-08, generalizing the same fix duplicate_scene_files just got.
+    scene_usable: dict[str, Optional[bool]] = {}
     deleted_rec_ids: set[int] = set()
     missing_scene_ids: list[str] = []
     seen_missing_scene_ids: set[str] = set()
@@ -1082,7 +1156,7 @@ async def _validate_and_prune_duplicate_scene_group_recommendations(
     for candidate in group_recs:
         candidate_missing_scene_ids: list[str] = []
         for scene_id in _extract_scene_ids_from_recommendation(candidate):
-            if scene_id not in scene_exists:
+            if scene_id not in scene_usable:
                 try:
                     scene = await stash.get_scene_by_id(scene_id)
                 except Exception as exc:
@@ -1092,11 +1166,11 @@ async def _validate_and_prune_duplicate_scene_group_recommendations(
                         scene_id,
                         exc,
                     )
-                    scene_exists[scene_id] = None
+                    scene_usable[scene_id] = None
                 else:
-                    scene_exists[scene_id] = bool(scene)
+                    scene_usable[scene_id] = bool(scene) and bool(scene.get("files"))
 
-            if scene_exists.get(scene_id) is False:
+            if scene_usable.get(scene_id) is False:
                 candidate_missing_scene_ids.append(scene_id)
                 if scene_id not in seen_missing_scene_ids:
                     seen_missing_scene_ids.add(scene_id)
@@ -1106,7 +1180,7 @@ async def _validate_and_prune_duplicate_scene_group_recommendations(
             db.delete_recommendation(candidate.id)
             deleted_rec_ids.add(candidate.id)
             logger.info(
-                "Deleted stale duplicate-scene recommendation %s: missing scene(s) %s",
+                "Deleted stale duplicate-scene recommendation %s: missing/fileless scene(s) %s",
                 candidate.id,
                 ", ".join(candidate_missing_scene_ids),
             )
@@ -1338,8 +1412,8 @@ async def get_recommendation(rec_id: int):
             raise HTTPException(
                 status_code=404,
                 detail=(
-                    "Recommendation removed because referenced scene no longer exists: "
-                    f"{missing_list}"
+                    "Recommendation removed because a referenced scene no longer exists or no longer "
+                    f"has any files (already resolved outside this tool): {missing_list}"
                 ),
             )
         rec = db.get_recommendation(rec_id)
@@ -1368,6 +1442,20 @@ async def get_recommendation(rec_id: int):
                 detail=(
                     "Recommendation removed because referenced scene no longer exists: "
                     f"{missing_list}"
+                ),
+            )
+        # The scene itself existing isn't enough for duplicate_scene_files -- this type is about a
+        # specific pair/group of FILE ids on that scene, and one of those can disappear (deleted on
+        # disk, cleaned up by a library scan, already resolved another way) without the scene going
+        # anywhere. See _validate_and_prune_missing_duplicate_scene_files_recommendation's own docstring.
+        missing_file_ids = await _validate_and_prune_missing_duplicate_scene_files_recommendation(rec, stash, db)
+        if missing_file_ids:
+            missing_list = ", ".join(missing_file_ids)
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "Recommendation removed because one or more of its files no longer exist on this "
+                    f"scene (already resolved outside this tool): {missing_list}"
                 ),
             )
 
@@ -1614,6 +1702,33 @@ async def delete_scene_files(request: DeleteSceneFilesRequest):
     """Delete files from a scene, keeping the specified file."""
     logger.debug("Action: delete-scene-files scene_id=%s keep_file_id=%s delete_file_ids=%s", request.scene_id, request.keep_file_id, request.file_ids_to_delete)
     stash = get_stash_client()
+
+    # Re-check against Stash's LIVE file list right before mutating, not just whatever the page loaded
+    # with -- the recommendation detail view prunes a stale duplicate_scene_files recommendation on open
+    # (see _validate_and_prune_missing_duplicate_scene_files_recommendation), but a page left open since
+    # before that, or a direct API call, could still reach here with a keep_file_id/file_ids_to_delete
+    # that Stash no longer recognizes on this scene (e.g. one of the files was already deleted outside
+    # this tool). Catching it here gives a clear, specific error instead of Stash's own confusing
+    # "file with id ... not associated with scene" surfacing from deep inside the sceneUpdate mutation
+    # that set_scene_primary_file() issues when the file being kept happens to be the current primary.
+    requested_ids = set(request.file_ids_to_delete) | {request.keep_file_id}
+    try:
+        scene = await stash.get_scene_by_id(request.scene_id)
+    except Exception as exc:
+        logger.warning("Failed live file check before delete-scene-files for scene %s: %s", request.scene_id, exc)
+        scene = None
+    if scene is not None:
+        current_ids = {str(f.get("id")) for f in (scene.get("files") or []) if f.get("id") is not None}
+        missing = sorted(requested_ids - current_ids)
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Can't apply this -- file(s) " + ", ".join(missing) + " are no longer on this scene "
+                    "(already resolved outside this tool). Reload the recommendation."
+                ),
+            )
+
     try:
         result = await stash.delete_scene_files(
             scene_id=request.scene_id,
@@ -1721,6 +1836,27 @@ async def delete_duplicate_scene_match(request: DeleteDuplicateSceneMatchRequest
 
     stash = get_stash_client()
     db = get_rec_db()
+
+    # The whole point of this action is "keep source_scene_id, delete match_scene_id" -- if
+    # delete_file=True is about to destroy match_scene_id's actual video while source_scene_id (what
+    # the human believes they're keeping) has since lost every file of its own, this would delete the
+    # only remaining copy under the guise of removing "the duplicate." Only blocks when both checks
+    # succeeded and are unambiguous (True/False, not None) -- a failed live check fails open rather than
+    # blocking a legitimate delete over an infra hiccup.
+    if request.delete_file:
+        match_has_files = await _scene_has_files(stash, request.match_scene_id)
+        source_has_files = await _scene_has_files(stash, request.source_scene_id)
+        if match_has_files is True and source_has_files is False:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Refusing to delete scene {request.match_scene_id}'s file(s) -- the scene you're "
+                    f"keeping ({request.source_scene_id}) no longer has any files of its own (already "
+                    "resolved outside this tool), so this would delete the only remaining copy. Reload "
+                    "the recommendation."
+                ),
+            )
+
     try:
         result = await stash.destroy_scene(request.match_scene_id, delete_file=request.delete_file)
         if result:
@@ -1749,6 +1885,37 @@ async def delete_duplicate_scene_group(request: DeleteDuplicateSceneGroupRequest
 
     stash = get_stash_client()
     db = get_rec_db()
+
+    # Same guard as delete_duplicate_scene_match, generalized: this action deletes source_scene_id and
+    # implicitly keeps every sibling match scene named by request.recommendation_ids. If source still has
+    # files but NONE of the scenes being kept do, this would delete the only remaining copy.
+    if request.delete_file:
+        source_has_files = await _scene_has_files(stash, request.source_scene_id)
+        if source_has_files is True:
+            match_scene_ids: set[str] = set()
+            for rec_id in request.recommendation_ids:
+                sibling_rec = db.get_recommendation(rec_id)
+                if sibling_rec is None:
+                    continue
+                match_id = _extract_duplicate_scene_match_id(sibling_rec)
+                if match_id:
+                    match_scene_ids.add(match_id)
+            any_match_has_files = False
+            for match_id in match_scene_ids:
+                if await _scene_has_files(stash, match_id):
+                    any_match_has_files = True
+                    break
+            if match_scene_ids and not any_match_has_files:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Refusing to delete scene {request.source_scene_id}'s file(s) -- none of the "
+                        "scene(s) you're keeping from this group have any files of their own (already "
+                        "resolved outside this tool), so this would delete the only remaining copy. "
+                        "Reload the recommendation."
+                    ),
+                )
+
     try:
         result = await stash.destroy_scene(request.source_scene_id, delete_file=request.delete_file)
         if result:
