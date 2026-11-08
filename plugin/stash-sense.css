@@ -2387,6 +2387,19 @@
     flex-direction: column;
     align-items: flex-start;
   }
+
+  .ss-app-header-right {
+    /* The pill's own content (plugin/sidecar version text, changelog
+       button, status dot+label) is wide enough on its own to overflow a
+       phone viewport under the desktop rule's `white-space: nowrap` --
+       let it wrap onto its own lines and fill the column instead of
+       forcing the whole page to scroll horizontally. */
+    width: 100%;
+    flex-wrap: wrap;
+    white-space: normal;
+    font-size: 12px;
+    padding: 6px 10px;
+  }
 }
 
 /* ==================== Upstream Performer Sync ==================== */
@@ -3096,8 +3109,21 @@ a.ss-upstream-endpoint-badge:hover {
 
 @media (max-width: 768px) {
   .ss-page-tab {
-    padding: 10px 16px;
-    font-size: 14px;
+    /* Desktop's flex-shrink: 0 (each tab sized to its own label, bar
+       scrolls if they overflow) left the 3 tabs (Recommendations /
+       Operations / Settings) too wide to all fit a phone viewport, cutting
+       off the last one and requiring a horizontal scroll with no visible
+       affordance that it was scrollable. Split the bar evenly instead and
+       let a label that still doesn't fit its share truncate with an
+       ellipsis -- never wider than the viewport. */
+    flex: 1 1 0;
+    flex-shrink: 1;
+    min-width: 0;
+    padding: 10px 6px;
+    font-size: 13px;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 

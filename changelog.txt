@@ -1,5 +1,16 @@
 ## 2026-11-08
 
+### 0.39.5 (plugin)
+- Fix: on mobile, the status pill in the app header (plugin/sidecar version text, changelog button, status
+  dot+label) stayed on one unwrapped line that was wider than the viewport, overflowing it instead of
+  wrapping -- it now wraps onto multiple lines and fills the available width.
+- Fix: on mobile, the 3 page-level tabs (Recommendations / Operations / Settings) were each sized to their
+  own label and only fit by scrolling the tab bar horizontally with no visible scroll affordance, cutting
+  Settings off the edge. The tabs now split the bar evenly and truncate their own label with an ellipsis if
+  one still doesn't fit its share, so the bar itself never needs to scroll.
+
+## 2026-11-08
+
 ### 0.39.4 (plugin)
 - Fix: on mobile, the Recommendations page was double-indented -- the Settings and Operations tabs added
   their own 12px of left/right padding on top of the page's own mobile gutter, instead of relying on it like
