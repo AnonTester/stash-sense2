@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="plugin/logo/stash-sense-logo.svg" width="120" alt="Stash Sense 2 logo">
+</p>
+
 # Stash Sense 2
 
 ML-powered performer identification and library curation for [Stash](https://github.com/stashapp/stash). Identifies performers in your scenes using face recognition, detects duplicate scenes, syncs upstream metadata changes, and surfaces actionable recommendations — all running locally on your hardware.

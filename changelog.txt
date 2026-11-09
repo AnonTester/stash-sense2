@@ -1,3 +1,15 @@
+## 2026-11-09
+
+### 0.39.7 (plugin)
+- Feature: added a project logo. It's now shown next to the "Stash Sense 2" title/subtitle in the
+  Recommendations page header (both clickable together, back to the plugin's main page, same as the
+  title-only link before), used as the browser tab favicon and the Android/iOS "Add to Home Screen" icon
+  while on the plugin's own page (restored to Stash's own icon on leaving), and shown at the top of the
+  project README on GitHub.
+- Feature: "Plugin vX.Y.Z" and "Sidecar vX.Y.Z" in the header status pill are now links to each component's
+  own GitHub page -- the plugin to its listing in stash-plugin-repo (where it's actually distributed from),
+  the sidecar to this repo (where its source and tagged releases live).
+
 ## 2026-11-08
 
 ### 0.39.6 (plugin)

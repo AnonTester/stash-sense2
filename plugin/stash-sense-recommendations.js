@@ -620,8 +620,13 @@
     });
     appHeader.innerHTML = `
       <div class="ss-app-header-left">
-        <h1><a class="ss-app-title-link" id="ss-app-title-link" href="${escapeHtml(window.location.pathname)}" title="Back to the main page">${SS.PLUGIN_NAME}</a></h1>
-        <p class="ss-dashboard-subtitle">Library analysis and curation tools</p>
+        <a class="ss-app-title-link" id="ss-app-title-link" href="${escapeHtml(window.location.pathname)}" title="Back to the main page">
+          <img class="ss-app-logo" src="${SS.LOGO_SVG_URL}" alt="" width="56" height="56">
+          <div class="ss-app-title-col">
+            <h1>${SS.PLUGIN_NAME}</h1>
+            <p class="ss-dashboard-subtitle">Library analysis and curation tools</p>
+          </div>
+        </a>
       </div>
       <div class="ss-app-header-right" id="ss-status-area"></div>
     `;
@@ -661,8 +666,15 @@
       // sidecar feature), so e.g. plugin v0.14.4 next to a perfectly
       // compatible sidecar v0.14.3 is not an error.
       const outdated = sidecarVersion && SS.compareVersions(sidecarVersion, SS.MIN_SIDECAR_VERSION) < 0;
-      const pVer = pluginVersion ? `Plugin v${pluginVersion}` : '';
-      const sVer = sidecarVersion ? `Sidecar v${sidecarVersion}` : '';
+      // Each half links to where that component actually lives/ships from
+      // on GitHub -- not the same repo for both, despite both living in
+      // this monorepo's working tree: the plugin is distributed through
+      // stash-plugin-repo (see SS.PLUGIN_REPO_URL's own definition for why),
+      // the sidecar through this repo's own releases.
+      const pVer = pluginVersion
+        ? `<a href="${SS.PLUGIN_REPO_URL}" target="_blank" rel="noopener noreferrer" class="ss-version-link">Plugin v${pluginVersion}</a>` : '';
+      const sVer = sidecarVersion
+        ? `<a href="${SS.SIDECAR_REPO_URL}" target="_blank" rel="noopener noreferrer" class="ss-version-link">Sidecar v${sidecarVersion}</a>` : '';
 
       if (outdated) {
         const pHtml = pVer ? `<span>${pVer}</span>` : '';

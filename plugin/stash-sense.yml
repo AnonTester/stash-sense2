@@ -1,6 +1,6 @@
 name: Stash Sense 2
 description: ML-powered performer identification and library curation for Stash
-version: 0.39.6
+version: 0.39.7
 url: https://github.com/AnonTester/stash-sense2
 
 ui:
@@ -15,8 +15,13 @@ ui:
   # Serves userscripts/ at /plugin/stash-sense2/assets/userscripts/ so a
   # userscript manager can install stash-sense2-identify.user.js from, and
   # auto-update against, Stash itself.
+  #
+  # Serves logo/ at /plugin/stash-sense2/assets/logo/ -- the header logo
+  # and favicon/apple-touch-icon swap (stash-sense-core.js) both read from
+  # here.
   assets:
     /userscripts: userscripts
+    /logo: logo
 
 settings:
   sidecarUrl:

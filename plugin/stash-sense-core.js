@@ -23,7 +23,25 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.39.6';
+  const PLUGIN_VERSION = '0.39.7';
+
+  // Where each half of this project actually ships from on GitHub -- NOT
+  // the same repo for both, despite both living in this one monorepo's
+  // working tree. Mirrors api/release_info.py's own SIDECAR_REPO /
+  // PLUGIN_INDEX_REPO split (that module polls these same two repos to
+  // learn "is a newer sidecar/plugin available" -- see its own docstring):
+  // the sidecar's source and tagged GHCR-image releases live in this repo,
+  // but the plugin itself is actually distributed through stash-plugin-repo
+  // (Settings > Plugins > Available Plugins installs/updates from there,
+  // not from this repo directly), so that's the more useful "plugin" link.
+  const SIDECAR_REPO_URL = 'https://github.com/AnonTester/stash-sense2';
+  const PLUGIN_REPO_URL = 'https://github.com/AnonTester/stash-plugin-repo/tree/main/plugins/stash-sense2';
+
+  // Served via the `assets:` mapping in stash-sense.yml (/logo -> plugin/logo/).
+  const LOGO_SVG_URL = `/plugin/${PLUGIN_ID}/assets/logo/stash-sense-logo.svg`;
+  // apple-touch-icon must be a raster image (PNG) -- iOS/Android home-screen
+  // icon handling doesn't reliably render SVG there, unlike the tab favicon.
+  const LOGO_TOUCH_ICON_URL = `/plugin/${PLUGIN_ID}/assets/logo/stash-sense-icon-180.png`;
 
   // Lowest sidecar version this plugin JS actually works against -- bump
   // this alongside PLUGIN_VERSION whenever a JS change starts depending on
@@ -987,13 +1005,54 @@
     if (document.title.startsWith(`${PAGE_TITLE} | `)) document.title = await getBranding();
   }
 
+  // ==================== Favicon / home-screen icon ====================
+
+  // Same apply-on-enter/restore-on-leave shape as the page title above, for
+  // the same reason: show our own icon (tab favicon + Android/iOS "add to
+  // home screen" icon) only while actually on this plugin's page, not
+  // globally for the whole Stash instance. The originals are captured
+  // lazily (once, on first apply) rather than hardcoded, since Stash owns
+  // those <link> tags and their href could change in a future Stash
+  // release.
+  let originalFaviconHref = null;
+  let originalTouchIconHref = null;
+  const resolvedLogoSvgUrl = new URL(LOGO_SVG_URL, document.baseURI).href;
+  const resolvedTouchIconUrl = new URL(LOGO_TOUCH_ICON_URL, document.baseURI).href;
+
+  function applyFavicon() {
+    if (getRoute().type !== 'plugin') return;
+    const iconLink = document.querySelector('link[rel~="icon"]');
+    if (iconLink) {
+      if (originalFaviconHref === null) originalFaviconHref = iconLink.href;
+      if (iconLink.href !== resolvedLogoSvgUrl) iconLink.href = LOGO_SVG_URL;
+    }
+    const touchLink = document.querySelector('link[rel="apple-touch-icon"]');
+    if (touchLink) {
+      if (originalTouchIconHref === null) originalTouchIconHref = touchLink.href;
+      if (touchLink.href !== resolvedTouchIconUrl) touchLink.href = LOGO_TOUCH_ICON_URL;
+    }
+  }
+
+  function restoreFavicon() {
+    const iconLink = document.querySelector('link[rel~="icon"]');
+    if (iconLink && originalFaviconHref !== null && iconLink.href === resolvedLogoSvgUrl) {
+      iconLink.href = originalFaviconHref;
+    }
+    const touchLink = document.querySelector('link[rel="apple-touch-icon"]');
+    if (touchLink && originalTouchIconHref !== null && touchLink.href === resolvedTouchIconUrl) {
+      touchLink.href = originalTouchIconHref;
+    }
+  }
+
   function initNavigationWatcher() {
     let lastUrl = window.location.href;
     let lastRouteType = getRoute().type;
 
-    // Stash can rewrite <title> after we set it (its own title handling re-runs on some renders).
+    // Stash can rewrite <title>/<link> after we set them (its own head
+    // handling re-runs on some renders).
     applyPageTitle();
-    new MutationObserver(() => { applyPageTitle(); }).observe(document.head, { childList: true, subtree: true, characterData: true });
+    applyFavicon();
+    new MutationObserver(() => { applyPageTitle(); applyFavicon(); }).observe(document.head, { childList: true, subtree: true, characterData: true });
 
     const observer = new MutationObserver(() => {
       if (window.location.href !== lastUrl) {
@@ -1001,9 +1060,10 @@
         const route = getRoute();
 
         // Fire leave-plugin callbacks when navigating away from plugin page
-        if (route.type === 'plugin') applyPageTitle();
+        if (route.type === 'plugin') { applyPageTitle(); applyFavicon(); }
         if (lastRouteType === 'plugin' && route.type !== 'plugin') {
           restorePageTitle();
+          restoreFavicon();
           for (const callback of leavePluginCallbacks) {
             try {
               callback();
@@ -1036,6 +1096,10 @@
     PLUGIN_VERSION,
     MIN_SIDECAR_VERSION,
     DEFAULTS,
+    SIDECAR_REPO_URL,
+    PLUGIN_REPO_URL,
+    LOGO_SVG_URL,
+    LOGO_TOUCH_ICON_URL,
 
     // Settings
     getSettings,
