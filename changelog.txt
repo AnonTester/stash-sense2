@@ -1,5 +1,12 @@
 ## 2026-11-09
 
+### 0.6.0 (userscript)
+- Feature: added `@icon`, pointing at the project logo added in plugin 0.39.7 (via its raw GitHub URL, since a
+  userscript manager fetches it directly rather than through a user's own Stash/sidecar) -- shows next to the
+  script's name in Violentmonkey/Tampermonkey's own management UI instead of a generic placeholder.
+
+## 2026-11-09
+
 ### 0.39.7 (plugin)
 - Feature: added a project logo. It's now shown next to the "Stash Sense 2" title/subtitle in the
   Recommendations page header (both clickable together, back to the plugin's main page, same as the

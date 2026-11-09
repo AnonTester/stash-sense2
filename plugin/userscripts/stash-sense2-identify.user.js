@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Stash Sense 2 - Identify anywhere
 // @namespace    https://github.com/AnonTester/stash-sense2
-// @version      0.5.3
+// @version      0.6.0
 // @description  Identify performers with your Stash Sense 2 sidecar from any web page: right-click an image, or draw an area (face + automatic margin) anywhere on a page. Also sends a drawn area to Google Translate (images).
+// @icon         https://raw.githubusercontent.com/AnonTester/stash-sense2/main/plugin/logo/stash-sense-icon-180.png
 // @match        *://*/*
 // @noframes
 // @run-at       document-idle
