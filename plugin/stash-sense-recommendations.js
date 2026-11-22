@@ -2348,7 +2348,7 @@
           <div class="ss-rec-performers">
             ${performers.map(p => `
               <div class="ss-rec-performer-thumb ${p.is_suggested_keeper ? 'keeper' : ''}">
-                ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'" />` : ''}
+                ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" alt="${p.name}" loading="lazy" onerror="window.StashSense.imgFallback(this,'performer')" />` : `<img src="${SS.fallbackIconUri('performer')}" alt="" />`}
                 <span class="ss-performer-name">${p.name}</span>
                 <span class="ss-performer-count">${p.scene_count} scenes</span>
               </div>
@@ -2450,7 +2450,7 @@
         className: 'ss-rec-card ss-rec-upstream',
         innerHTML: `
           <div class="ss-rec-card-header">
-            <img src="${relativeUrl(details.performer_image_path) || ''}" class="ss-rec-thumb" onerror="this.style.display='none'"/>
+            <img src="${relativeUrl(details.performer_image_path) || SS.fallbackIconUri('performer')}" class="ss-rec-thumb" onerror="window.StashSense.imgFallback(this,'performer')"/>
             <div class="ss-rec-card-info">
               <div class="ss-rec-card-title">Upstream Changes: ${details.performer_name || 'Unknown'}</div>
               <div class="ss-rec-card-subtitle">
@@ -2734,7 +2734,7 @@
           ${performers.map(p => `
             <div class="ss-performer-option ${p.is_suggested_keeper ? 'suggested' : ''}" data-id="${p.id}">
               <div class="ss-performer-image">
-                ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" alt="${p.name}" loading="lazy" onerror="this.style.display='none'" />` : '<div class="ss-no-image">No Image</div>'}
+                ${p.image_path ? `<img src="${relativeUrl(p.image_path)}" alt="${p.name}" loading="lazy" onerror="window.StashSense.imgFallback(this,'performer')" />` : `<img src="${SS.fallbackIconUri('performer')}" alt="" />`}
                 ${p.is_suggested_keeper ? '<span class="ss-suggested-badge">Suggested Keeper</span>' : ''}
               </div>
               <div class="ss-performer-details">
@@ -3117,7 +3117,7 @@
 
       return '<div class="ss-dup-scene-card' + (isSource ? ' ss-dup-source-card' : '') + '" data-id="' + id + '">' +
         '<div class="ss-dup-scene-thumb">' +
-          (screenshotUrl ? '<img src="' + screenshotUrl + '" alt="Scene ' + id + '" loading="lazy" onerror="this.style.display=\'none\'" />' : '<div class="ss-no-image">No Screenshot</div>') +
+          (screenshotUrl ? '<img src="' + screenshotUrl + '" alt="Scene ' + id + '" loading="lazy" onerror="window.StashSense.imgFallback(this,\'scene\')" />' : '<img src="' + SS.fallbackIconUri('scene') + '" alt="" />') +
           (previewUrl ? '<video class="ss-dup-scene-preview" muted loop preload="none" data-src="' + previewUrl + '"></video>' : '') +
         '</div>' +
         '<div class="ss-dup-scene-header-row">' +
@@ -4030,7 +4030,7 @@
           <div class="ss-conflict-comparison">
             <div class="ss-conflict-card">
               <div class="ss-conflict-card-label">This Performer</div>
-              <img src="${escapeHtml(relativeUrl(cur.image_path) || '')}" class="ss-conflict-thumb" onerror="this.style.display='none'" />
+              <img src="${escapeHtml(relativeUrl(cur.image_path) || SS.fallbackIconUri('performer'))}" class="ss-conflict-thumb" onerror="window.StashSense.imgFallback(this,'performer')" />
               <div class="ss-conflict-name">${escapeHtml(cur.name || 'Unknown')}</div>
               ${cur.disambiguation ? `<div class="ss-conflict-disambig">${escapeHtml(cur.disambiguation)}</div>` : ''}
               <div class="ss-conflict-meta">ID: ${escapeHtml(String(performerId))}</div>
@@ -4038,7 +4038,7 @@
             </div>
             <div class="ss-conflict-card">
               <div class="ss-conflict-card-label">Conflicting Performer</div>
-              <img src="${escapeHtml(relativeUrl(c.image_path) || '')}" class="ss-conflict-thumb" onerror="this.style.display='none'" />
+              <img src="${escapeHtml(relativeUrl(c.image_path) || SS.fallbackIconUri('performer'))}" class="ss-conflict-thumb" onerror="window.StashSense.imgFallback(this,'performer')" />
               <div class="ss-conflict-name">${escapeHtml(c.name)}</div>
               ${c.disambiguation ? `<div class="ss-conflict-disambig">${escapeHtml(c.disambiguation)}</div>` : ''}
               <div class="ss-conflict-meta">ID: ${escapeHtml(c.id)} &middot; ${c.scene_count || 0} scenes</div>
@@ -4162,7 +4162,7 @@
     const headerDiv = document.createElement('div');
     headerDiv.className = 'ss-upstream-header';
     headerDiv.innerHTML = `
-      <img src="${relativeUrl(details.performer_image_path) || ''}" alt="${details.performer_name || ''}" onerror="this.style.display='none'" />
+      <img src="${relativeUrl(details.performer_image_path) || SS.fallbackIconUri('performer')}" alt="${details.performer_name || ''}" onerror="window.StashSense.imgFallback(this,'performer')" />
       <div style="flex:1;">
         <h2 style="margin: 0 0 4px 0;">
           <a href="/performers/${performerId}" target="_blank">${details.performer_name || 'Unknown'}</a>
@@ -5222,8 +5222,8 @@
         <h4>Local Scene</h4>
         <div class="ss-dup-scene-thumb ss-us-local-thumb">
           ${localScreenshotUrl
-            ? `<img src="${escapeHtml(localScreenshotUrl)}" alt="Local scene screenshot" loading="lazy" onerror="this.style.display='none'" />`
-            : '<div class="ss-no-image">No Screenshot</div>'
+            ? `<img src="${escapeHtml(localScreenshotUrl)}" alt="Local scene screenshot" loading="lazy" onerror="window.StashSense.imgFallback(this,'scene')" />`
+            : `<img src="${SS.fallbackIconUri('scene')}" alt="" />`
           }
           ${localPreviewUrl
             ? `<video class="ss-dup-scene-preview ss-us-scene-preview" muted loop preload="none" data-src="${escapeHtml(localPreviewUrl)}"></video>`
@@ -5244,8 +5244,8 @@
         <h4>Stash-Box Match</h4>
         <div class="ss-dup-scene-thumb ss-us-cover-thumb">
           ${upstreamCoverUrl
-            ? `<img src="${escapeHtml(upstreamCoverUrl)}" alt="Stash-Box scene cover" loading="lazy" onerror="this.style.display='none'" />`
-            : '<div class="ss-no-image">No Cover</div>'
+            ? `<img src="${escapeHtml(upstreamCoverUrl)}" alt="Stash-Box scene cover" loading="lazy" onerror="window.StashSense.imgFallback(this,'scene')" />`
+            : `<img src="${SS.fallbackIconUri('scene')}" alt="" />`
           }
         </div>
         <div class="ss-fp-scene-title">
@@ -6513,8 +6513,8 @@
             <h4>Local Scene</h4>
             <div class="ss-dup-scene-thumb ss-fp-local-thumb">
               ${localScreenshotUrl
-                ? `<img src="${localScreenshotUrl}" alt="Local scene screenshot" loading="lazy" onerror="this.style.display='none'" />`
-                : '<div class="ss-no-image">No Screenshot</div>'
+                ? `<img src="${localScreenshotUrl}" alt="Local scene screenshot" loading="lazy" onerror="window.StashSense.imgFallback(this,'scene')" />`
+                : `<img src="${SS.fallbackIconUri('scene')}" alt="" />`
               }
               ${localPreviewUrl
                 ? `<video class="ss-dup-scene-preview ss-fp-scene-preview" muted loop preload="none" data-src="${localPreviewUrl}"></video>`
@@ -6535,8 +6535,8 @@
             <h4>Stash-Box Match</h4>
             <div class="ss-dup-scene-thumb ss-fp-cover-thumb">
               ${stashboxCoverUrl
-                ? `<img src="${escapeHtml(stashboxCoverUrl)}" alt="Stash-Box scene cover" loading="lazy" onerror="this.style.display='none'" />`
-                : '<div class="ss-no-image">No Cover</div>'
+                ? `<img src="${escapeHtml(stashboxCoverUrl)}" alt="Stash-Box scene cover" loading="lazy" onerror="window.StashSense.imgFallback(this,'scene')" />`
+                : `<img src="${SS.fallbackIconUri('scene')}" alt="" />`
               }
             </div>
             <div class="ss-fp-scene-title">
@@ -6946,8 +6946,8 @@
               ${preselect ? 'checked' : ''} ${isCandidatePending ? '' : 'disabled'} />
             <div class="ss-sfm-candidate-thumb">
               ${c.image_url
-                ? `<img src="${escapeHtml(SS.thumbnailUrl(c.image_url))}" alt="${escapeHtml(c.name || '')}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" onerror="this.style.display='none'" />`
-                : '<div class="ss-no-image">No Image</div>'
+                ? `<img src="${escapeHtml(SS.thumbnailUrl(c.image_url))}" alt="${escapeHtml(c.name || '')}" loading="lazy" onload="if(this.naturalWidth>this.naturalHeight)this.parentElement.classList.add('ss-thumb-landscape')" onerror="window.StashSense.imgFallback(this,'performer')" />`
+                : `<img src="${SS.fallbackIconUri('performer')}" alt="" />`
               }
             </div>
           </label>

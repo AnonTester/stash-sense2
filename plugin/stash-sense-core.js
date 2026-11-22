@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.40.2';
+  const PLUGIN_VERSION = '0.41.0';
 
   // Where each half of this project actually ships from on GitHub -- NOT
   // the same repo for both, despite both living in this one monorepo's
@@ -695,6 +695,57 @@
     catch (e) { return url; }
   }
 
+  // Generic "missing image" placeholders for performer headshots and scene
+  // covers -- used wherever a cover/headshot image might not load (a local
+  // file moved/deleted, or -- far more commonly -- an *external* source
+  // photo: the source site/CDN going away, a network issue, the user being
+  // geo/IP-blocked, etc.). Previously these just hid the broken <img> via
+  // onerror="this.style.display='none'", leaving a blank area with no
+  // indication anything was ever there. Same icons (and exact path data)
+  // Stash's own UI uses for its sidebar Performers (fa-user) and Scenes
+  // (fa-circle-play) nav entries, so they read as consistent with the rest
+  // of the app rather than a one-off plugin-specific glyph.
+  //
+  // Implemented as a data: URI swapped onto the SAME <img> element (not a
+  // DOM replacement) specifically so every existing call site's own sizing/
+  // object-fit/border-radius CSS (already set via a class on the <img>
+  // itself in most of these templates) keeps applying unchanged -- no
+  // per-call-site markup changes needed beyond the onerror value itself.
+  const _FALLBACK_ICON_PATHS = {
+    performer: { viewBox: '0 0 448 512', d: 'M224 248a120 120 0 1 0 0-240 120 120 0 1 0 0 240zm-29.7 56C95.8 304 16 383.8 16 482.3 16 498.7 29.3 512 45.7 512l356.6 0c16.4 0 29.7-13.3 29.7-29.7 0-98.5-79.8-178.3-178.3-178.3l-59.4 0z' },
+    scene: { viewBox: '0 0 512 512', d: 'M0 256a256 256 0 1 1 512 0 256 256 0 1 1 -512 0zM188.3 147.1c-7.6 4.2-12.3 12.3-12.3 20.9l0 176c0 8.7 4.7 16.7 12.3 20.9s16.8 4.1 24.3-.5l144-88c7.1-4.4 11.5-12.1 11.5-20.5s-4.4-16.1-11.5-20.5l-144-88c-7.4-4.5-16.7-4.7-24.3-.5z' },
+  };
+  const _fallbackIconCache = {};
+  function fallbackIconUri(kind) {
+    if (_fallbackIconCache[kind]) return _fallbackIconCache[kind];
+    const icon = _FALLBACK_ICON_PATHS[kind] || _FALLBACK_ICON_PATHS.performer;
+    // Centered on a neutral square canvas (not just the bare icon) so it
+    // stays fully visible and centered under object-fit:cover regardless of
+    // the call site's own (often non-square) aspect ratio, instead of
+    // getting cropped like the bare glyph would.
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+      '<rect width="100" height="100" fill="#2a2a2a"/>' +
+      '<svg x="20" y="20" width="60" height="60" viewBox="' + icon.viewBox + '" preserveAspectRatio="xMidYMid meet">' +
+      '<path fill="#666" d="' + icon.d + '"/>' +
+      '</svg></svg>';
+    const uri = 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+    _fallbackIconCache[kind] = uri;
+    return uri;
+  }
+
+  /** Swap a broken <img> to the fallback icon in place of hiding it. `kind`
+   * is 'performer' or 'scene'. Called from inline onerror="..." HTML
+   * attributes (hence exported on window.StashSense, not just the local
+   * module scope those attributes can't see) as
+   * window.StashSense.imgFallback(this, 'performer'|'scene'). */
+  function imgFallback(img, kind) {
+    if (!img) return;
+    const uri = fallbackIconUri(kind);
+    if (img.src === uri) return; // already showing the fallback -- avoid any error-handler loop
+    img.onerror = null;
+    img.src = uri;
+  }
+
   /**
    * Rewrite an external performer match photo (StashDB/catalogue
    * `image_url`, e.g. on a match card or a Face Recommendations candidate)
@@ -785,8 +836,8 @@
         <div class="ss-candidate-card" data-performer-id="${escapeHtml(c.id)}">
           <div class="ss-candidate-card-image">
             ${c.image_path
-              ? `<img src="${escapeHtml(relativeUrl(c.image_path))}" alt="" onerror="this.style.display='none'" />`
-              : '<div class="ss-no-image">No Image</div>'
+              ? `<img src="${escapeHtml(relativeUrl(c.image_path))}" alt="" onerror="window.StashSense.imgFallback(this,'performer')" />`
+              : `<img src="${fallbackIconUri('performer')}" alt="" />`
             }
           </div>
           <div class="ss-candidate-card-body">
@@ -1150,6 +1201,8 @@
     escapeHtml,
     disambHtml,
     relativeUrl,
+    imgFallback,
+    fallbackIconUri,
     reviewableUniversalId,
     thumbnailUrl,
     renderPerformerCandidateCards,

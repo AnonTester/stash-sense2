@@ -1,5 +1,13 @@
 ## 2026-11-22
 
+### 0.41.0 (plugin)
+- Feature: every performer headshot and scene cover image that might not load (most commonly an external
+  stash-box/catalogue source photo whose site/CDN is down, blocked, or gone) now falls back to a generic
+  placeholder icon (the same fa-user / fa-circle-play glyphs Stash's own sidebar uses) instead of leaving a
+  blank area -- applied everywhere a performer or scene image is rendered across the plugin (match
+  candidates, duplicate-performer/scene comparisons, Upstream Changes, Scene Stash-Box Tagger, conflict
+  resolution), not just one spot.
+
 ### 0.40.2 (plugin)
 - Fix: the Scene Stash-Box Tagger list card's match-percentage color only showed green at a strict 100% --
   a multi-hour file landing at 99.9% from a few seconds just over the new duration-agreement tolerance (see
