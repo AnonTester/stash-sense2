@@ -26,6 +26,22 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
         if not connections:
             return AnalysisResult(items_processed=0, recommendations_created=0)
 
+        # Sort by the user's configured endpoint priority (same setting/pattern
+        # as every upstream_* analyzer -- see base_upstream.py's run()) so that
+        # when the same local scene matches on more than one endpoint, the
+        # preferred one is processed first. Processing order alone doesn't
+        # decide which recommendation wins display/accept priority (see
+        # endpoint_priority below and recommendations_db.py's sort), but it
+        # keeps this analyzer consistent with the rest of the codebase.
+        priority_order = self.rec_db.get_endpoint_priorities()
+        priority_map: dict[str, int] = {}
+        if priority_order:
+            priority_map = {ep: i for i, ep in enumerate(priority_order)}
+            connections = sorted(
+                connections,
+                key=lambda c: priority_map.get(c["endpoint"], len(priority_order)),
+            )
+
         # Manual/full scans should rebuild pending recommendations from scratch
         # so stale entries (e.g. scenes linked after previous runs) disappear.
         if not incremental:
@@ -55,9 +71,10 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
             endpoint = conn["endpoint"]
             api_key = conn.get("api_key", "")
             endpoint_name = conn.get("name", endpoint)
+            endpoint_priority = priority_map.get(endpoint, len(priority_order) if priority_order else 999)
 
             processed, created = await self._process_endpoint(
-                endpoint, api_key, endpoint_name,
+                endpoint, api_key, endpoint_name, endpoint_priority,
                 incremental, min_count, min_percentage,
             )
             total_processed += processed
@@ -73,6 +90,7 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
         endpoint: str,
         api_key: str,
         endpoint_name: str,
+        endpoint_priority: int,
         incremental: bool,
         min_count: int,
         min_percentage: int,
@@ -254,6 +272,8 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                         matching_fingerprints=matching_fps,
                         total_local_fingerprints=len(local_fps),
                         local_duration=local_duration or 0,
+                        all_remote_fingerprints=match.get("fingerprints") or [],
+                        remote_scene_duration=match.get("duration"),
                     )
 
                     high_conf = (
@@ -263,6 +283,7 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                             score_result["match_percentage"],
                             min_count=min_count,
                             min_percentage=min_percentage,
+                            duration_mismatch=score_result["duration_mismatch"],
                         )
                     )
 
@@ -292,6 +313,7 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                         "local_scene_title": scene.get("title") or f"Scene {scene['id']}",
                         "endpoint": endpoint,
                         "endpoint_name": endpoint_name,
+                        "endpoint_priority": endpoint_priority,
                         "stashbox_scene_id": match["id"],
                         "stashbox_scene_title": match.get("title"),
                         "stashbox_studio": stashbox_studio_name,
@@ -312,6 +334,10 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
                         "duration_agreement": score_result["duration_agreement"],
                         "duration_diff": score_result["duration_diff"],
                         "total_submissions": score_result["total_submissions"],
+                        "canonical_duration_remote": score_result["canonical_duration_remote"],
+                        "canonical_duration_submissions": score_result["canonical_duration_submissions"],
+                        "canonical_duration_diff": score_result["canonical_duration_diff"],
+                        "duration_mismatch": score_result["duration_mismatch"],
                         "high_confidence": high_conf,
                     }
 

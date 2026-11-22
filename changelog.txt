@@ -1,3 +1,29 @@
+## 2026-11-22
+
+### 0.49.0 (sidecar)
+- Fix: Scene Stash-Box Tagger now respects the configured endpoint priority (Settings' endpoint-priority
+  order, already used by every upstream_* sync) when more than one stash-box endpoint matches the same
+  local scene -- previously the tie between two equally high-confidence candidates was broken by scan
+  processing order (created_at), not the user's preference, so a lower-priority endpoint's match could win
+  both display order and the "Accept All" bulk action over the preferred one.
+- Feature: accepting a Scene Stash-Box Tagger match now also pulls the rest of the matched scene's metadata
+  (title/date/studio/performers/tags) onto the local scene, reusing the same diff/apply pipeline Upstream
+  Scene Changes already uses -- previously accept only linked the stash_id, leaving the user to immediately
+  re-scrape the same scene by hand to get anything else. Respects the existing upstream-scene performer
+  gender filters automatically (same underlying pipeline). An ambiguous added performer leaves the stash_id
+  link in place but skips the metadata apply, surfaced for manual resolution via Upstream Scene Changes.
+- Feature: a fingerprint hash match is no longer treated as unconditional 100% confidence when the matched
+  stash-box scene's dominant (most-submitted) duration disagrees significantly with the local file's
+  duration -- confidence is now scaled down by the relative gap, and the match is no longer flagged
+  high-confidence once that gap crosses ~10%, regardless of how many fingerprints matched.
+
+### 0.40.0 (plugin)
+- Fix: long, unbroken (dot/underscore-separated, filename-style) scene titles on the Scene Stash-Box Tagger
+  list cards could overflow the card and break mobile layout -- now wraps using the same `<wbr>`-insertion
+  helper other recommendation cards already use for this.
+- Feature: Scene Stash-Box Tagger cards and detail view now show a duration-mismatch warning (with the
+  local and the scene's typical submitted duration) when the new sidecar-side penalty above applies.
+
 ## 2026-11-09
 
 ### 0.6.0 (userscript)

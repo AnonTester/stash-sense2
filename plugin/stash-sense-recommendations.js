@@ -2560,11 +2560,12 @@
             </div>
             <div class="ss-rec-card-info">
               <div class="ss-rec-card-title">
-                ${escapeHtml(d.local_scene_title || 'Unknown Scene')}
+                ${escapeHtmlBreakable(d.local_scene_title || 'Unknown Scene')}
                 ${d.high_confidence ? '<span class="ss-badge ss-badge-success">High Confidence</span>' : ''}
+                ${d.duration_mismatch ? '<span class="ss-badge ss-badge-warning">Duration Mismatch</span>' : ''}
               </div>
               <div class="ss-rec-card-subtitle">
-                &rarr; ${escapeHtml(d.stashbox_scene_title || 'Unknown')}
+                &rarr; ${escapeHtmlBreakable(d.stashbox_scene_title || 'Unknown')}
                 ${d.stashbox_studio ? ` &middot; ${escapeHtml(d.stashbox_studio)}${d.stashbox_studio_original ? ` (aka ${escapeHtml(d.stashbox_studio_original)})` : ''}` : ''}
               </div>
               <div class="ss-rec-card-fields" style="color: ${matchColor}">
@@ -2572,6 +2573,11 @@
                 ${d.has_exact_hash ? '(exact)' : '(phash only)'}
                 &middot; ${escapeHtml(d.endpoint_name || d.endpoint || '')}
               </div>
+              ${d.duration_mismatch ? `<div class="ss-rec-card-fields ss-fp-duration-warning">
+                &#9888; Local ${d.duration_local ? formatDuration(d.duration_local) : '?'} vs. scene's typical
+                ${d.canonical_duration_remote ? formatDuration(d.canonical_duration_remote) : '?'}
+                ${d.canonical_duration_submissions ? `(${d.canonical_duration_submissions} submissions)` : ''}
+              </div>` : ''}
             </div>
           </div>
         `,
@@ -6470,7 +6476,15 @@
           <span class="ss-badge ${d.high_confidence ? 'ss-badge-success' : 'ss-badge-warning'}">
             ${d.high_confidence ? 'High Confidence' : 'Review Recommended'}
           </span>
+          ${d.duration_mismatch ? '<span class="ss-badge ss-badge-warning">Duration Mismatch</span>' : ''}
         </div>
+        ${d.duration_mismatch ? `<div class="ss-fp-duration-warning">
+          &#9888; Local file is ${d.duration_local ? formatDuration(d.duration_local) : 'unknown'}, but this
+          scene's typical (most-submitted) duration is
+          ${d.canonical_duration_remote ? formatDuration(d.canonical_duration_remote) : 'unknown'}
+          ${d.canonical_duration_submissions ? `(${d.canonical_duration_submissions} submissions)` : ''} —
+          this may be a different cut of the same scene.
+        </div>` : ''}
 
         <div class="ss-fp-detail-comparison">
           <div class="ss-fp-detail-side">
@@ -6606,7 +6620,10 @@
         // detail view that now confusingly reports them "dismissed") until
         // some unrelated full refetch caught up.
         (result?.auto_dismissed_rec_ids || []).forEach(removeFromListCache);
-        showSuccessAndReturn(acceptBtn, 'Accepted!', rec.id);
+        const successMsg = result?.metadata_applied === false
+          ? 'Linked — metadata needs manual review in Upstream Scene Changes'
+          : 'Accepted!';
+        showSuccessAndReturn(acceptBtn, successMsg, rec.id);
       } catch (e) {
         acceptBtn.textContent = `Failed: ${e.message}`;
         acceptBtn.classList.add('ss-btn-error');

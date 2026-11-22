@@ -1102,8 +1102,21 @@ class RecommendationsDB:
         if status in ("dismissed", "resolved"):
             query += " ORDER BY COALESCE(resolved_at, updated_at) DESC, id DESC LIMIT ? OFFSET ?"
         elif type == "scene_fingerprint_match":
+            # endpoint_priority (lower = more preferred, see
+            # SceneFingerprintMatchAnalyzer.run()) is sorted ahead of raw
+            # confidence: when the same local scene has a high-confidence
+            # candidate on more than one endpoint, the user's configured
+            # preferred endpoint must win both the list view and
+            # _accept_all_fingerprint_matches' bulk-accept selection (which
+            # just takes whichever pending rec per scene this ordering hands
+            # it first) -- not whichever endpoint happened to score a
+            # fractionally higher percentage or get processed later in the
+            # scan. Confirmed live 2026-11-22: a tied 100%/high-confidence
+            # StashDB match lost to TPDB's because created_at DESC alone
+            # broke the tie by scan order, not by configured priority.
             query += (
                 " ORDER BY COALESCE(json_extract(details, '$.high_confidence'), 0) DESC, "
+                "COALESCE(json_extract(details, '$.endpoint_priority'), 999) ASC, "
                 "COALESCE(confidence, 0) DESC, created_at DESC, id DESC LIMIT ? OFFSET ?"
             )
         elif type == "duplicate_scenes":

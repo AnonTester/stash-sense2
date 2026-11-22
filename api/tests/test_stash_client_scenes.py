@@ -176,3 +176,67 @@ class TestGetSceneById:
             scene = await client.get_scene_by_id("999")
 
             assert scene is None
+
+
+class TestGetSceneForUpstreamSync:
+    """Tests for get_scene_for_upstream_sync -- the full-shape single-scene
+    fetch (performers/tags/studio each with their own stash_ids, plus
+    details/director/code/urls) UpstreamSceneAnalyzer._build_local_data()
+    needs, which get_scene_by_id() (a lighter player/display query) is
+    missing. Used to sync full metadata onto a scene right after a Scene
+    Stash-Box Tagger accept links it."""
+
+    @pytest.mark.asyncio
+    async def test_returns_scene_with_nested_stash_ids(self):
+        from stash_client_unified import StashClientUnified
+
+        client = StashClientUnified("http://localhost:9999")
+
+        mock_response = {
+            "findScene": {
+                "id": "42",
+                "title": "Test Scene",
+                "date": "2024-01-15",
+                "details": "Some details",
+                "director": "A Director",
+                "code": "ABC-123",
+                "urls": ["https://example.com/scene/42"],
+                "studio": {
+                    "id": "s1", "name": "Test Studio",
+                    "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "studio-sb-1"}],
+                },
+                "performers": [
+                    {"id": "p1", "name": "Performer One",
+                     "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "perf-sb-1"}]},
+                ],
+                "tags": [
+                    {"id": "t1", "name": "Tag One",
+                     "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "tag-sb-1"}]},
+                ],
+                "stash_ids": [{"endpoint": "https://stashdb.org/graphql", "stash_id": "sb-uuid-1"}],
+            }
+        }
+
+        with patch.object(client, "_execute", new_callable=AsyncMock) as mock_execute:
+            mock_execute.return_value = mock_response
+
+            scene = await client.get_scene_for_upstream_sync("42")
+
+            assert scene is not None
+            assert scene["id"] == "42"
+            assert scene["studio"]["stash_ids"][0]["stash_id"] == "studio-sb-1"
+            assert scene["performers"][0]["stash_ids"][0]["stash_id"] == "perf-sb-1"
+            assert scene["tags"][0]["stash_ids"][0]["stash_id"] == "tag-sb-1"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_not_found(self):
+        from stash_client_unified import StashClientUnified
+
+        client = StashClientUnified("http://localhost:9999")
+
+        with patch.object(client, "_execute", new_callable=AsyncMock) as mock_execute:
+            mock_execute.return_value = {"findScene": None}
+
+            scene = await client.get_scene_for_upstream_sync("999")
+
+            assert scene is None

@@ -295,6 +295,63 @@ class TestGetRecommendations:
         dismissed = db.get_recommendations(type="scene_fingerprint_match", status="dismissed")
         assert [r.target_id for r in dismissed] == ["d_mid", "d_high", "d_low"]
 
+    def test_scene_fingerprint_match_endpoint_priority_breaks_confidence_tie(self, db):
+        """Confirmed live 2026-11-22: a local scene with a tied 100%/
+        high-confidence match on both StashDB and TPDB resolved to TPDB
+        instead of the user's configured #1 priority (StashDB), because the
+        sort only broke ties by created_at (scan processing order), with no
+        awareness of endpoint_priority at all. endpoint_priority (lower =
+        more preferred, see SceneFingerprintMatchAnalyzer.run()) now sorts
+        ahead of raw confidence, but still behind high_confidence -- a weak,
+        non-high-confidence match on the preferred endpoint must not jump
+        ahead of a strong high-confidence match elsewhere, but among
+        candidates that are ALL already high-confidence, priority rank
+        decides regardless of how much higher one's raw confidence is --
+        that's the whole point of the feature (the user's chosen source
+        shouldn't lose to a fractionally higher score elsewhere)."""
+        _make_rec(
+            db, type="scene_fingerprint_match", target_type="scene", target_id="tpdb_tied",
+            details={"high_confidence": True, "endpoint_priority": 1}, confidence=1.0,
+        )
+        _make_rec(
+            db, type="scene_fingerprint_match", target_type="scene", target_id="stashdb_tied",
+            details={"high_confidence": True, "endpoint_priority": 0}, confidence=1.0,
+        )
+
+        pending = db.get_recommendations(type="scene_fingerprint_match", status="pending")
+        assert [r.target_id for r in pending] == ["stashdb_tied", "tpdb_tied"]
+
+        # A weak match on the preferred endpoint must not outrank a strong
+        # high-confidence match elsewhere -- high_confidence still wins first.
+        # But a *high-confidence* match elsewhere, even with much higher raw
+        # confidence, still ranks behind both already-high-confidence
+        # preferred-endpoint matches above -- priority beats magnitude once
+        # a candidate already clears the high-confidence bar.
+        _make_rec(
+            db, type="scene_fingerprint_match", target_type="scene", target_id="weak_preferred",
+            details={"high_confidence": False, "endpoint_priority": 0}, confidence=0.40,
+        )
+        _make_rec(
+            db, type="scene_fingerprint_match", target_type="scene", target_id="strong_other",
+            details={"high_confidence": True, "endpoint_priority": 3}, confidence=0.90,
+        )
+
+        pending = db.get_recommendations(type="scene_fingerprint_match", status="pending")
+        assert [r.target_id for r in pending] == [
+            "stashdb_tied", "tpdb_tied", "strong_other", "weak_preferred",
+        ]
+
+        # No endpoint_priority at all (pre-fix recs, or an endpoint not in
+        # the configured priority list) falls back to the lowest priority
+        # (999) -- never silently outranks a rec that does carry a real rank.
+        _make_rec(
+            db, type="scene_fingerprint_match", target_type="scene", target_id="no_priority_field",
+            details={"high_confidence": True}, confidence=1.0,
+        )
+        pending = db.get_recommendations(type="scene_fingerprint_match", status="pending")
+        high_conf_pending = [r for r in pending if (r.details or {}).get("high_confidence")]
+        assert high_conf_pending[-1].target_id == "no_priority_field"
+
 
 # ==================== count_recommendations ====================
 

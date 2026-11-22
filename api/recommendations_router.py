@@ -4448,23 +4448,115 @@ class AcceptFingerprintMatchRequest(BaseModel):
     stash_id: str
 
 
+async def _sync_full_scene_metadata_after_link(
+    stash, db, scene_id: str, endpoint: str, stashbox_id: str,
+) -> dict:
+    """After a Scene Stash-Box Tagger (fingerprint match) accept links stash_ids,
+    pull the rest of the matched scene's metadata (title/date/studio/performers/
+    tags) onto the local scene too -- otherwise the user has to immediately
+    re-scrape the same scene by hand to get anything beyond the bare link.
+
+    Reuses the exact diff/apply pipeline upstream_scene_changes recommendations
+    already use (UpstreamSceneAnalyzer + _apply_full_scene_recommendation)
+    rather than a hand-rolled metadata copy -- that's also what makes this
+    automatically respect the upstream_scene_gender_<gender>_enabled settings
+    (_diff_fields -> _filter_performer_changes_by_gender runs before any
+    performer ever reaches here), the same as every regular upstream scene
+    sync. A naive direct copy of the recommendation's stashbox_performer_links
+    would bypass that setting entirely.
+
+    Returns {"applied": True} on success (including "nothing to change"), or
+    {"applied": False, "reason": ..., "ambiguous": [...] (only for
+    reason="ambiguous_performer")}. Never raises -- a metadata-sync failure
+    must never undo or block the stash_id link that already succeeded.
+    """
+    try:
+        connections = await stash.get_stashbox_connections()
+        conn = next((c for c in connections if c.get("endpoint") == endpoint), None)
+        api_key = conn.get("api_key", "") if conn else ""
+        endpoint_name = conn.get("name", endpoint) if conn else endpoint
+
+        analyzer = UpstreamSceneAnalyzer(stash, db)
+        analyzer._current_endpoint = endpoint
+        await analyzer._build_name_lookups()
+
+        sbc = analyzer._create_stashbox_client(endpoint, api_key)
+        upstream_raw = await analyzer._get_upstream_entity(sbc, stashbox_id)
+        if not upstream_raw:
+            return {"applied": False, "reason": "upstream_not_found"}
+
+        local_scene = await stash.get_scene_for_upstream_sync(scene_id)
+        if not local_scene:
+            return {"applied": False, "reason": "local_scene_not_found"}
+
+        normalized = analyzer._normalize_upstream(upstream_raw)
+        local_data = analyzer._build_local_data(local_scene)
+        enabled_fields = db.get_enabled_fields(endpoint, analyzer.entity_type)
+        if enabled_fields is None:
+            enabled_fields = analyzer._get_default_fields()
+        snapshot_row = db.get_upstream_snapshot(
+            entity_type=analyzer.entity_type, endpoint=endpoint, stash_box_id=stashbox_id,
+        )
+        snapshot = snapshot_row["upstream_data"] if snapshot_row else None
+
+        changes = analyzer._diff_fields(local_data, normalized, snapshot, enabled_fields)
+        if not changes:
+            return {"applied": True, "reason": "no_differences"}
+
+        updated_at = analyzer._get_upstream_updated_at(upstream_raw)
+        details = analyzer._build_recommendation_details(
+            endpoint=endpoint,
+            endpoint_name=endpoint_name,
+            stash_box_id=stashbox_id,
+            local_entity=local_scene,
+            updated_at=updated_at,
+            changes=changes,
+        )
+
+        rec_id = analyzer.create_recommendation(
+            target_type="scene",
+            target_id=str(scene_id),
+            details=details,
+            confidence=1.0,
+        )
+        if not rec_id:
+            return {"applied": False, "reason": "sync_failed"}
+
+        new_rec = db.get_recommendation(rec_id)
+        apply_result = await _apply_full_scene_recommendation(stash, db, new_rec)
+        if "ambiguous" in apply_result:
+            return {"applied": False, "reason": "ambiguous_performer", "ambiguous": apply_result["ambiguous"]}
+        return {"applied": True}
+    except Exception as e:
+        logger.warning(
+            "Metadata sync after fingerprint-match accept failed for scene %s "
+            "(endpoint %s, stashbox %s): %s",
+            scene_id, endpoint, stashbox_id, e, exc_info=True,
+        )
+        return {"applied": False, "reason": "sync_failed"}
+
+
 async def _accept_fingerprint_match(
     stash, db, rec_id: int, scene_id: str, endpoint: str, stash_id: str,
-) -> list[int]:
-    """Accept a fingerprint match: add stash_id to local scene, resolve rec.
+) -> dict:
+    """Accept a fingerprint match: add stash_id to local scene, sync the rest
+    of its metadata, resolve rec.
 
-    Returns the ids of any *other* pending scene_fingerprint_match
-    recommendations for the same local scene that got auto-dismissed as a
-    side effect (see dismiss_pending_scene_fingerprint_for_scene) -- a
-    caller that maintains its own cache of pending recommendations needs
-    these too, not just rec_id, or those siblings keep showing as pending
-    until an unrelated full refetch happens to catch up.
+    Returns {"auto_dismissed_rec_ids": [...], **sync_result} -- the ids are of
+    any *other* pending scene_fingerprint_match recommendations for the same
+    local scene that got auto-dismissed as a side effect (see
+    dismiss_pending_scene_fingerprint_for_scene) -- a caller that maintains
+    its own cache of pending recommendations needs these too, not just
+    rec_id, or those siblings keep showing as pending until an unrelated full
+    refetch happens to catch up. sync_result is
+    _sync_full_scene_metadata_after_link's own return value, spread in so a
+    caller gets "applied"/"reason"/"ambiguous" without extra nesting.
     """
     rec = db.get_recommendation(rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recommendation not found")
     if rec.status != "pending":
-        return []
+        return {"auto_dismissed_rec_ids": [], "applied": False, "reason": "not_pending"}
 
     scene = await stash.get_scene_by_id(scene_id)
     existing_stash_ids = scene.get("stash_ids") or []
@@ -4480,14 +4572,17 @@ async def _accept_fingerprint_match(
 
     db.resolve_recommendation(rec_id, action="accepted")
 
+    sync_result = await _sync_full_scene_metadata_after_link(stash, db, scene_id, endpoint, stash_id)
+
     # Accepting one match for a local scene should dismiss all other pending
     # matches for that same scene (across endpoints).
     scene_id_str = str(scene_id)
-    return db.dismiss_pending_scene_fingerprint_for_scene(
+    auto_dismissed_rec_ids = db.dismiss_pending_scene_fingerprint_for_scene(
         scene_id=scene_id_str,
         exclude_rec_id=rec_id,
         reason=f"Auto-dismissed after accepting scene fingerprint match for local scene {scene_id_str}",
     )
+    return {"auto_dismissed_rec_ids": auto_dismissed_rec_ids, **sync_result}
 
 
 class AcceptFingerprintMatchResponse(BaseModel):
@@ -4496,6 +4591,13 @@ class AcceptFingerprintMatchResponse(BaseModel):
     # local scene that were auto-dismissed as a side effect of this accept
     # -- see _accept_fingerprint_match's own docstring.
     auto_dismissed_rec_ids: list[int] = []
+    # Whether _sync_full_scene_metadata_after_link actually applied the
+    # matched scene's metadata (title/date/studio/performers/tags), beyond
+    # just linking stash_ids. False with a reason ("ambiguous_performer",
+    # "sync_failed", "upstream_not_found", "local_scene_not_found") means the
+    # link itself still succeeded -- only the metadata sync didn't.
+    metadata_applied: bool = True
+    metadata_reason: Optional[str] = None
 
 
 @router.post("/actions/accept-fingerprint-match", response_model=AcceptFingerprintMatchResponse)
@@ -4504,14 +4606,19 @@ async def accept_fingerprint_match(request: AcceptFingerprintMatchRequest):
     logger.debug("Action: accept-fingerprint-match rec_id=%s scene_id=%s stash_id=%s", request.recommendation_id, request.scene_id, request.stash_id)
     stash = get_stash_client()
     db = get_rec_db()
-    auto_dismissed_rec_ids = await _accept_fingerprint_match(
+    result = await _accept_fingerprint_match(
         stash, db,
         rec_id=request.recommendation_id,
         scene_id=request.scene_id,
         endpoint=request.endpoint,
         stash_id=request.stash_id,
     )
-    return {"success": True, "auto_dismissed_rec_ids": auto_dismissed_rec_ids}
+    return {
+        "success": True,
+        "auto_dismissed_rec_ids": result.get("auto_dismissed_rec_ids", []),
+        "metadata_applied": result.get("applied", True),
+        "metadata_reason": result.get("reason"),
+    }
 
 
 class AcceptAllFingerprintMatchesRequest(BaseModel):

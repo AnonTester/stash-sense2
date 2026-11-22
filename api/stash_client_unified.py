@@ -591,6 +591,58 @@ class StashClientUnified:
         data = await self._execute(query, variables)
         return data["findScenes"]["scenes"]
 
+    async def get_scene_for_upstream_sync(self, scene_id: str) -> Optional[dict]:
+        """Get one scene in the same full shape get_scenes_for_endpoint() returns
+        (performers/tags/studio each with their own stash_ids) -- unlike
+        get_scene_by_id(), which is a lighter player/display query missing
+        details/director/code/urls and the nested stash_ids UpstreamSceneAnalyzer's
+        _build_local_data() needs. Used to sync full metadata onto a scene right
+        after a Scene Stash-Box Tagger (fingerprint match) accept links it, via
+        the same diff/apply pipeline upstream_scene_changes recommendations use."""
+        query = """
+        query SceneForUpstreamSync($id: ID!) {
+          findScene(id: $id) {
+            id
+            title
+            date
+            details
+            director
+            code
+            urls
+            studio {
+              id
+              name
+              stash_ids {
+                endpoint
+                stash_id
+              }
+            }
+            performers {
+              id
+              name
+              stash_ids {
+                endpoint
+                stash_id
+              }
+            }
+            tags {
+              id
+              name
+              stash_ids {
+                endpoint
+                stash_id
+              }
+            }
+            stash_ids {
+              endpoint
+              stash_id
+            }
+          }
+        }
+        """
+        data = await self._execute(query, {"id": scene_id})
+        return data.get("findScene")
+
     async def update_scene(self, scene_id: str, **fields) -> dict:
         """Generic scene update via SceneUpdateInput mutation."""
         query = """

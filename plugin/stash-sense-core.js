@@ -23,7 +23,7 @@
   // change this constant to match.
   const PLUGIN_ID = 'stash-sense2';
   const PLUGIN_NAME = 'Stash Sense 2';
-  const PLUGIN_VERSION = '0.39.7';
+  const PLUGIN_VERSION = '0.40.0';
 
   // Where each half of this project actually ships from on GitHub -- NOT
   // the same repo for both, despite both living in this one monorepo's

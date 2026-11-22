@@ -2460,6 +2460,13 @@
   white-space: nowrap;
 }
 
+.ss-fp-duration-warning {
+  color: #ffc107;
+  margin-top: 2px;
+  margin-bottom: 0.75rem;
+  overflow-wrap: break-word;
+}
+
 /* Name conflict comparison */
 .ss-conflict-comparison {
   display: grid;
