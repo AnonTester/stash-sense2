@@ -2548,7 +2548,11 @@
 
     if (rec.type === 'scene_fingerprint_match') {
       const d = details;
-      const matchColor = d.match_percentage >= 100 ? '#28a745' :
+      // >=99, not a strict 100, so a fractional duration-mismatch penalty
+      // (e.g. a multi-hour file landing at 99.9% from a few seconds just
+      // over the agreement tolerance -- see scene_fingerprint_scoring.py)
+      // doesn't flip an otherwise-correct match to yellow.
+      const matchColor = d.match_percentage >= 99 ? '#28a745' :
                          d.match_percentage >= 66 ? '#ffc107' : '#dc3545';
 
       return SS.createElement('div', {

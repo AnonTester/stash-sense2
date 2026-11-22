@@ -1,5 +1,10 @@
 ## 2026-11-22
 
+### 0.40.2 (plugin)
+- Fix: the Scene Stash-Box Tagger list card's match-percentage color only showed green at a strict 100% --
+  a multi-hour file landing at 99.9% from a few seconds just over the new duration-agreement tolerance (see
+  0.49.1) showed yellow even though it's a correct match. Green now starts at >=99%.
+
 ### 0.49.1 (sidecar)
 - Fix: the endpoint-priority fix below (0.49.0) only worked when the stash-sense2-specific endpoint-priority
   setting was explicitly configured -- with no explicit setting (this deployment's own actual state), every
