@@ -282,13 +282,22 @@ class TestEndpointPriority:
         assert priorities_by_endpoint["https://stashdb.org/graphql"] == 1
 
     @pytest.mark.asyncio
-    async def test_no_priorities_configured_defaults_to_999(self):
-        """With no endpoint_priorities set (the common case), every
-        recommendation still gets a defined endpoint_priority -- the
-        recommendations_db.py sort's COALESCE(..., 999) fallback expects a
-        real (if arbitrary) rank, not a missing field."""
+    async def test_no_priorities_configured_falls_back_to_connection_order(self):
+        """Confirmed live 2026-11-22: this system had never explicitly set
+        stash-sense2's own endpoint_priorities setting -- get_endpoint_
+        priorities() returns [] -- so the first fix attempt (defaulting
+        every endpoint_priority to the same flat 999) left every endpoint
+        tied and did nothing for exactly the system it was built for. With
+        no explicit priority, get_stashbox_connections()'s own order (Stash's
+        Settings > Stash-boxes list order -- what a user without the extra
+        setting actually means by "my first configured stash-box") must be
+        the implicit priority instead."""
         db = make_mock_db()
-        stash = make_mock_stash()
+        stash = AsyncMock()
+        stash.get_stashbox_connections.return_value = [
+            {"endpoint": "https://stashdb.org/graphql", "api_key": "", "name": "StashDB"},
+            {"endpoint": "https://theporndb.net/graphql", "api_key": "", "name": "TPDB"},
+        ]
         stash.get_scenes_with_fingerprints.return_value = (
             [make_scene("42", "My Scene", [{"type": "md5", "value": "abc123"}])], 1,
         )
@@ -305,8 +314,12 @@ class TestEndpointPriority:
             analyzer = SceneFingerprintMatchAnalyzer(stash, db)
             await analyzer.run(incremental=False)
 
-        details = db.create_recommendation.call_args[1]["details"]
-        assert details["endpoint_priority"] == 999
+        priorities_by_endpoint = {
+            call[1]["details"]["endpoint"]: call[1]["details"]["endpoint_priority"]
+            for call in db.create_recommendation.call_args_list
+        }
+        assert priorities_by_endpoint["https://stashdb.org/graphql"] == 0
+        assert priorities_by_endpoint["https://theporndb.net/graphql"] == 1
 
 
 class TestAcceptAction:

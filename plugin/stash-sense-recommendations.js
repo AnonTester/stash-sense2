@@ -6469,6 +6469,24 @@
       : (d.stashbox_performers || []).map((name) => ({ id: null, name }));
     const upstreamPerformerLinks = renderUpstreamPerformerLinks(upstreamPerformers);
 
+    // Show the scene's typical (most-submitted) duration here, not the raw
+    // duration_remote scene-level field -- that field can be stale/wrong for
+    // a scene with more than one submitted cut, and it's NOT what the
+    // duration-mismatch check above is actually computed against (see
+    // scene_fingerprint_scoring.py's canonical-duration logic). Showing the
+    // scene field here while scoring against a different number is exactly
+    // what made a real match (rec 42653, confirmed live 2026-11-22: local
+    // 129:36 vs. the scene's own stale 79:55 field, but 129:31 across 286
+    // actual fingerprint submissions) look like an unexplained mismatch.
+    let remoteDurationHtml;
+    if (d.canonical_duration_remote) {
+      remoteDurationHtml = `<div class="ss-fp-field"><strong>Duration:</strong> ${formatDuration(d.canonical_duration_remote)}` +
+        (d.canonical_duration_submissions ? ` <span class="ss-fp-duration-note">(most-submitted, ${d.canonical_duration_submissions} fingerprint submissions)</span>` : '') +
+        `</div>`;
+    } else {
+      remoteDurationHtml = `<div class="ss-fp-field"><strong>Duration:</strong> ${d.duration_remote ? formatDuration(d.duration_remote) : 'N/A'}</div>`;
+    }
+
     container.innerHTML = `
       <div class="ss-fp-detail">
         <div class="ss-fp-detail-header">
@@ -6523,7 +6541,7 @@
             ${upstreamStudioLink ? `<div class="ss-fp-field"><strong>Studio:</strong> ${upstreamStudioLink}</div>` : ''}
             ${upstreamPerformerLinks ? `<div class="ss-fp-field"><strong>Performers:</strong> ${upstreamPerformerLinks}</div>` : ''}
             ${d.stashbox_date ? `<div class="ss-fp-field"><strong>Date:</strong> ${d.stashbox_date}</div>` : ''}
-            <div class="ss-fp-field"><strong>Duration:</strong> ${d.duration_remote ? formatDuration(d.duration_remote) : 'N/A'}</div>
+            ${remoteDurationHtml}
             <div class="ss-fp-field">
               <strong>Endpoint:</strong>
               <a class="ss-detail-entity-link" href="${escapeHtml(stashboxSceneHref)}" target="_blank" rel="noopener">${escapeHtml(d.endpoint_name || d.endpoint)}</a>

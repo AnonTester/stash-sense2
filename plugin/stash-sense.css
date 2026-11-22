@@ -4186,6 +4186,11 @@ a.ss-upstream-endpoint-badge:hover {
   color: var(--bs-body-color, #fff);
 }
 
+.ss-fp-duration-note {
+  font-size: 0.8em;
+  opacity: 0.75;
+}
+
 .ss-detail-entity-link {
   color: var(--bs-primary, #0d6efd);
   text-decoration: none;

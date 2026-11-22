@@ -27,20 +27,25 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
             return AnalysisResult(items_processed=0, recommendations_created=0)
 
         # Sort by the user's configured endpoint priority (same setting/pattern
-        # as every upstream_* analyzer -- see base_upstream.py's run()) so that
-        # when the same local scene matches on more than one endpoint, the
-        # preferred one is processed first. Processing order alone doesn't
-        # decide which recommendation wins display/accept priority (see
-        # endpoint_priority below and recommendations_db.py's sort), but it
-        # keeps this analyzer consistent with the rest of the codebase.
+        # as every upstream_* analyzer -- see base_upstream.py's run()). When
+        # that's NOT explicitly set (get_endpoint_priorities() == [], the
+        # common case -- confirmed live 2026-11-22 this system has never set
+        # it), fall back to the connections' own natural order --
+        # get_stashbox_connections() already returns Stash's own Settings >
+        # Stash-boxes list order, which is what a user without this extra
+        # setting actually means by "my first configured stash-box" (e.g.
+        # StashDB listed first there). Without this fallback every endpoint
+        # would tie at the same default rank and the fix below would do
+        # nothing for exactly the system it was built for.
         priority_order = self.rec_db.get_endpoint_priorities()
-        priority_map: dict[str, int] = {}
         if priority_order:
             priority_map = {ep: i for i, ep in enumerate(priority_order)}
             connections = sorted(
                 connections,
                 key=lambda c: priority_map.get(c["endpoint"], len(priority_order)),
             )
+        else:
+            priority_map = {c["endpoint"]: i for i, c in enumerate(connections)}
 
         # Manual/full scans should rebuild pending recommendations from scratch
         # so stale entries (e.g. scenes linked after previous runs) disappear.
@@ -71,7 +76,7 @@ class SceneFingerprintMatchAnalyzer(BaseAnalyzer):
             endpoint = conn["endpoint"]
             api_key = conn.get("api_key", "")
             endpoint_name = conn.get("name", endpoint)
-            endpoint_priority = priority_map.get(endpoint, len(priority_order) if priority_order else 999)
+            endpoint_priority = priority_map.get(endpoint, 999)
 
             processed, created = await self._process_endpoint(
                 endpoint, api_key, endpoint_name, endpoint_priority,
